@@ -31,6 +31,8 @@ class AnalysisResult:
         hazard_ratios: pd.DataFrame,
         lifespan_stats: dict | None = None,
         assume_censored: bool = True,
+        excluded_chambers: set | None = None,
+        defined_plots: list[list[str]] | None = None,
     ):
         self.input_file = input_file
         self.factors = factors
@@ -44,38 +46,76 @@ class AnalysisResult:
         self.hazard_ratios = hazard_ratios
         self.lifespan_stats = lifespan_stats or {}
         self.assume_censored = assume_censored
+        self.excluded_chambers: set = excluded_chambers or set()
+        self.defined_plots: list[list[str]] = defined_plots or []
         self.cox_analyses: list[dict] = []
 
 
 def run_analysis(
-    excel_path: str | Path,
+    input_path: str | Path,
     output_dir: Optional[str | Path] = None,
     assume_censored: bool = True,
+    # CSV-specific parameters
+    time_col: str = "Age",
+    event_col: str = "Event",
+    factor_cols: list[str] | None = None,
+    csv_format: str = "auto",
+    col_mapping: list[dict] | None = None,
+    factor_names: list[str] | None = None,
+    factor_levels: dict[str, list] | None = None,
 ) -> AnalysisResult:
     """Run the complete survival analysis pipeline.
 
     Parameters
     ----------
-    excel_path : path to the experiment Excel file
-    output_dir : directory for output files (default: same as input file)
+    input_path : path to the experiment file (.xlsx, .csv, or .tsv)
+    output_dir : directory for output files (default: ``<stem>_results/`` next
+        to the input file)
     assume_censored : bool
-        If True, unaccounted individuals (SampleSize minus observed deaths
-        and censored) are added as right-censored at the last census time.
-        If False, cohort size is just the sum of deaths + censored.
+        Excel only.  If True, unaccounted individuals (SampleSize minus
+        observed deaths and censored) are added as right-censored at the
+        last census time.
+    time_col : CSV only.  Column name for survival time (default ``"Age"``).
+    event_col : CSV only.  Column name for event indicator (default ``"Event"``).
+    factor_cols : CSV long format.  Factor column names; auto-detected if None.
+    csv_format : ``"auto"`` (default), ``"long"``, or ``"wide"``.
+    col_mapping : CSV wide format.  Explicit column→group mapping list.
+    factor_names : CSV wide format.  Factor names.
+    factor_levels : CSV wide format.  Factor name → list of levels.
 
     Returns
     -------
     AnalysisResult with all computed data.
     """
-    excel_path = Path(excel_path)
+    input_path = Path(input_path)
     if output_dir is None:
-        output_dir = excel_path.parent / f"{excel_path.stem}_results"
+        output_dir = input_path.parent / f"{input_path.stem}_results"
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    plots_dir = output_dir / "plots"
+    plots_dir.mkdir(exist_ok=True)
+    data_dir = output_dir / "data_output"
+    data_dir.mkdir(exist_ok=True)
+
+    # 0. Excel-only: load chamber exclusions and defined plots before loading data
+    excluded_chambers: set = set()
+    defined_plots: list[list[str]] = []
+    if input_path.suffix.lower() == ".xlsx":
+        excluded_chambers = data_loader.load_chamber_flags(input_path)
+        defined_plots = data_loader.load_defined_plots(input_path)
 
     # 1. Load data
     individual_data, factors = data_loader.load_experiment(
-        excel_path, assume_censored=assume_censored,
+        input_path,
+        assume_censored=assume_censored,
+        excluded_chambers=excluded_chambers,
+        time_col=time_col,
+        event_col=event_col,
+        factor_cols=factor_cols,
+        csv_format=csv_format,
+        col_mapping=col_mapping,
+        factor_names=factor_names,
+        factor_levels=factor_levels,
     )
 
     # 2. Compute lifetables
@@ -99,18 +139,28 @@ def run_analysis(
     )
 
     # 6. Save lifetable CSV
-    lifetables.to_csv(output_dir / "lifetables.csv", index=False)
+    lifetables.to_csv(data_dir / "lifetables.csv", index=False)
 
     # 7. Save individual data CSV
-    individual_data.to_csv(output_dir / "individual_data.csv", index=False)
+    individual_data.to_csv(data_dir / "individual_data.csv", index=False)
 
     # 8. Generate KM plot
+    import matplotlib
     fig_km = plotting.plot_km_curves(lifetables)
-    fig_km.savefig(output_dir / "kaplan_meier.png", dpi=150)
+    fig_km.savefig(plots_dir / "kaplan_meier.png", dpi=150)
+
+    # 8b. Generate defined plots (Excel only)
+    for i, (plot_name, treatment_list) in enumerate(defined_plots, 1):
+        valid = [t for t in treatment_list if t in lifetables["treatment"].unique()]
+        if not valid:
+            continue
+        fig_dp = plotting.plot_km_curves(lifetables, treatments=valid, title=plot_name)
+        fig_dp.savefig(plots_dir / f"defined_plot_{i:02d}.png", dpi=150)
+        matplotlib.pyplot.close(fig_dp)
 
     # 9. Generate report
     result = AnalysisResult(
-        input_file=excel_path,
+        input_file=input_path,
         factors=factors,
         individual_data=individual_data,
         lifetables=lifetables,
@@ -122,6 +172,8 @@ def run_analysis(
         hazard_ratios=hazard_ratios,
         lifespan_stats=lifespan_stats,
         assume_censored=assume_censored,
+        excluded_chambers=excluded_chambers,
+        defined_plots=defined_plots,
     )
 
     report.generate_report(result, output_dir)

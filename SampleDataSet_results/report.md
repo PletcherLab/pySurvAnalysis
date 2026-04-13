@@ -4,6 +4,7 @@
 **Treatment factors:** Sex, Density  
 **Number of treatment groups:** 4  
 **Total individuals:** 5600  
+**Assume unobserved individuals censored:** Yes — unaccounted individuals added as right-censored at last census time  
 
 ## 1. Sample Summary
 
@@ -70,7 +71,15 @@
 
 ![Number at Risk](number_at_risk.png)
 
-## 7. Omnibus Log-Rank Test
+## 7. Defined Plots (from DefinedPlots sheet)
+
+Each plot below shows a subset of treatments as specified in the DefinedPlots sheet of the workbook.
+
+### NewPlot
+
+![NewPlot](defined_plot_01.png)
+
+## 8. Omnibus Log-Rank Test
 
 - **Chi-square statistic:** 740.8229
 - **Degrees of freedom:** 3
@@ -78,7 +87,7 @@
 
 *The omnibus test indicates statistically significant differences in survival among the treatment groups.*
 
-## 8. Pairwise Log-Rank Tests
+## 9. Pairwise Log-Rank Tests
 
 | Comparison | Chi² | p-value | p (Bonferroni) | Sig. |
 |------------|-------|---------|----------------|------|
@@ -89,7 +98,7 @@
 | Female/40x vs Male/40x | 416.4879 | 0.00e+00 | 0.00e+00 | *** |
 | Male/20x vs Male/40x | 178.0097 | 0.00e+00 | 0.00e+00 | *** |
 
-## 9. Hazard Ratio Estimates
+## 10. Hazard Ratio Estimates
 
 *Hazard ratios estimated from log-rank O/E method. HR > 1 indicates higher risk in the first group.*
 
@@ -102,7 +111,7 @@
 | Female/40x vs Male/40x | 0.153 | (0.132, 0.178) |
 | Male/20x vs Male/40x | 0.220 | (0.187, 0.258) |
 
-## 10. Lifetable (First 10 Rows per Treatment)
+## 11. Lifetable (First 10 Rows per Treatment)
 
 ### Female/20x
 

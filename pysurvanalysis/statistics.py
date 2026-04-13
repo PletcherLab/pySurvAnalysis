@@ -246,138 +246,183 @@ def cox_interaction_analysis(
     factors: list[str],
     selected_factors: list[str] | None = None,
 ) -> dict:
-    """Fit Cox proportional hazards model with main effects and interactions.
+    """Fit Cox PH model and return interaction test + PH assumption test.
 
-    Builds a model with:
-    * Main effects for each selected factor (dummy-coded)
-    * All pairwise interaction terms between selected factors
+    Fits two models:
+    * **Main-effects model** — dummy-coded factors, no interactions.
+    * **Interaction model** — main effects plus all pairwise interaction terms.
+
+    Reports:
+    1. Interaction model coefficients (HRs, CIs, p-values).
+    2. Omnibus likelihood-ratio test comparing the two models (tests whether
+       any interaction term is needed).
+    3. Schoenfeld-residuals test of the proportional-hazards assumption for
+       each covariate in the interaction model.
 
     Parameters
     ----------
-    data : DataFrame
-        Individual-level survival data with columns ``time``, ``event``,
-        and one column per factor.
-    factors : list[str]
-        All available factor column names.
-    selected_factors : list[str] or None
-        Which factors to include. Defaults to all factors.
+    data : DataFrame with ``time``, ``event``, and factor columns.
+    factors : all available factor column names.
+    selected_factors : which factors to include (default: all).
 
     Returns
     -------
     dict with keys:
-        model_type    — "cox_ph"
-        factors_used  — list of factors in the model
-        n_subjects    — number of individuals
-        n_events      — number of deaths
-        concordance   — concordance index (C-statistic)
-        log_likelihood — partial log-likelihood
-        AIC           — Akaike information criterion
-        coefficients  — DataFrame of covariate name, coef, exp(coef)=HR,
-                        se, z, p, lower 95% CI, upper 95% CI
-        formula       — human-readable model formula
-        warnings      — list of any convergence or assumption warnings
+        model_type        — "cox_ph"
+        factors_used      — list of factors in the model
+        n_subjects        — number of individuals
+        n_events          — number of observed deaths
+        concordance       — C-statistic of the interaction model
+        log_likelihood    — partial log-likelihood of the interaction model
+        AIC               — AIC of the interaction model
+        coefficients      — DataFrame of covariate results
+        formula           — human-readable formula for the interaction model
+        warnings          — list of warnings
+        lr_interaction    — dict with LR omnibus test results (or None if no
+                            interaction terms possible)
+        ph_test           — DataFrame of Schoenfeld residuals test results
+                            (columns: covariate, test_statistic, p_value)
     """
     from lifelines import CoxPHFitter
+    from lifelines.statistics import proportional_hazard_test
+    from scipy.stats import chi2 as scipy_chi2
 
     if selected_factors is None:
         selected_factors = list(factors)
 
     selected_factors = [f for f in selected_factors if f in data.columns]
     if len(selected_factors) == 0:
-        return {"error": "No valid factors selected"}
+        return {"error": "No valid factors selected", "model_type": "cox_ph"}
 
-    # Build the design matrix with dummy coding
-    model_df = data[["time", "event"]].copy()
+    # ── Build design matrices ──────────────────────────────────────────────
+    base_df = data[["time", "event"]].copy()
 
     dummy_frames = []
     for factor in selected_factors:
         dummies = pd.get_dummies(data[factor], prefix=factor, drop_first=True, dtype=float)
         dummy_frames.append(dummies)
-
     main_effects = pd.concat(dummy_frames, axis=1)
-    model_df = pd.concat([model_df, main_effects], axis=1)
+    main_df = pd.concat([base_df, main_effects], axis=1)
 
-    # Build pairwise interaction terms
-    interaction_cols = []
+    interaction_cols: list[str] = []
+    inter_df = main_df.copy()
     for i, f1 in enumerate(selected_factors):
-        for f2 in selected_factors[i + 1 :]:
+        for f2 in selected_factors[i + 1:]:
             d1 = pd.get_dummies(data[f1], prefix=f1, drop_first=True, dtype=float)
             d2 = pd.get_dummies(data[f2], prefix=f2, drop_first=True, dtype=float)
             for c1 in d1.columns:
                 for c2 in d2.columns:
                     int_name = f"{c1}:{c2}"
-                    model_df[int_name] = d1[c1].values * d2[c2].values
+                    inter_df[int_name] = d1[c1].values * d2[c2].values
                     interaction_cols.append(int_name)
 
-    # Build formula description
     main_terms = list(main_effects.columns)
     formula = " + ".join(main_terms)
     if interaction_cols:
         formula += " + " + " + ".join(interaction_cols)
 
-    warnings_list = []
+    warnings_list: list[str] = []
 
-    # Fit Cox model
-    cph = CoxPHFitter()
+    # ── Fit main-effects model ─────────────────────────────────────────────
+    cph_main = CoxPHFitter()
     try:
-        cph.fit(
-            model_df,
-            duration_col="time",
-            event_col="event",
-            show_progress=False,
-        )
+        cph_main.fit(main_df, duration_col="time", event_col="event", show_progress=False)
     except Exception as e:
         return {
             "model_type": "cox_ph",
             "factors_used": selected_factors,
-            "error": str(e),
+            "error": f"Main-effects model failed: {e}",
             "formula": formula,
             "warnings": [str(e)],
         }
 
-    # Check convergence
-    if hasattr(cph, "_show_progress") or not cph.summary is not None:
-        pass  # lifelines handles convergence internally
+    # ── Fit interaction model ──────────────────────────────────────────────
+    cph = CoxPHFitter()
+    try:
+        cph.fit(inter_df, duration_col="time", event_col="event", show_progress=False)
+    except Exception as e:
+        return {
+            "model_type": "cox_ph",
+            "factors_used": selected_factors,
+            "error": f"Interaction model failed: {e}",
+            "formula": formula,
+            "warnings": [str(e)],
+        }
 
-    # Extract results
-    summary_df = cph.summary.copy()
-    summary_df = summary_df.rename(columns={
-        "coef": "coef",
+    # ── LR omnibus interaction test ────────────────────────────────────────
+    lr_interaction: dict | None = None
+    if interaction_cols:
+        ll_main = float(cph_main.log_likelihood_)
+        ll_inter = float(cph.log_likelihood_)
+        lr_stat = 2.0 * (ll_inter - ll_main)
+        lr_df = len(interaction_cols)
+        lr_p = float(scipy_chi2.sf(lr_stat, df=lr_df))
+        lr_interaction = {
+            "lr_stat": round(lr_stat, 4),
+            "df": lr_df,
+            "p_value": lr_p,
+            "ll_main": round(ll_main, 4),
+            "ll_interaction": round(ll_inter, 4),
+            "concordance_main": round(float(cph_main.concordance_index_), 4),
+            "interaction_cols": interaction_cols,
+        }
+
+    # ── Proportional-hazards assumption test (Schoenfeld residuals) ────────
+    ph_test_df: pd.DataFrame | None = None
+    try:
+        ph_result = proportional_hazard_test(cph, inter_df, time_transform="rank")
+        ph_summary = ph_result.summary.copy().reset_index()
+        # Normalise column names across lifelines versions
+        ph_summary.columns = [c.lower().replace(" ", "_") for c in ph_summary.columns]
+        col_map = {}
+        for c in ph_summary.columns:
+            if c in ("covariate", "index", "coef"):
+                col_map[c] = "covariate"
+            elif "stat" in c or c == "test_statistic":
+                col_map[c] = "test_statistic"
+            elif c in ("p", "p_value", "p-val"):
+                col_map[c] = "p_value"
+        ph_summary = ph_summary.rename(columns=col_map)
+        keep = [c for c in ("covariate", "test_statistic", "p_value") if c in ph_summary.columns]
+        ph_test_df = ph_summary[keep]
+    except Exception as e:
+        warnings_list.append(f"PH assumption test failed: {e}")
+
+    # ── Extract interaction model coefficients ─────────────────────────────
+    summary_df = cph.summary.copy().rename(columns={
         "exp(coef)": "HR",
         "se(coef)": "se",
         "coef lower 95%": "coef_lo",
         "coef upper 95%": "coef_hi",
         "exp(coef) lower 95%": "HR_lo",
         "exp(coef) upper 95%": "HR_hi",
-        "z": "z",
         "p": "p_value",
     })
     summary_df.index.name = "covariate"
     summary_df = summary_df.reset_index()
 
-    # Classify each term
-    term_types = []
-    for cov in summary_df["covariate"]:
-        if ":" in cov:
-            term_types.append("interaction")
-        else:
-            term_types.append("main_effect")
+    term_types = [
+        "interaction" if ":" in cov else "main_effect"
+        for cov in summary_df["covariate"]
+    ]
     summary_df["term_type"] = term_types
 
     return {
         "model_type": "cox_ph",
         "factors_used": selected_factors,
-        "n_subjects": cph.summary.shape[0] and len(model_df) or len(model_df),
-        "n_events": int(model_df["event"].sum()),
-        "concordance": round(cph.concordance_index_, 4),
-        "log_likelihood": round(cph.log_likelihood_, 4) if hasattr(cph, "log_likelihood_") else None,
-        "AIC": round(cph.AIC_partial_, 4) if hasattr(cph, "AIC_partial_") else None,
+        "n_subjects": len(inter_df),
+        "n_events": int(inter_df["event"].sum()),
+        "concordance": round(float(cph.concordance_index_), 4),
+        "log_likelihood": round(float(cph.log_likelihood_), 4),
+        "AIC": round(float(cph.AIC_partial_), 4),
         "coefficients": summary_df,
         "formula": formula,
         "warnings": warnings_list,
         "log_likelihood_ratio_p": round(
             cph.log_likelihood_ratio_test().p_value, 6
         ) if hasattr(cph, "log_likelihood_ratio_test") else None,
+        "lr_interaction": lr_interaction,
+        "ph_test": ph_test_df,
     }
 
 
