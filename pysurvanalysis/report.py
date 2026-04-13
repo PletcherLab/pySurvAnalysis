@@ -107,6 +107,56 @@ def generate_markdown(result: "AnalysisResult", output_dir: Path) -> str:
             lines.append(f"| {row['treatment']} | {val} |")
     lines.append("")
 
+    # --- Lifespan Statistics ---
+    ls = result.lifespan_stats
+    if ls:
+        ts = ls.get("treatment_stats")
+        fs = ls.get("factor_stats")
+        has_top_pct = ts is not None and "top_10pct_mean" in ts.columns
+
+        if ts is not None and len(ts) > 0:
+            lines.append("### Lifespan by Treatment")
+            lines.append("")
+            if has_top_pct:
+                lines.append("| Treatment | N | Deaths | Mean (RMST) | Median | Top 10% Mean | Top 5% Mean |")
+                lines.append("|-----------|---|--------|-------------|--------|--------------|-------------|")
+            else:
+                lines.append("| Treatment | N | Deaths | Mean (RMST) | Median |")
+                lines.append("|-----------|---|--------|-------------|--------|")
+            for _, row in ts.iterrows():
+                mean_s = f"{row['mean_rmst']:.1f}" if not np.isnan(row["mean_rmst"]) else "N/A"
+                med_s = f"{row['median']:.1f}" if not np.isnan(row["median"]) else "Not reached"
+                base = f"| {row['group']} | {int(row['n'])} | {int(row['n_deaths'])} | {mean_s} | {med_s}"
+                if has_top_pct:
+                    t10 = f"{row['top_10pct_mean']:.1f}" if not np.isnan(row.get("top_10pct_mean", np.nan)) else "N/A"
+                    t5 = f"{row['top_5pct_mean']:.1f}" if not np.isnan(row.get("top_5pct_mean", np.nan)) else "N/A"
+                    lines.append(f"{base} | {t10} | {t5} |")
+                else:
+                    lines.append(f"{base} |")
+            lines.append("")
+
+        if fs is not None and len(fs) > 0:
+            has_top_pct_f = "top_10pct_mean" in fs.columns
+            lines.append("### Lifespan by Factor Level (pooled)")
+            lines.append("")
+            if has_top_pct_f:
+                lines.append("| Factor Level | N | Deaths | Mean (RMST) | Median | Top 10% Mean | Top 5% Mean |")
+                lines.append("|--------------|---|--------|-------------|--------|--------------|-------------|")
+            else:
+                lines.append("| Factor Level | N | Deaths | Mean (RMST) | Median |")
+                lines.append("|--------------|---|--------|-------------|--------|")
+            for _, row in fs.iterrows():
+                mean_s = f"{row['mean_rmst']:.1f}" if not np.isnan(row["mean_rmst"]) else "N/A"
+                med_s = f"{row['median']:.1f}" if not np.isnan(row["median"]) else "Not reached"
+                base = f"| {row['group']} | {int(row['n'])} | {int(row['n_deaths'])} | {mean_s} | {med_s}"
+                if has_top_pct_f:
+                    t10 = f"{row['top_10pct_mean']:.1f}" if not np.isnan(row.get("top_10pct_mean", np.nan)) else "N/A"
+                    t5 = f"{row['top_5pct_mean']:.1f}" if not np.isnan(row.get("top_5pct_mean", np.nan)) else "N/A"
+                    lines.append(f"{base} | {t10} | {t5} |")
+                else:
+                    lines.append(f"{base} |")
+            lines.append("")
+
     # --- KM Plot ---
     lines.append("## 3. Kaplan\u2013Meier Survival Curves")
     lines.append("")
@@ -213,6 +263,145 @@ def generate_markdown(result: "AnalysisResult", output_dir: Path) -> str:
     lines.append("")
 
     return "\n".join(lines)
+
+
+def _render_coef_table_md(coefs: "pd.DataFrame", section_type: str, is_rmst: bool) -> list[str]:
+    """Render a coefficient table section in markdown."""
+    import pandas as pd
+
+    subset = coefs[coefs["term_type"] == section_type]
+    if len(subset) == 0:
+        return []
+
+    label_map = {
+        "intercept": "Intercept",
+        "main_effect": "Main Effects",
+        "interaction": "Interaction Effects",
+    }
+    lines: list[str] = []
+    lines.append(f"#### {label_map.get(section_type, section_type)}")
+    lines.append("")
+
+    if is_rmst:
+        lines.append("| Covariate | Coef (hours) | SE | t | p-value | 95% CI (hours) |")
+        lines.append("|-----------|-------------|----|----|---------|----------------|")
+        for _, row in subset.iterrows():
+            p_str = _format_pvalue(row["p_value"])
+            sig = _significance_stars(row["p_value"])
+            lines.append(
+                f"| {row['covariate']} "
+                f"| {row['coef']:.2f} "
+                f"| {row['se']:.2f} "
+                f"| {row['z']:.3f} "
+                f"| {p_str} {sig} "
+                f"| ({row['coef_lo']:.2f}, {row['coef_hi']:.2f}) |"
+            )
+    else:
+        lines.append("| Covariate | Coef | HR | SE | z | p-value | 95% CI (HR) |")
+        lines.append("|-----------|------|----|----|---|---------|-------------|")
+        for _, row in subset.iterrows():
+            p_str = _format_pvalue(row["p_value"])
+            sig = _significance_stars(row["p_value"])
+            lines.append(
+                f"| {row['covariate']} "
+                f"| {row['coef']:.4f} "
+                f"| {row['HR']:.4f} "
+                f"| {row['se']:.4f} "
+                f"| {row['z']:.3f} "
+                f"| {p_str} {sig} "
+                f"| ({row['HR_lo']:.3f}, {row['HR_hi']:.3f}) |"
+            )
+    lines.append("")
+    return lines
+
+
+def generate_cox_markdown(cox_analyses: list[dict]) -> str:
+    """Generate markdown sections for Cox and RMST interaction analyses."""
+    if not cox_analyses:
+        return ""
+
+    lines: list[str] = []
+    lines.append("## 11. Factorial Interaction Analyses")
+    lines.append("")
+
+    for i, result in enumerate(cox_analyses, 1):
+        model_type = result.get("model_type", "cox_ph")
+        is_rmst = model_type == "rmst_pseudo"
+        type_label = "RMST Pseudo-Value Regression" if is_rmst else "Cox Proportional Hazards"
+        factors_str = ", ".join(result.get("factors_used", []))
+
+        lines.append(f"### Analysis {i} [{type_label}]: {factors_str}")
+        lines.append("")
+
+        if "error" in result:
+            lines.append(f"**Error:** {result['error']}")
+            lines.append("")
+            continue
+
+        lines.append(f"**Model formula:** `{result.get('formula', 'N/A')}`  ")
+        lines.append(f"**N subjects:** {result.get('n_subjects', 'N/A')}  ")
+        lines.append(f"**N events (deaths):** {result.get('n_events', 'N/A')}  ")
+
+        if is_rmst:
+            lines.append(f"**Restriction time (tau):** {result.get('tau', 'N/A')} hours  ")
+            lines.append(f"**Overall RMST:** {result.get('rmst_overall', 'N/A')} hours  ")
+            lines.append(f"**R-squared:** {result.get('r_squared', 'N/A')}  ")
+            if result.get("f_statistic") is not None:
+                lines.append(f"**F-statistic:** {result['f_statistic']}  ")
+            if result.get("f_p_value") is not None:
+                p = result["f_p_value"]
+                lines.append(
+                    f"**F-test p-value:** "
+                    f"{_format_pvalue(p)} {_significance_stars(p)}  "
+                )
+        else:
+            if result.get("concordance") is not None:
+                lines.append(f"**Concordance index:** {result['concordance']}  ")
+            if result.get("AIC") is not None:
+                lines.append(f"**AIC (partial):** {result['AIC']}  ")
+            if result.get("log_likelihood") is not None:
+                lines.append(f"**Log-likelihood:** {result['log_likelihood']}  ")
+            if result.get("log_likelihood_ratio_p") is not None:
+                p = result["log_likelihood_ratio_p"]
+                lines.append(
+                    f"**Likelihood ratio test p-value:** "
+                    f"{_format_pvalue(p)} {_significance_stars(p)}  "
+                )
+        lines.append("")
+
+        coefs = result.get("coefficients")
+        if coefs is not None and len(coefs) > 0:
+            for section_type in ("intercept", "main_effect", "interaction"):
+                lines.extend(_render_coef_table_md(coefs, section_type, is_rmst))
+
+        if result.get("warnings"):
+            lines.append("**Warnings:**")
+            for w in cox["warnings"]:
+                lines.append(f"- {w}")
+            lines.append("")
+
+    return "\n".join(lines)
+
+
+def append_cox_to_report(cox_analyses: list[dict], output_dir: Path) -> None:
+    """Append Cox analysis results to an existing report.md."""
+    report_path = Path(output_dir) / "report.md"
+    if not report_path.exists():
+        return
+
+    cox_md = generate_cox_markdown(cox_analyses)
+    if not cox_md:
+        return
+
+    content = report_path.read_text(encoding="utf-8")
+    # Replace the footer and append cox section before it
+    footer = "---\n*Report generated by pySurvAnalysis*\n"
+    if footer in content:
+        content = content.replace(footer, cox_md + "\n" + footer)
+    else:
+        content += "\n" + cox_md + "\n"
+
+    report_path.write_text(content, encoding="utf-8")
 
 
 def generate_report(result: "AnalysisResult", output_dir: Path) -> Path:

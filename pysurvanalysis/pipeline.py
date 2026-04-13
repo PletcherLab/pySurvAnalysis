@@ -29,6 +29,8 @@ class AnalysisResult:
         pairwise_lr: pd.DataFrame,
         omnibus_lr: dict,
         hazard_ratios: pd.DataFrame,
+        lifespan_stats: dict | None = None,
+        assume_censored: bool = True,
     ):
         self.input_file = input_file
         self.factors = factors
@@ -40,6 +42,9 @@ class AnalysisResult:
         self.pairwise_lr = pairwise_lr
         self.omnibus_lr = omnibus_lr
         self.hazard_ratios = hazard_ratios
+        self.lifespan_stats = lifespan_stats or {}
+        self.assume_censored = assume_censored
+        self.cox_analyses: list[dict] = []
 
 
 def run_analysis(
@@ -88,6 +93,11 @@ def run_analysis(
     # 5. Hazard ratios
     hazard_ratios = statistics.pairwise_hazard_ratios(individual_data)
 
+    # 5b. Lifespan statistics
+    lifespan_stats = lifetable.lifespan_statistics(
+        individual_data, factors, assume_censored=assume_censored,
+    )
+
     # 6. Save lifetable CSV
     lifetables.to_csv(output_dir / "lifetables.csv", index=False)
 
@@ -110,6 +120,8 @@ def run_analysis(
         pairwise_lr=pairwise_lr,
         omnibus_lr=omnibus_lr,
         hazard_ratios=hazard_ratios,
+        lifespan_stats=lifespan_stats,
+        assume_censored=assume_censored,
     )
 
     report.generate_report(result, output_dir)

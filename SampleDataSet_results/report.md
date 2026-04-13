@@ -36,6 +36,24 @@
 | Male/20x | 698.4 |
 | Male/40x | 605.1 |
 
+### Lifespan by Treatment
+
+| Treatment | N | Deaths | Mean (RMST) | Median |
+|-----------|---|--------|-------------|--------|
+| Female/20x | 900 | 20 | 951.6 | Not reached |
+| Female/40x | 1900 | 102 | 937.1 | Not reached |
+| Male/20x | 900 | 70 | 939.1 | Not reached |
+| Male/40x | 1900 | 585 | 845.8 | Not reached |
+
+### Lifespan by Factor Level (pooled)
+
+| Factor Level | N | Deaths | Mean (RMST) | Median |
+|--------------|---|--------|-------------|--------|
+| Sex=Female | 2800 | 122 | 941.9 | Not reached |
+| Sex=Male | 2800 | 655 | 875.9 | Not reached |
+| Density=20x | 1800 | 90 | 945.5 | Not reached |
+| Density=40x | 3800 | 687 | 891.9 | Not reached |
+
 ## 3. Kaplan–Meier Survival Curves
 
 ![Kaplan-Meier Survival Curves](kaplan_meier.png)

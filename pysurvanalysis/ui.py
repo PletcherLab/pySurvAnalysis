@@ -89,6 +89,11 @@ class AnalysisWorker(QThread):
             self.progress.emit("Computing hazard ratios...")
             hazard_ratios = statistics.pairwise_hazard_ratios(individual_data)
 
+            self.progress.emit("Computing lifespan statistics...")
+            lifespan_stats = lifetable.lifespan_statistics(
+                individual_data, factors, assume_censored=self.assume_censored,
+            )
+
             # Save outputs
             self.output_dir.mkdir(parents=True, exist_ok=True)
             lifetables.to_csv(self.output_dir / "lifetables.csv", index=False)
@@ -105,6 +110,8 @@ class AnalysisWorker(QThread):
                 pairwise_lr=pairwise_lr,
                 omnibus_lr=omnibus_lr,
                 hazard_ratios=hazard_ratios,
+                lifespan_stats=lifespan_stats,
+                assume_censored=self.assume_censored,
             )
 
             self.finished.emit(result)
@@ -357,27 +364,271 @@ class StatisticsWidget(QWidget):
             )
         lines.append("")
 
-        # Median survival
-        lines.append("=" * 70)
-        lines.append("MEDIAN SURVIVAL TIME")
-        lines.append("=" * 70)
-        for _, row in result.median_surv.iterrows():
-            val = f"{row['median_survival']:.1f} hours" if pd.notna(row["median_survival"]) else "Not reached"
-            lines.append(f"  {row['treatment']:30s}  {val}")
-        lines.append("")
+        # Lifespan statistics
+        ls = result.lifespan_stats
+        has_top_pct = False
 
-        # RMST
-        lines.append("=" * 70)
-        lines.append("RESTRICTED MEAN SURVIVAL TIME (RMST)")
-        lines.append("=" * 70)
-        if len(result.mean_surv) > 0:
-            t_r = result.mean_surv["restriction_time"].iloc[0]
-            lines.append(f"  Restriction time: {t_r:.1f} hours")
-            for _, row in result.mean_surv.iterrows():
-                val = f"{row['rmst']:.1f} hours" if pd.notna(row["rmst"]) else "N/A"
-                lines.append(f"  {row['treatment']:30s}  {val}")
+        if ls and "treatment_stats" in ls and len(ls["treatment_stats"]) > 0:
+            ts = ls["treatment_stats"]
+            has_top_pct = "top_10pct_mean" in ts.columns
+
+            lines.append("=" * 70)
+            lines.append("LIFESPAN STATISTICS BY TREATMENT (KM-adjusted)")
+            lines.append("=" * 70)
+            for _, row in ts.iterrows():
+                lines.append(f"\n  {row['group']}")
+                lines.append(f"    N={int(row['n'])}  Deaths={int(row['n_deaths'])}  Censored={int(row['n_censored'])}")
+                mean_str = f"{row['mean_rmst']:.1f}" if pd.notna(row["mean_rmst"]) else "N/A"
+                med_str = f"{row['median']:.1f}" if pd.notna(row["median"]) else "Not reached"
+                lines.append(f"    Mean (RMST):     {mean_str} hours")
+                lines.append(f"    Median:          {med_str} hours")
+                if has_top_pct and pd.notna(row.get("top_10pct_mean")):
+                    lines.append(f"    Top 10% mean:    {row['top_10pct_mean']:.1f} hours")
+                    lines.append(f"    Top  5% mean:    {row['top_5pct_mean']:.1f} hours")
+            lines.append("")
+
+        if ls and "factor_stats" in ls and len(ls["factor_stats"]) > 0:
+            fs = ls["factor_stats"]
+            has_top_pct_f = "top_10pct_mean" in fs.columns
+
+            lines.append("=" * 70)
+            lines.append("LIFESPAN STATISTICS BY FACTOR LEVEL (pooled)")
+            lines.append("=" * 70)
+            for _, row in fs.iterrows():
+                lines.append(f"\n  {row['group']}")
+                lines.append(f"    N={int(row['n'])}  Deaths={int(row['n_deaths'])}  Censored={int(row['n_censored'])}")
+                mean_str = f"{row['mean_rmst']:.1f}" if pd.notna(row["mean_rmst"]) else "N/A"
+                med_str = f"{row['median']:.1f}" if pd.notna(row["median"]) else "Not reached"
+                lines.append(f"    Mean (RMST):     {mean_str} hours")
+                lines.append(f"    Median:          {med_str} hours")
+                if has_top_pct_f and pd.notna(row.get("top_10pct_mean")):
+                    lines.append(f"    Top 10% mean:    {row['top_10pct_mean']:.1f} hours")
+                    lines.append(f"    Top  5% mean:    {row['top_5pct_mean']:.1f} hours")
+            lines.append("")
 
         self.text.setPlainText("\n".join(lines))
+
+
+class CoxAnalysisWidget(QWidget):
+    """Widget for configuring and running Cox PH and RMST interaction analyses."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._factors: list[str] = []
+        self._result: Optional[AnalysisResult] = None
+
+        layout = QVBoxLayout()
+
+        # Factor selection
+        factor_group = QGroupBox("Select Factors for Model")
+        factor_layout = QVBoxLayout()
+        self._factor_checkboxes: dict[str, QCheckBox] = {}
+        self._factor_container = QVBoxLayout()
+        factor_layout.addLayout(self._factor_container)
+        factor_group.setLayout(factor_layout)
+        layout.addWidget(factor_group)
+
+        # Run buttons
+        btn_layout = QHBoxLayout()
+        self.run_cox_btn = QPushButton("Run Cox PH Analysis")
+        self.run_cox_btn.setEnabled(False)
+        self.run_cox_btn.clicked.connect(self._run_cox)
+        btn_layout.addWidget(self.run_cox_btn)
+
+        self.run_rmst_btn = QPushButton("Run RMST Analysis")
+        self.run_rmst_btn.setEnabled(False)
+        self.run_rmst_btn.clicked.connect(self._run_rmst)
+        btn_layout.addWidget(self.run_rmst_btn)
+
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+
+        # Results display
+        self.results_text = QTextEdit()
+        self.results_text.setReadOnly(True)
+        self.results_text.setFontFamily("monospace")
+        layout.addWidget(self.results_text)
+
+        self.setLayout(layout)
+
+    def set_result(self, result: AnalysisResult):
+        self._result = result
+        self._factors = result.factors
+
+        # Rebuild factor checkboxes
+        for cb in self._factor_checkboxes.values():
+            self._factor_container.removeWidget(cb)
+            cb.deleteLater()
+        self._factor_checkboxes.clear()
+
+        for f in self._factors:
+            levels = sorted(result.individual_data[f].unique())
+            label = f"{f}  ({', '.join(str(lv) for lv in levels)})"
+            cb = QCheckBox(label)
+            cb.setChecked(True)
+            cb.setProperty("factor_name", f)
+            self._factor_checkboxes[f] = cb
+            self._factor_container.addWidget(cb)
+
+        self.run_cox_btn.setEnabled(len(self._factors) >= 1)
+        self.run_rmst_btn.setEnabled(len(self._factors) >= 1)
+
+        # Render any existing analyses
+        self._render_results()
+
+    def _selected_factors(self) -> list[str]:
+        return [
+            f for f, cb in self._factor_checkboxes.items()
+            if cb.isChecked()
+        ]
+
+    def _run_cox(self):
+        if self._result is None:
+            return
+        selected = self._selected_factors()
+        if len(selected) < 1:
+            QMessageBox.warning(
+                self, "No Factors Selected",
+                "Select at least one factor to run the analysis.",
+            )
+            return
+
+        cox_result = statistics.cox_interaction_analysis(
+            self._result.individual_data,
+            self._result.factors,
+            selected_factors=selected,
+        )
+        self._result.cox_analyses.append(cox_result)
+        self._render_results()
+
+    def _run_rmst(self):
+        if self._result is None:
+            return
+        selected = self._selected_factors()
+        if len(selected) < 1:
+            QMessageBox.warning(
+                self, "No Factors Selected",
+                "Select at least one factor to run the analysis.",
+            )
+            return
+
+        rmst_result = statistics.rmst_interaction_analysis(
+            self._result.individual_data,
+            self._result.factors,
+            selected_factors=selected,
+        )
+        self._result.cox_analyses.append(rmst_result)
+        self._render_results()
+
+    def _render_results(self):
+        if self._result is None or not self._result.cox_analyses:
+            self.results_text.setPlainText(
+                "No interaction analyses run yet.\n\n"
+                "Select factors above and click one of the analysis buttons:\n\n"
+                "  Cox PH:  Fits a Cox proportional hazards model.\n"
+                "           Coefficients are log-hazard ratios.\n\n"
+                "  RMST:    Fits an OLS model on jackknife pseudo-values\n"
+                "           of restricted mean survival time.\n"
+                "           Coefficients are differences in mean survival (hours).\n"
+                "           Does not assume proportional hazards.\n\n"
+                "Results are accumulated and will be appended to the report\n"
+                "when the application is closed or a new file is opened."
+            )
+            return
+
+        lines = []
+        for i, result in enumerate(self._result.cox_analyses, 1):
+            model_type = result.get("model_type", "cox_ph")
+            is_rmst = model_type == "rmst_pseudo"
+            type_label = "RMST Pseudo-Value Regression" if is_rmst else "Cox Proportional Hazards"
+            factors_str = ", ".join(result.get("factors_used", []))
+
+            lines.append("=" * 70)
+            lines.append(f"ANALYSIS {i} [{type_label}]: {factors_str}")
+            lines.append("=" * 70)
+
+            if "error" in result:
+                lines.append(f"  ERROR: {result['error']}")
+                lines.append("")
+                continue
+
+            lines.append(f"  Model:         {result.get('formula', 'N/A')}")
+            lines.append(f"  N subjects:    {result.get('n_subjects', 'N/A')}")
+            lines.append(f"  N events:      {result.get('n_events', 'N/A')}")
+
+            if is_rmst:
+                lines.append(f"  Tau (restrict): {result.get('tau', 'N/A')} hours")
+                lines.append(f"  Overall RMST:  {result.get('rmst_overall', 'N/A')} hours")
+                lines.append(f"  R-squared:     {result.get('r_squared', 'N/A')}")
+                if result.get("f_statistic") is not None:
+                    lines.append(f"  F-statistic:   {result['f_statistic']}")
+                if result.get("f_p_value") is not None:
+                    p = result["f_p_value"]
+                    sig = "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else "ns"
+                    lines.append(f"  F p-value:     {p:.6f}  {sig}")
+            else:
+                if result.get("concordance") is not None:
+                    lines.append(f"  Concordance:   {result['concordance']}")
+                if result.get("AIC") is not None:
+                    lines.append(f"  AIC (partial): {result['AIC']}")
+                if result.get("log_likelihood") is not None:
+                    lines.append(f"  Log-lik:       {result['log_likelihood']}")
+                if result.get("log_likelihood_ratio_p") is not None:
+                    p = result["log_likelihood_ratio_p"]
+                    sig = "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else "ns"
+                    lines.append(f"  LR test p:     {p:.6f}  {sig}")
+            lines.append("")
+
+            coefs = result.get("coefficients")
+            if coefs is not None and len(coefs) > 0:
+                # Column headers differ between Cox and RMST
+                if is_rmst:
+                    hdr_coef = "Coef(hrs)"
+                    hdr_extra = "95% CI (hours)"
+                else:
+                    hdr_coef = "Coef"
+                    hdr_extra = "95% CI (HR)"
+
+                for section_type, section_label in [
+                    ("intercept", "INTERCEPT:"),
+                    ("main_effect", "MAIN EFFECTS:"),
+                    ("interaction", "INTERACTION EFFECTS:"),
+                ]:
+                    subset = coefs[coefs["term_type"] == section_type]
+                    if len(subset) == 0:
+                        continue
+                    lines.append(f"  {section_label}")
+                    if is_rmst:
+                        lines.append(f"  {'Covariate':<30s} {hdr_coef:>10s} "
+                                     f"{'SE':>8s} {'t':>8s} {'p':>10s}  {hdr_extra}")
+                    else:
+                        lines.append(f"  {'Covariate':<30s} {hdr_coef:>8s} {'HR':>8s} "
+                                     f"{'SE':>8s} {'z':>8s} {'p':>10s}  {hdr_extra}")
+                    lines.append("  " + "-" * 100)
+                    for _, row in subset.iterrows():
+                        p_str = f"{row['p_value']:.2e}" if row['p_value'] < 0.0001 else f"{row['p_value']:.4f}"
+                        sig = "***" if row['p_value'] < 0.001 else "**" if row['p_value'] < 0.01 else "*" if row['p_value'] < 0.05 else "   "
+                        if is_rmst:
+                            lines.append(
+                                f"  {row['covariate']:<30s} {row['coef']:>10.2f} "
+                                f"{row['se']:>8.2f} {row['z']:>8.3f} {p_str:>10s} {sig} "
+                                f"({row['coef_lo']:.2f}, {row['coef_hi']:.2f})"
+                            )
+                        else:
+                            lines.append(
+                                f"  {row['covariate']:<30s} {row['coef']:>8.4f} {row['HR']:>8.4f} "
+                                f"{row['se']:>8.4f} {row['z']:>8.3f} {p_str:>10s} {sig} "
+                                f"({row['HR_lo']:.3f}, {row['HR_hi']:.3f})"
+                            )
+                    lines.append("")
+
+            if result.get("warnings"):
+                lines.append("  WARNINGS:")
+                for w in result["warnings"]:
+                    lines.append(f"    - {w}")
+                lines.append("")
+
+        self.results_text.setPlainText("\n".join(lines))
 
 
 class MainWindow(QMainWindow):
@@ -491,6 +742,10 @@ class MainWindow(QMainWindow):
         self.summary_view = DataTableWidget()
         self.tabs.addTab(self.summary_view, "Summary")
 
+        # Tab 8: Cox Interaction Analysis
+        self.cox_view = CoxAnalysisWidget()
+        self.tabs.addTab(self.cox_view, "Cox / Interactions")
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(left_widget)
         splitter.addWidget(self.tabs)
@@ -516,8 +771,25 @@ class MainWindow(QMainWindow):
             return
         self.load_file(Path(path))
 
+    def _save_pending_cox(self):
+        """Append any accumulated Cox analyses to the report before moving on."""
+        if (
+            self.result is not None
+            and self.result.cox_analyses
+        ):
+            output_dir = self.result.input_file.parent / f"{self.result.input_file.stem}_results"
+            report.append_cox_to_report(self.result.cox_analyses, output_dir)
+
+    def closeEvent(self, event):
+        """Save Cox analyses to report when the window is closed."""
+        self._save_pending_cox()
+        super().closeEvent(event)
+
     def load_file(self, excel_path: Path):
         """Load an experiment file, reading AssumeCensored from PrivateData."""
+        # Save any pending Cox results from the previous file
+        self._save_pending_cox()
+
         self._current_file = excel_path
 
         # Read the default from the file's PrivateData sheet
@@ -562,6 +834,7 @@ class MainWindow(QMainWindow):
         self.lifetable_view.set_data(result.lifetables)
         self.stats_view.set_results(result)
         self.summary_view.set_data(result.summary)
+        self.cox_view.set_result(result)
 
         # Generate report on the main thread (matplotlib requires it)
         output_dir = result.input_file.parent / f"{result.input_file.stem}_results"
@@ -631,6 +904,10 @@ class MainWindow(QMainWindow):
         summary = statistics.summary_statistics(subset)
         median_surv = lifetable.median_survival(lt_subset)
         mean_surv = lifetable.mean_survival(subset)
+        lifespan_stats = lifetable.lifespan_statistics(
+            subset, self.result.factors,
+            assume_censored=self.result.assume_censored,
+        )
 
         sub_result = AnalysisResult(
             input_file=self.result.input_file,
@@ -643,6 +920,8 @@ class MainWindow(QMainWindow):
             pairwise_lr=pairwise_lr,
             omnibus_lr=omnibus_lr,
             hazard_ratios=hazard_ratios,
+            lifespan_stats=lifespan_stats,
+            assume_censored=self.result.assume_censored,
         )
 
         self.stats_view.set_results(sub_result)

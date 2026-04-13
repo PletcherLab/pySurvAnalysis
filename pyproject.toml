@@ -12,7 +12,12 @@ dependencies = [
     "pandas>=3.0.2",
     "pyqt6>=6.7",
     "scipy>=1.14",
+    "statsmodels>=0.14",
 ]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project.scripts]
 pysurvanalysis = "main:main"

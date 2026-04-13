@@ -241,6 +241,298 @@ def pairwise_hazard_ratios(data: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(results)
 
 
+def cox_interaction_analysis(
+    data: pd.DataFrame,
+    factors: list[str],
+    selected_factors: list[str] | None = None,
+) -> dict:
+    """Fit Cox proportional hazards model with main effects and interactions.
+
+    Builds a model with:
+    * Main effects for each selected factor (dummy-coded)
+    * All pairwise interaction terms between selected factors
+
+    Parameters
+    ----------
+    data : DataFrame
+        Individual-level survival data with columns ``time``, ``event``,
+        and one column per factor.
+    factors : list[str]
+        All available factor column names.
+    selected_factors : list[str] or None
+        Which factors to include. Defaults to all factors.
+
+    Returns
+    -------
+    dict with keys:
+        model_type    — "cox_ph"
+        factors_used  — list of factors in the model
+        n_subjects    — number of individuals
+        n_events      — number of deaths
+        concordance   — concordance index (C-statistic)
+        log_likelihood — partial log-likelihood
+        AIC           — Akaike information criterion
+        coefficients  — DataFrame of covariate name, coef, exp(coef)=HR,
+                        se, z, p, lower 95% CI, upper 95% CI
+        formula       — human-readable model formula
+        warnings      — list of any convergence or assumption warnings
+    """
+    from lifelines import CoxPHFitter
+
+    if selected_factors is None:
+        selected_factors = list(factors)
+
+    selected_factors = [f for f in selected_factors if f in data.columns]
+    if len(selected_factors) == 0:
+        return {"error": "No valid factors selected"}
+
+    # Build the design matrix with dummy coding
+    model_df = data[["time", "event"]].copy()
+
+    dummy_frames = []
+    for factor in selected_factors:
+        dummies = pd.get_dummies(data[factor], prefix=factor, drop_first=True, dtype=float)
+        dummy_frames.append(dummies)
+
+    main_effects = pd.concat(dummy_frames, axis=1)
+    model_df = pd.concat([model_df, main_effects], axis=1)
+
+    # Build pairwise interaction terms
+    interaction_cols = []
+    for i, f1 in enumerate(selected_factors):
+        for f2 in selected_factors[i + 1 :]:
+            d1 = pd.get_dummies(data[f1], prefix=f1, drop_first=True, dtype=float)
+            d2 = pd.get_dummies(data[f2], prefix=f2, drop_first=True, dtype=float)
+            for c1 in d1.columns:
+                for c2 in d2.columns:
+                    int_name = f"{c1}:{c2}"
+                    model_df[int_name] = d1[c1].values * d2[c2].values
+                    interaction_cols.append(int_name)
+
+    # Build formula description
+    main_terms = list(main_effects.columns)
+    formula = " + ".join(main_terms)
+    if interaction_cols:
+        formula += " + " + " + ".join(interaction_cols)
+
+    warnings_list = []
+
+    # Fit Cox model
+    cph = CoxPHFitter()
+    try:
+        cph.fit(
+            model_df,
+            duration_col="time",
+            event_col="event",
+            show_progress=False,
+        )
+    except Exception as e:
+        return {
+            "model_type": "cox_ph",
+            "factors_used": selected_factors,
+            "error": str(e),
+            "formula": formula,
+            "warnings": [str(e)],
+        }
+
+    # Check convergence
+    if hasattr(cph, "_show_progress") or not cph.summary is not None:
+        pass  # lifelines handles convergence internally
+
+    # Extract results
+    summary_df = cph.summary.copy()
+    summary_df = summary_df.rename(columns={
+        "coef": "coef",
+        "exp(coef)": "HR",
+        "se(coef)": "se",
+        "coef lower 95%": "coef_lo",
+        "coef upper 95%": "coef_hi",
+        "exp(coef) lower 95%": "HR_lo",
+        "exp(coef) upper 95%": "HR_hi",
+        "z": "z",
+        "p": "p_value",
+    })
+    summary_df.index.name = "covariate"
+    summary_df = summary_df.reset_index()
+
+    # Classify each term
+    term_types = []
+    for cov in summary_df["covariate"]:
+        if ":" in cov:
+            term_types.append("interaction")
+        else:
+            term_types.append("main_effect")
+    summary_df["term_type"] = term_types
+
+    return {
+        "model_type": "cox_ph",
+        "factors_used": selected_factors,
+        "n_subjects": cph.summary.shape[0] and len(model_df) or len(model_df),
+        "n_events": int(model_df["event"].sum()),
+        "concordance": round(cph.concordance_index_, 4),
+        "log_likelihood": round(cph.log_likelihood_, 4) if hasattr(cph, "log_likelihood_") else None,
+        "AIC": round(cph.AIC_partial_, 4) if hasattr(cph, "AIC_partial_") else None,
+        "coefficients": summary_df,
+        "formula": formula,
+        "warnings": warnings_list,
+        "log_likelihood_ratio_p": round(
+            cph.log_likelihood_ratio_test().p_value, 6
+        ) if hasattr(cph, "log_likelihood_ratio_test") else None,
+    }
+
+
+def rmst_interaction_analysis(
+    data: pd.DataFrame,
+    factors: list[str],
+    selected_factors: list[str] | None = None,
+    tau: float | None = None,
+) -> dict:
+    """RMST-based factorial interaction analysis using pseudo-values.
+
+    For each individual, computes a jackknife pseudo-value of the RMST,
+    then fits an OLS regression on these pseudo-values with the same
+    factorial design (main effects + pairwise interactions) used in the
+    Cox analysis.  This approach:
+
+    * Does not assume proportional hazards
+    * Coefficients are interpretable as differences in mean survival time
+    * Interaction terms measure how the effect of one factor on mean
+      survival depends on the level of another factor
+
+    Parameters
+    ----------
+    data : DataFrame with ``time``, ``event``, and factor columns.
+    factors : all available factor column names.
+    selected_factors : which factors to include (default: all).
+    tau : restriction time.  Defaults to the minimum of the per-treatment
+          maximum observed times (so every group is fully observed).
+
+    Returns
+    -------
+    dict matching the shape returned by ``cox_interaction_analysis`` so
+    both can be rendered by the same UI / report code.  Key differences:
+
+    * ``model_type`` is ``"rmst_pseudo"``
+    * ``coefficients`` has ``coef`` in *hours* (not log-hazard), and
+      ``HR`` / ``HR_lo`` / ``HR_hi`` are set to NaN (not applicable).
+    """
+    import statsmodels.api as sm
+
+    if selected_factors is None:
+        selected_factors = list(factors)
+    selected_factors = [f for f in selected_factors if f in data.columns]
+    if not selected_factors:
+        return {"error": "No valid factors selected", "model_type": "rmst_pseudo"}
+
+    # ── 1. Determine restriction time ────────────────────────────────
+    if tau is None:
+        tau = data.groupby("treatment")["time"].max().min()
+
+    # ── 2. Compute overall RMST via KM ───────────────────────────────
+    from .lifetable import _lifetable_one_treatment
+
+    def _rmst(df: pd.DataFrame, t: float) -> float:
+        lt = _lifetable_one_treatment(df)
+        lt = lt[lt["time"] <= t]
+        times = np.concatenate([[0.0], lt["time"].values])
+        surv = np.concatenate([[1.0], lt["km_lx"].values])
+        return float(np.trapezoid(surv, times))
+
+    theta_all = _rmst(data, tau)
+    n = len(data)
+
+    # ── 3. Jackknife pseudo-values ───────────────────────────────────
+    pseudo = np.empty(n)
+    idx = data.index.values
+    for j, ix in enumerate(idx):
+        loo = data.drop(ix)
+        theta_loo = _rmst(loo, tau)
+        pseudo[j] = n * theta_all - (n - 1) * theta_loo
+
+    # ── 4. Build design matrix ───────────────────────────────────────
+    dummy_frames = []
+    for factor in selected_factors:
+        dummies = pd.get_dummies(data[factor], prefix=factor, drop_first=True, dtype=float)
+        dummy_frames.append(dummies)
+
+    X = pd.concat(dummy_frames, axis=1)
+
+    # Interaction terms
+    interaction_cols: list[str] = []
+    for i, f1 in enumerate(selected_factors):
+        for f2 in selected_factors[i + 1:]:
+            d1 = pd.get_dummies(data[f1], prefix=f1, drop_first=True, dtype=float)
+            d2 = pd.get_dummies(data[f2], prefix=f2, drop_first=True, dtype=float)
+            for c1 in d1.columns:
+                for c2 in d2.columns:
+                    int_name = f"{c1}:{c2}"
+                    X[int_name] = d1[c1].values * d2[c2].values
+                    interaction_cols.append(int_name)
+
+    main_terms = [c for c in X.columns if c not in interaction_cols]
+    formula = " + ".join(main_terms)
+    if interaction_cols:
+        formula += " + " + " + ".join(interaction_cols)
+
+    X = sm.add_constant(X)
+    warnings_list: list[str] = []
+
+    # ── 5. Fit OLS with robust (HC1) standard errors ────────────────
+    try:
+        model = sm.OLS(pseudo, X).fit(cov_type="HC1")
+    except Exception as e:
+        return {
+            "model_type": "rmst_pseudo",
+            "factors_used": selected_factors,
+            "error": str(e),
+            "formula": formula,
+            "warnings": [str(e)],
+        }
+
+    # ── 6. Package results ───────────────────────────────────────────
+    coef_df = pd.DataFrame({
+        "covariate": model.params.index,
+        "coef": model.params.values,
+        "HR": np.nan,
+        "se": model.bse.values,
+        "z": model.tvalues.values,
+        "p_value": model.pvalues.values,
+        "coef_lo": model.conf_int()[0].values,
+        "coef_hi": model.conf_int()[1].values,
+        "HR_lo": np.nan,
+        "HR_hi": np.nan,
+    })
+
+    term_types = []
+    for cov in coef_df["covariate"]:
+        if cov == "const":
+            term_types.append("intercept")
+        elif ":" in cov:
+            term_types.append("interaction")
+        else:
+            term_types.append("main_effect")
+    coef_df["term_type"] = term_types
+
+    return {
+        "model_type": "rmst_pseudo",
+        "factors_used": selected_factors,
+        "n_subjects": n,
+        "n_events": int(data["event"].sum()),
+        "tau": round(tau, 2),
+        "rmst_overall": round(theta_all, 2),
+        "r_squared": round(model.rsquared, 4),
+        "f_statistic": round(model.fvalue, 4) if np.isfinite(model.fvalue) else None,
+        "f_p_value": round(model.f_pvalue, 6) if np.isfinite(model.f_pvalue) else None,
+        "coefficients": coef_df,
+        "formula": formula,
+        "warnings": warnings_list,
+        "concordance": None,
+        "AIC": round(model.aic, 4),
+        "log_likelihood": round(model.llf, 4),
+        "log_likelihood_ratio_p": None,
+    }
+
+
 def summary_statistics(data: pd.DataFrame) -> pd.DataFrame:
     """Summary counts per treatment: N, deaths, censored, % censored."""
     records = []
