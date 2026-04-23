@@ -57,19 +57,19 @@
 
 ## 3. Kaplan–Meier Survival Curves
 
-![Kaplan-Meier Survival Curves](kaplan_meier.png)
+![Kaplan-Meier Survival Curves](plots/kaplan_meier.png)
 
 ## 4. Hazard Rate Over Time
 
-![Hazard Rate](hazard_rate.png)
+![Hazard Rate](plots/hazard_rate.png)
 
 ## 5. Interval Mortality (qx)
 
-![Interval Mortality](mortality_qx.png)
+![Interval Mortality](plots/mortality_qx.png)
 
 ## 6. Number at Risk
 
-![Number at Risk](number_at_risk.png)
+![Number at Risk](plots/number_at_risk.png)
 
 ## 7. Defined Plots (from DefinedPlots sheet)
 
@@ -77,7 +77,7 @@ Each plot below shows a subset of treatments as specified in the DefinedPlots sh
 
 ### NewPlot
 
-![NewPlot](defined_plot_01.png)
+![NewPlot](plots/defined_plot_01.png)
 
 ## 8. Omnibus Log-Rank Test
 

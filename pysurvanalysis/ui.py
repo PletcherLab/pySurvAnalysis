@@ -553,14 +553,45 @@ class CoxAnalysisWidget(QWidget):
 
         layout = QVBoxLayout()
 
-        # Factor selection
-        factor_group = QGroupBox("Select Factors for Model")
-        factor_layout = QVBoxLayout()
+        # Config tab widget: Select Factors | Filter Data
+        config_tabs = QTabWidget()
+
+        # Tab 1: Factor selection
+        factor_tab = QWidget()
+        factor_tab_layout = QVBoxLayout()
         self._factor_checkboxes: dict[str, QCheckBox] = {}
         self._factor_container = QVBoxLayout()
-        factor_layout.addLayout(self._factor_container)
-        factor_group.setLayout(factor_layout)
-        layout.addWidget(factor_group)
+        factor_tab_layout.addLayout(self._factor_container)
+        factor_tab_layout.addStretch()
+        factor_tab.setLayout(factor_tab_layout)
+        config_tabs.addTab(factor_tab, "Select Factors")
+
+        # Tab 2: Filter Data
+        filter_tab = QWidget()
+        filter_layout = QVBoxLayout()
+
+        factor_row = QHBoxLayout()
+        factor_row.addWidget(QLabel("Filter Factor:"))
+        self._filter_factor_combo = QComboBox()
+        self._filter_factor_combo.addItem("(None)")
+        self._filter_factor_combo.currentTextChanged.connect(self._on_filter_factor_changed)
+        factor_row.addWidget(self._filter_factor_combo)
+        factor_row.addStretch()
+        filter_layout.addLayout(factor_row)
+
+        level_row = QHBoxLayout()
+        level_row.addWidget(QLabel("Filter Level:"))
+        self._filter_level_combo = QComboBox()
+        self._filter_level_combo.setEnabled(False)
+        level_row.addWidget(self._filter_level_combo)
+        level_row.addStretch()
+        filter_layout.addLayout(level_row)
+
+        filter_layout.addStretch()
+        filter_tab.setLayout(filter_layout)
+        config_tabs.addTab(filter_tab, "Filter Data")
+
+        layout.addWidget(config_tabs)
 
         # Run buttons
         btn_layout = QHBoxLayout()
@@ -604,8 +635,18 @@ class CoxAnalysisWidget(QWidget):
             self._factor_checkboxes[f] = cb
             self._factor_container.addWidget(cb)
 
-        self.run_cox_btn.setEnabled(len(self._factors) >= 1)
-        self.run_rmst_btn.setEnabled(len(self._factors) >= 1)
+        # Repopulate filter factor combo
+        self._filter_factor_combo.blockSignals(True)
+        self._filter_factor_combo.clear()
+        self._filter_factor_combo.addItem("(None)")
+        for f in self._factors:
+            self._filter_factor_combo.addItem(f)
+        self._filter_factor_combo.setCurrentIndex(0)
+        self._filter_factor_combo.blockSignals(False)
+        self._filter_level_combo.clear()
+        self._filter_level_combo.setEnabled(False)
+
+        self._update_run_buttons()
 
         # Render any existing analyses
         self._render_results()
@@ -616,22 +657,66 @@ class CoxAnalysisWidget(QWidget):
             if cb.isChecked()
         ]
 
+    def _on_filter_factor_changed(self, text: str):
+        self._filter_level_combo.clear()
+        # Restore all checkboxes first, then hide the one being used as filter
+        for f, cb in self._factor_checkboxes.items():
+            cb.setVisible(True)
+        if text == "(None)" or self._result is None:
+            self._filter_level_combo.setEnabled(False)
+        else:
+            levels = sorted(self._result.individual_data[text].unique())
+            for lv in levels:
+                self._filter_level_combo.addItem(str(lv))
+            self._filter_level_combo.setEnabled(True)
+            if text in self._factor_checkboxes:
+                self._factor_checkboxes[text].setVisible(False)
+        self._update_run_buttons()
+
+    def _get_filter(self) -> tuple[str | None, str | None]:
+        """Return (factor, level) for the active data filter, or (None, None)."""
+        factor = self._filter_factor_combo.currentText()
+        if factor == "(None)":
+            return None, None
+        level = self._filter_level_combo.currentText()
+        return factor, level if level else None
+
+    def _apply_filter(self, data: "pd.DataFrame") -> "pd.DataFrame":
+        factor, level = self._get_filter()
+        if factor is None or level is None:
+            return data
+        return data[data[factor].astype(str) == level]
+
+    def _update_run_buttons(self):
+        filter_factor, _ = self._get_filter()
+        available = [f for f in self._factors if f != filter_factor] if filter_factor else self._factors
+        min_required = 2 if filter_factor else 1
+        can_run = len(available) >= min_required
+        self.run_cox_btn.setEnabled(can_run)
+        self.run_rmst_btn.setEnabled(can_run)
+
     def _run_cox(self):
         if self._result is None:
             return
+        filter_factor, filter_level = self._get_filter()
         selected = self._selected_factors()
-        if len(selected) < 1:
-            QMessageBox.warning(
-                self, "No Factors Selected",
-                "Select at least one factor to run the analysis.",
-            )
+        min_required = 2 if filter_factor else 1
+        if len(selected) < min_required:
+            msg = ("Select at least 2 factors to run the analysis when a filter is active."
+                   if filter_factor else
+                   "Select at least one factor to run the analysis.")
+            QMessageBox.warning(self, "Insufficient Factors Selected", msg)
             return
 
+        data = self._apply_filter(self._result.individual_data)
         cox_result = statistics.cox_interaction_analysis(
-            self._result.individual_data,
+            data,
             self._result.factors,
             selected_factors=selected,
         )
+        if filter_factor:
+            cox_result["filter_factor"] = filter_factor
+            cox_result["filter_level"] = filter_level
         self._result.cox_analyses.append(cox_result)
         self._render_results()
         output_dir = self._result.input_file.parent / f"{self._result.input_file.stem}_results"
@@ -640,19 +725,25 @@ class CoxAnalysisWidget(QWidget):
     def _run_rmst(self):
         if self._result is None:
             return
+        filter_factor, filter_level = self._get_filter()
         selected = self._selected_factors()
-        if len(selected) < 1:
-            QMessageBox.warning(
-                self, "No Factors Selected",
-                "Select at least one factor to run the analysis.",
-            )
+        min_required = 2 if filter_factor else 1
+        if len(selected) < min_required:
+            msg = ("Select at least 2 factors to run the analysis when a filter is active."
+                   if filter_factor else
+                   "Select at least one factor to run the analysis.")
+            QMessageBox.warning(self, "Insufficient Factors Selected", msg)
             return
 
+        data = self._apply_filter(self._result.individual_data)
         rmst_result = statistics.rmst_interaction_analysis(
-            self._result.individual_data,
+            data,
             self._result.factors,
             selected_factors=selected,
         )
+        if filter_factor:
+            rmst_result["filter_factor"] = filter_factor
+            rmst_result["filter_level"] = filter_level
         self._result.cox_analyses.append(rmst_result)
         self._render_results()
         output_dir = self._result.input_file.parent / f"{self._result.input_file.stem}_results"
@@ -690,6 +781,10 @@ class CoxAnalysisWidget(QWidget):
                 lines.append("")
                 continue
 
+            filter_factor = result.get("filter_factor")
+            filter_level = result.get("filter_level")
+            if filter_factor:
+                lines.append(f"  Filter:        {filter_factor} == {filter_level}")
             lines.append(f"  Model:         {result.get('formula', 'N/A')}")
             lines.append(f"  N subjects:    {result.get('n_subjects', 'N/A')}")
             lines.append(f"  N events:      {result.get('n_events', 'N/A')}")
