@@ -1,7 +1,7 @@
 [project]
 name = "pysurvanalysis"
-version = "0.2.0"
-description = "Survival analysis pipeline for census-based experiments"
+version = "0.3.0"
+description = "Comprehensive survival analysis pipeline for census-based experiments"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [

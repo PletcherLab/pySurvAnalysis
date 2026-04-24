@@ -593,3 +593,235 @@ def summary_statistics(data: pd.DataFrame) -> pd.DataFrame:
             "pct_censored": round(100 * censored / n, 1) if n > 0 else 0,
         })
     return pd.DataFrame(records)
+
+
+def gehan_wilcoxon_test(
+    data: pd.DataFrame,
+    group1: str,
+    group2: str,
+) -> dict:
+    """Two-sample Gehan-Wilcoxon weighted log-rank test.
+
+    Uses number-at-risk as weights at each event time, giving more weight
+    to early differences in survival (unlike the unweighted log-rank).
+
+    Returns
+    -------
+    dict with keys: group1, group2, chi2, p_value, df
+    """
+    subset = data[data["treatment"].isin([group1, group2])].copy()
+    groups = [group1, group2]
+    table = _build_count_table(subset, groups)
+
+    observed_1 = 0.0
+    expected_1 = 0.0
+    variance = 0.0
+
+    for _, row in table.iterrows():
+        n1 = row[f"n_{group1}"]
+        n2 = row[f"n_{group2}"]
+        d1 = row[f"d_{group1}"]
+        d2 = row[f"d_{group2}"]
+        n_total = n1 + n2
+        d_total = d1 + d2
+
+        if n_total == 0:
+            continue
+
+        weight = n_total  # Gehan-Wilcoxon weight
+        e1 = n1 * d_total / n_total
+        observed_1 += weight * d1
+        expected_1 += weight * e1
+
+        if n_total > 1:
+            v = (weight ** 2) * (n1 * n2 * d_total * (n_total - d_total)) / (n_total ** 2 * (n_total - 1))
+            variance += v
+
+    if variance > 0:
+        chi2 = (observed_1 - expected_1) ** 2 / variance
+        p_value = 1 - stats.chi2.cdf(chi2, df=1)
+    else:
+        chi2 = 0.0
+        p_value = 1.0
+
+    return {
+        "group1": group1,
+        "group2": group2,
+        "chi2": round(chi2, 4),
+        "p_value": p_value,
+        "df": 1,
+    }
+
+
+def pairwise_gehan_wilcoxon(data: pd.DataFrame) -> pd.DataFrame:
+    """Run Gehan-Wilcoxon tests for every pairwise combination of treatments.
+
+    Returns a DataFrame with one row per pair, including Bonferroni-corrected
+    p-values.
+    """
+    treatments = sorted(data["treatment"].unique())
+    results = []
+
+    for g1, g2 in combinations(treatments, 2):
+        result = gehan_wilcoxon_test(data, g1, g2)
+        results.append(result)
+
+    df = pd.DataFrame(results)
+    if len(df) > 0:
+        n_tests = len(df)
+        df["p_bonferroni"] = (df["p_value"] * n_tests).clip(upper=1.0)
+        df["significant_0.05"] = df["p_bonferroni"] < 0.05
+    return df
+
+
+def fit_parametric_models(
+    data: pd.DataFrame,
+    treatments: list[str] | None = None,
+) -> dict:
+    """Fit parametric survival models (Weibull, log-normal, log-logistic).
+
+    For each treatment group and each distribution, fits a parametric
+    accelerated failure time (AFT) model via lifelines and returns
+    parameter estimates and AIC for model comparison.
+
+    Parameters
+    ----------
+    data : DataFrame with ``time``, ``event``, ``treatment``
+    treatments : subset of treatments to fit (default: all)
+
+    Returns
+    -------
+    dict with keys:
+        results_by_treatment : dict of treatment → list of model dicts
+        aic_comparison : DataFrame with AIC for each model/treatment
+        best_model_per_treatment : dict of treatment → best model name
+    """
+    from lifelines import WeibullAFTFitter, LogNormalAFTFitter, LogLogisticAFTFitter
+
+    if treatments is None:
+        treatments = sorted(data["treatment"].unique())
+
+    model_classes = {
+        "Weibull": WeibullAFTFitter,
+        "Log-Normal": LogNormalAFTFitter,
+        "Log-Logistic": LogLogisticAFTFitter,
+    }
+
+    results_by_treatment: dict[str, list[dict]] = {}
+    aic_records = []
+
+    for treatment in treatments:
+        grp = data[data["treatment"] == treatment][["time", "event"]].copy()
+        if len(grp) < 5 or grp["event"].sum() < 2:
+            continue
+
+        treatment_results = []
+        for model_name, ModelClass in model_classes.items():
+            try:
+                model = ModelClass()
+                model.fit(grp, duration_col="time", event_col="event")
+                aic = float(model.AIC_)
+                params = model.params_.to_dict() if hasattr(model.params_, "to_dict") else {}
+                median_t = float(model.median_survival_time_) if hasattr(model, "median_survival_time_") else np.nan
+                treatment_results.append({
+                    "model": model_name,
+                    "aic": round(aic, 2),
+                    "log_likelihood": round(float(model.log_likelihood_), 4),
+                    "params": params,
+                    "median_survival": round(median_t, 2) if np.isfinite(median_t) else np.nan,
+                    "fitted_model": model,
+                })
+                aic_records.append({
+                    "treatment": treatment,
+                    "model": model_name,
+                    "aic": round(aic, 2),
+                    "log_likelihood": round(float(model.log_likelihood_), 4),
+                    "median_survival": round(median_t, 2) if np.isfinite(median_t) else np.nan,
+                })
+            except Exception:
+                pass
+
+        results_by_treatment[treatment] = treatment_results
+
+    aic_df = pd.DataFrame(aic_records)
+    best_per_treatment: dict[str, str] = {}
+    if len(aic_df) > 0:
+        idx = aic_df.groupby("treatment")["aic"].idxmin()
+        for _, row in aic_df.loc[idx].iterrows():
+            best_per_treatment[row["treatment"]] = row["model"]
+
+    return {
+        "results_by_treatment": results_by_treatment,
+        "aic_comparison": aic_df,
+        "best_model_per_treatment": best_per_treatment,
+    }
+
+
+def survival_quantiles(
+    data: pd.DataFrame,
+    quantiles: list[float] | None = None,
+) -> pd.DataFrame:
+    """Compute survival time quantiles from KM curves.
+
+    Returns the time at which survival drops below each quantile for each
+    treatment.  Uses the KM step function, so the reported time is the
+    first event time where S(t) ≤ (1 - quantile).
+
+    Parameters
+    ----------
+    data : individual-level DataFrame with ``time``, ``event``, ``treatment``
+    quantiles : list of quantiles as fractions, e.g. [0.10, 0.25, 0.50, 0.75, 0.90]
+
+    Returns
+    -------
+    DataFrame with treatment as index and one column per quantile.
+    """
+    from .lifetable import _lifetable_one_treatment
+
+    if quantiles is None:
+        quantiles = [0.10, 0.25, 0.50, 0.75, 0.90]
+
+    records = []
+    for treatment, grp in data.groupby("treatment"):
+        lt = _lifetable_one_treatment(grp)
+        row: dict = {"treatment": treatment}
+        for q in quantiles:
+            threshold = 1.0 - q
+            below = lt[lt["km_lx"] <= threshold]
+            row[f"q{int(q * 100)}"] = float(below["time"].iloc[0]) if len(below) > 0 else np.nan
+        records.append(row)
+
+    return pd.DataFrame(records)
+
+
+def experiment_summary(data: pd.DataFrame) -> dict:
+    """Compute experiment-level summary statistics.
+
+    Returns
+    -------
+    dict with: n_treatments, n_chambers, n_total, n_deaths, n_censored,
+               pct_censored, time_min, time_max, factors
+    """
+    n_total = len(data)
+    n_deaths = int(data["event"].sum())
+    n_censored = n_total - n_deaths
+    treatments = sorted(data["treatment"].unique())
+
+    n_chambers = int(data["chamber"].nunique()) if "chamber" in data.columns else None
+    time_min = float(data["time"].min())
+    time_max = float(data["time"].max())
+
+    factor_cols = [c for c in data.columns if c not in ("time", "event", "treatment", "chamber")]
+
+    return {
+        "n_treatments": len(treatments),
+        "n_chambers": n_chambers,
+        "n_total": n_total,
+        "n_deaths": n_deaths,
+        "n_censored": n_censored,
+        "pct_censored": round(100 * n_censored / n_total, 1) if n_total > 0 else 0,
+        "time_min": time_min,
+        "time_max": time_max,
+        "treatments": treatments,
+        "factors": factor_cols,
+    }

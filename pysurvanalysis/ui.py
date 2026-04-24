@@ -1,13 +1,17 @@
-"""PyQt6 interactive UI for the survival analysis pipeline.
+"""PyQt6 interactive UI for the survival analysis pipeline — v0.3.0
 
-Features:
-* Load Excel experiment files
-* View Kaplan-Meier curves, hazard rates, mortality, number-at-risk
-* Select/deselect individual treatments to plot
-* View lifetable data in a table
-* View log-rank test results and hazard ratios
-* Run analysis on selected subsets of treatments
-* Export reports
+Major improvements:
+* Modern Fusion theme with polished dark/light palette
+* Dashboard summary panel with key experiment metrics
+* New plot tabs: Nelson-Aalen, Log-Log diagnostic, Cumulative Events,
+  Smoothed Hazard, Hazard Ratio Forest, Survival Distribution, KM+Risk Table
+* Parametric models tab with AIC comparison table
+* Styled statistics display (coloured significance)
+* Drag-and-drop file / directory support
+* Recent files/projects menu (last 5 entries)
+* Export dialog supporting PNG, SVG, PDF
+* Treatment selector with text filter
+* Project directory support (auto-discovers .xlsx)
 """
 
 from __future__ import annotations
@@ -24,8 +28,8 @@ import pandas as pd
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QAction
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings, QMimeData
+from PyQt6.QtGui import QAction, QColor, QDragEnterEvent, QDropEvent, QFont, QPalette
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -33,10 +37,12 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -44,6 +50,7 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QStatusBar,
     QTabWidget,
@@ -52,23 +59,89 @@ from PyQt6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    QFrame,
+    QButtonGroup,
+    QRadioButton,
 )
 
 from . import data_loader, lifetable, plotting, statistics, report
 from .pipeline import AnalysisResult
 
 
-class CsvColumnDialog(QDialog):
-    """Dialog for mapping CSV columns to time, event, and factor roles.
+# ─────────────────────────────────────────────────────────────────────────────
+# Theme helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
-    Shown whenever the user opens a .csv or .tsv file so they can
-    confirm (or override) the auto-detected column assignments.
-    """
+ACCENT = "#1f77b4"
+ACCENT_HOVER = "#2a8fd4"
+DANGER = "#d62728"
+SUCCESS = "#2ca02c"
+WARN = "#ff7f0e"
+
+LIGHT_STYLE = """
+QMainWindow, QWidget { background-color: #f5f5f5; color: #1a1a1a; }
+QTabWidget::pane { border: 1px solid #cccccc; background: #ffffff; }
+QTabBar::tab { background: #e0e0e0; color: #333333; padding: 6px 14px;
+               border-radius: 4px 4px 0 0; margin-right: 2px; }
+QTabBar::tab:selected { background: #ffffff; color: #1f77b4; font-weight: bold; }
+QTabBar::tab:hover { background: #d0d8e8; }
+QPushButton { background-color: #1f77b4; color: white; border: none;
+              padding: 6px 14px; border-radius: 4px; font-size: 13px; }
+QPushButton:hover { background-color: #2a8fd4; }
+QPushButton:pressed { background-color: #155a8a; }
+QPushButton:disabled { background-color: #aaaaaa; color: #666666; }
+QGroupBox { border: 1px solid #cccccc; border-radius: 6px;
+            margin-top: 10px; padding-top: 8px;
+            font-weight: bold; color: #333333; }
+QGroupBox::title { subcontrol-origin: margin; left: 10px; top: -2px; }
+QTextEdit, QTableWidget { background: #ffffff; border: 1px solid #cccccc;
+                           border-radius: 4px; }
+QScrollArea { border: none; }
+QStatusBar { background: #e8e8e8; }
+QLineEdit { background: #ffffff; border: 1px solid #cccccc; border-radius: 4px;
+            padding: 3px 6px; }
+QComboBox { background: #ffffff; border: 1px solid #cccccc; border-radius: 4px;
+             padding: 3px 6px; }
+"""
+
+DARK_STYLE = """
+QMainWindow, QWidget { background-color: #1e1e2e; color: #cdd6f4; }
+QTabWidget::pane { border: 1px solid #45475a; background: #181825; }
+QTabBar::tab { background: #313244; color: #bac2de; padding: 6px 14px;
+               border-radius: 4px 4px 0 0; margin-right: 2px; }
+QTabBar::tab:selected { background: #181825; color: #89b4fa; font-weight: bold; }
+QTabBar::tab:hover { background: #3d3f5b; }
+QPushButton { background-color: #89b4fa; color: #1e1e2e; border: none;
+              padding: 6px 14px; border-radius: 4px; font-size: 13px; font-weight: bold; }
+QPushButton:hover { background-color: #b4befe; }
+QPushButton:pressed { background-color: #74c7ec; }
+QPushButton:disabled { background-color: #45475a; color: #6c7086; }
+QGroupBox { border: 1px solid #45475a; border-radius: 6px;
+            margin-top: 10px; padding-top: 8px;
+            font-weight: bold; color: #bac2de; }
+QGroupBox::title { subcontrol-origin: margin; left: 10px; top: -2px; }
+QTextEdit, QTableWidget { background: #181825; border: 1px solid #45475a;
+                           border-radius: 4px; color: #cdd6f4; }
+QScrollArea { border: none; }
+QStatusBar { background: #313244; color: #bac2de; }
+QLineEdit { background: #181825; border: 1px solid #45475a; border-radius: 4px;
+            padding: 3px 6px; color: #cdd6f4; }
+QComboBox { background: #181825; border: 1px solid #45475a; border-radius: 4px;
+             padding: 3px 6px; color: #cdd6f4; }
+"""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Column mapping dialog (CSV)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class CsvColumnDialog(QDialog):
+    """Dialog for mapping CSV columns to time, event, and factor roles."""
 
     def __init__(self, columns: list[str], parent=None):
         super().__init__(parent)
         self.setWindowTitle("CSV Column Mapping")
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(440)
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
@@ -76,18 +149,15 @@ class CsvColumnDialog(QDialog):
             "All unchecked columns in 'Factor columns' will be excluded."
         ))
 
-        # --- Time column ---
         layout.addWidget(QLabel("Time column (survival time):"))
         self._time_combo = QComboBox()
         self._time_combo.addItems(columns)
-        # Pre-select common names
         for candidate in ("Age", "age", "Time", "time", "T", "t"):
             if candidate in columns:
                 self._time_combo.setCurrentText(candidate)
                 break
         layout.addWidget(self._time_combo)
 
-        # --- Event column ---
         layout.addWidget(QLabel("Event column (1=event, 0=censored):"))
         self._event_combo = QComboBox()
         self._event_combo.addItems(columns)
@@ -97,7 +167,6 @@ class CsvColumnDialog(QDialog):
                 break
         layout.addWidget(self._event_combo)
 
-        # --- Factor columns ---
         layout.addWidget(QLabel("Factor columns (select all that apply):"))
         self._factor_list = QListWidget()
         self._factor_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
@@ -109,13 +178,11 @@ class CsvColumnDialog(QDialog):
                 item.setSelected(True)
         layout.addWidget(self._factor_list)
 
-        # --- Format hint ---
         layout.addWidget(QLabel("Format hint:"))
         self._format_combo = QComboBox()
         self._format_combo.addItems(["auto", "long", "wide"])
         layout.addWidget(self._format_combo)
 
-        # --- Buttons ---
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -123,7 +190,6 @@ class CsvColumnDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-        # Update factor pre-selection when time/event combos change
         self._time_combo.currentTextChanged.connect(self._refresh_factor_selection)
         self._event_combo.currentTextChanged.connect(self._refresh_factor_selection)
 
@@ -147,10 +213,14 @@ class CsvColumnDialog(QDialog):
         return self._format_combo.currentText()
 
 
-class AnalysisWorker(QThread):
-    """Run the analysis in a background thread to keep the UI responsive."""
+# ─────────────────────────────────────────────────────────────────────────────
+# Background analysis worker
+# ─────────────────────────────────────────────────────────────────────────────
 
-    finished = pyqtSignal(object)  # emits AnalysisResult
+class AnalysisWorker(QThread):
+    """Run the full analysis pipeline in a background thread."""
+
+    finished = pyqtSignal(object)
     error = pyqtSignal(str)
     progress = pyqtSignal(str)
 
@@ -176,7 +246,6 @@ class AnalysisWorker(QThread):
     def run(self):
         try:
             self.progress.emit("Loading data...")
-            # Excel-only: load chamber exclusions and defined plots
             excluded_chambers: set = set()
             defined_plots: list = []
             if self.input_path.suffix.lower() == ".xlsx":
@@ -193,7 +262,7 @@ class AnalysisWorker(QThread):
                 csv_format=self.csv_format,
             )
 
-            self.progress.emit("Computing lifetables...")
+            self.progress.emit("Computing lifetables (with Nelson-Aalen)...")
             lifetables = lifetable.compute_lifetables(individual_data)
 
             self.progress.emit("Computing statistics...")
@@ -205,6 +274,9 @@ class AnalysisWorker(QThread):
             pairwise_lr = statistics.pairwise_logrank(individual_data)
             omnibus_lr = statistics.logrank_multi(individual_data)
 
+            self.progress.emit("Running Gehan-Wilcoxon tests...")
+            pairwise_gw = statistics.pairwise_gehan_wilcoxon(individual_data)
+
             self.progress.emit("Computing hazard ratios...")
             hazard_ratios = statistics.pairwise_hazard_ratios(individual_data)
 
@@ -213,12 +285,32 @@ class AnalysisWorker(QThread):
                 individual_data, factors, assume_censored=self.assume_censored,
             )
 
-            # Save outputs
+            self.progress.emit("Computing survival quantiles...")
+            surv_quantiles = lifetable.survival_quantiles(lifetables)
+
+            self.progress.emit("Fitting parametric models...")
+            try:
+                parametric_models = statistics.fit_parametric_models(individual_data)
+            except Exception:
+                parametric_models = {}
+
+            exp_summary = statistics.experiment_summary(individual_data)
+
+            # Save CSV outputs
             self.output_dir.mkdir(parents=True, exist_ok=True)
             data_dir = self.output_dir / "data_output"
             data_dir.mkdir(exist_ok=True)
+            stats_dir = self.output_dir / "statistics"
+            stats_dir.mkdir(exist_ok=True)
             lifetables.to_csv(data_dir / "lifetables.csv", index=False)
             individual_data.to_csv(data_dir / "individual_data.csv", index=False)
+            surv_quantiles.to_csv(stats_dir / "survival_quantiles.csv", index=False)
+            if len(pairwise_lr) > 0:
+                pairwise_lr.to_csv(stats_dir / "logrank_pairwise.csv", index=False)
+            if len(pairwise_gw) > 0:
+                pairwise_gw.to_csv(stats_dir / "gehan_wilcoxon_pairwise.csv", index=False)
+            if len(hazard_ratios) > 0:
+                hazard_ratios.to_csv(stats_dir / "hazard_ratios.csv", index=False)
 
             result = AnalysisResult(
                 input_file=self.input_path,
@@ -235,12 +327,21 @@ class AnalysisWorker(QThread):
                 assume_censored=self.assume_censored,
                 excluded_chambers=excluded_chambers,
                 defined_plots=defined_plots,
+                pairwise_gw=pairwise_gw,
+                parametric_models=parametric_models,
+                surv_quantiles=surv_quantiles,
+                experiment_summary=exp_summary,
             )
 
             self.finished.emit(result)
         except Exception as e:
-            self.error.emit(str(e))
+            import traceback
+            self.error.emit(f"{e}\n\n{traceback.format_exc()}")
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Plot widget
+# ─────────────────────────────────────────────────────────────────────────────
 
 class PlotWidget(QWidget):
     """Widget containing a matplotlib figure with navigation toolbar."""
@@ -252,6 +353,7 @@ class PlotWidget(QWidget):
         self.toolbar = NavigationToolbar(self.canvas, self)
 
         layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.toolbar)
         layout.addWidget(self.canvas)
         self.setLayout(layout)
@@ -263,11 +365,8 @@ class PlotWidget(QWidget):
     def update_figure(self, fig: plt.Figure):
         """Replace the current figure content with a new one."""
         self.figure.clear()
-
-        # Copy axes from the source figure
         for src_ax in fig.axes:
             ax = self.figure.add_subplot(111)
-            # Transfer lines
             for line in src_ax.get_lines():
                 ax.plot(
                     line.get_xdata(), line.get_ydata(),
@@ -280,17 +379,18 @@ class PlotWidget(QWidget):
                     markeredgewidth=line.get_markeredgewidth(),
                     drawstyle=line.get_drawstyle(),
                 )
-            # Transfer fill_between patches
             for coll in src_ax.collections:
-                paths = coll.get_paths()
-                if paths:
-                    fc = coll.get_facecolor()
-                    ec = coll.get_edgecolor()
-                    alpha = coll.get_alpha()
-                    from matplotlib.collections import PathCollection, PolyCollection
-                    if isinstance(coll, PolyCollection):
+                from matplotlib.collections import PolyCollection
+                if isinstance(coll, PolyCollection):
+                    paths = coll.get_paths()
+                    if paths:
                         verts = [p.vertices for p in paths]
-                        new_coll = PolyCollection(verts, facecolors=fc, edgecolors=ec, alpha=alpha)
+                        new_coll = PolyCollection(
+                            verts,
+                            facecolors=coll.get_facecolor(),
+                            edgecolors=coll.get_edgecolor(),
+                            alpha=coll.get_alpha(),
+                        )
                         ax.add_collection(new_coll)
 
             ax.set_xlabel(src_ax.get_xlabel())
@@ -298,42 +398,126 @@ class PlotWidget(QWidget):
             ax.set_title(src_ax.get_title())
             ax.set_xlim(src_ax.get_xlim())
             ax.set_ylim(src_ax.get_ylim())
-            ax.legend(loc="best")
+            if src_ax.get_legend() is not None:
+                ax.legend(loc="best")
             ax.grid(True, alpha=0.3)
 
         self.figure.tight_layout()
         self.canvas.draw()
         plt.close(fig)
 
+    def export(self, path: str):
+        """Export the current figure to a file (PNG, SVG, or PDF)."""
+        self.figure.savefig(path, dpi=150, bbox_inches="tight")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dashboard summary panel
+# ─────────────────────────────────────────────────────────────────────────────
+
+class DashboardWidget(QWidget):
+    """Key experiment metrics shown as a summary card row."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._layout = QHBoxLayout(self)
+        self._layout.setContentsMargins(8, 4, 8, 4)
+        self._cards: list[tuple[QLabel, QLabel]] = []
+
+    def _make_card(self, title: str, value: str) -> QFrame:
+        frame = QFrame()
+        frame.setFrameShape(QFrame.Shape.StyledPanel)
+        frame.setLineWidth(1)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setSpacing(2)
+        t_lbl = QLabel(title)
+        t_lbl.setStyleSheet("font-size: 10px; color: #888888;")
+        v_lbl = QLabel(value)
+        v_lbl.setStyleSheet("font-size: 16px; font-weight: bold;")
+        v_lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        layout.addWidget(t_lbl)
+        layout.addWidget(v_lbl)
+        self._cards.append((t_lbl, v_lbl))
+        return frame
+
+    def set_data(self, result: AnalysisResult):
+        # Clear
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._cards.clear()
+
+        es = result.experiment_summary
+        n_t = len(result.individual_data["treatment"].unique())
+        n_total = len(result.individual_data)
+        n_deaths = int(result.individual_data["event"].sum())
+        pct_cens = round(100 * (n_total - n_deaths) / n_total, 1) if n_total > 0 else 0
+
+        metrics = [
+            ("Treatments", str(n_t)),
+            ("Individuals", str(n_total)),
+            ("Deaths", str(n_deaths)),
+            ("% Censored", f"{pct_cens}%"),
+        ]
+        if es.get("n_chambers") is not None:
+            metrics.insert(1, ("Chambers", str(es["n_chambers"])))
+
+        if len(result.mean_surv) > 0 and not pd.isna(result.mean_surv["rmst"].mean()):
+            mean_rmst = result.mean_surv["rmst"].mean()
+            metrics.append(("Mean RMST", f"{mean_rmst:.0f}h"))
+
+        for title, val in metrics:
+            self._layout.addWidget(self._make_card(title, val))
+        self._layout.addStretch()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Treatment selector with filter
+# ─────────────────────────────────────────────────────────────────────────────
 
 class TreatmentSelector(QGroupBox):
-    """Widget for selecting which treatments to display."""
+    """Checkboxes for selecting which treatments to display, with text filter."""
 
     selection_changed = pyqtSignal()
 
     def __init__(self, parent=None):
-        super().__init__("Treatment Selection", parent)
+        super().__init__("Treatments", parent)
         self.checkboxes: dict[str, QCheckBox] = {}
         self._layout = QVBoxLayout()
 
+        self._filter_edit = QLineEdit()
+        self._filter_edit.setPlaceholderText("Filter treatments…")
+        self._filter_edit.textChanged.connect(self._apply_filter)
+        self._layout.addWidget(self._filter_edit)
+
         btn_layout = QHBoxLayout()
-        btn_all = QPushButton("Select All")
-        btn_none = QPushButton("Deselect All")
+        btn_all = QPushButton("All")
+        btn_none = QPushButton("None")
+        btn_all.setFixedHeight(26)
+        btn_none.setFixedHeight(26)
         btn_all.clicked.connect(self._select_all)
         btn_none.clicked.connect(self._deselect_all)
         btn_layout.addWidget(btn_all)
         btn_layout.addWidget(btn_none)
         self._layout.addLayout(btn_layout)
 
-        self._cb_container = QVBoxLayout()
-        self._layout.addLayout(self._cb_container)
+        self._scroll = QScrollArea()
+        self._cb_widget = QWidget()
+        self._cb_layout = QVBoxLayout(self._cb_widget)
+        self._cb_layout.setContentsMargins(0, 0, 0, 0)
+        self._cb_layout.setSpacing(2)
+        self._scroll.setWidget(self._cb_widget)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._layout.addWidget(self._scroll)
         self._layout.addStretch()
         self.setLayout(self._layout)
 
     def set_treatments(self, treatments: list[str]):
-        # Clear existing
         for cb in self.checkboxes.values():
-            self._cb_container.removeWidget(cb)
+            self._cb_layout.removeWidget(cb)
             cb.deleteLater()
         self.checkboxes.clear()
 
@@ -342,7 +526,13 @@ class TreatmentSelector(QGroupBox):
             cb.setChecked(True)
             cb.stateChanged.connect(lambda: self.selection_changed.emit())
             self.checkboxes[t] = cb
-            self._cb_container.addWidget(cb)
+            self._cb_layout.addWidget(cb)
+
+        self._filter_edit.clear()
+
+    def _apply_filter(self, text: str):
+        for t, cb in self.checkboxes.items():
+            cb.setVisible(text.lower() in t.lower())
 
     def selected_treatments(self) -> list[str]:
         return [t for t, cb in self.checkboxes.items() if cb.isChecked()]
@@ -356,8 +546,12 @@ class TreatmentSelector(QGroupBox):
             cb.setChecked(False)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Data table widget
+# ─────────────────────────────────────────────────────────────────────────────
+
 class DataTableWidget(QWidget):
-    """Widget for displaying a pandas DataFrame in a table."""
+    """Filterable table display for DataFrames."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -371,8 +565,9 @@ class DataTableWidget(QWidget):
         self._df: Optional[pd.DataFrame] = None
 
         layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
         filter_layout = QHBoxLayout()
-        filter_layout.addWidget(QLabel("Filter by treatment:"))
+        filter_layout.addWidget(QLabel("Filter:"))
         filter_layout.addWidget(self.filter_combo)
         filter_layout.addStretch()
         layout.addLayout(filter_layout)
@@ -381,7 +576,6 @@ class DataTableWidget(QWidget):
 
     def set_data(self, df: pd.DataFrame):
         self._df = df
-        # Update filter options
         self.filter_combo.blockSignals(True)
         self.filter_combo.clear()
         self.filter_combo.addItem("All Treatments")
@@ -419,129 +613,205 @@ class DataTableWidget(QWidget):
         )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Statistics widget with colour-coded significance
+# ─────────────────────────────────────────────────────────────────────────────
+
 class StatisticsWidget(QWidget):
-    """Widget for displaying statistical test results."""
+    """Rich statistics display with HTML colour-coded significance."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.text = QTextEdit()
         self.text.setReadOnly(True)
-        self.text.setFontFamily("monospace")
+        self.text.setFont(QFont("Courier New", 10))
 
         layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.text)
         self.setLayout(layout)
 
-    def set_results(self, result: AnalysisResult):
-        lines = []
+    @staticmethod
+    def _sig_html(p: float) -> str:
+        if p < 0.001:
+            return f'<span style="color:#d62728;font-weight:bold">***</span>'
+        if p < 0.01:
+            return f'<span style="color:#d62728;font-weight:bold">**</span>'
+        if p < 0.05:
+            return f'<span style="color:#ff7f0e;font-weight:bold">*</span>'
+        return '<span style="color:#888888">ns</span>'
 
-        # Excluded chambers notice
+    def set_results(self, result: AnalysisResult):
+        html_parts = ['<pre style="font-family:Courier New,monospace;font-size:12px;">']
+
+        # Excluded chambers
         excl = getattr(result, "excluded_chambers", set())
         if excl:
             sorted_excl = sorted(excl, key=lambda x: (str(type(x).__name__), x))
-            lines.append("!" * 70)
-            lines.append("EXCLUDED CHAMBERS (flagged in ChamberFlags sheet)")
-            lines.append("!" * 70)
-            lines.append(f"  The following chambers were excluded from ALL analyses:")
-            lines.append(f"  {', '.join(str(c) for c in sorted_excl)}")
-            lines.append("")
+            html_parts.append(f'<span style="color:#d62728">{"!" * 70}\n')
+            html_parts.append("EXCLUDED CHAMBERS (flagged in ChamberFlags sheet)\n")
+            html_parts.append(f'{"!" * 70}</span>\n')
+            html_parts.append(f"  {', '.join(str(c) for c in sorted_excl)}\n\n")
 
         # Omnibus log-rank
         lr = result.omnibus_lr
-        lines.append("=" * 70)
-        lines.append("OMNIBUS LOG-RANK TEST (all treatments)")
-        lines.append("=" * 70)
-        lines.append(f"  Chi-square:          {lr['chi2']:.4f}")
-        lines.append(f"  Degrees of freedom:  {lr['df']}")
-        lines.append(f"  p-value:             {lr['p_value']:.6f}")
-        sig = "YES" if lr["p_value"] < 0.05 else "NO"
-        lines.append(f"  Significant (0.05):  {sig}")
-        lines.append("")
+        html_parts.append(f'<span style="color:{ACCENT};font-weight:bold">{"=" * 70}\n')
+        html_parts.append("OMNIBUS LOG-RANK TEST (all treatments)\n")
+        html_parts.append(f'{"=" * 70}</span>\n')
+        html_parts.append(f"  Chi-square:   {lr['chi2']:.4f}\n")
+        html_parts.append(f"  df:           {lr['df']}\n")
+        p = lr["p_value"]
+        html_parts.append(f"  p-value:      {p:.6f}  {self._sig_html(p)}\n\n")
 
         # Pairwise log-rank
-        lines.append("=" * 70)
-        lines.append("PAIRWISE LOG-RANK TESTS (Bonferroni corrected)")
-        lines.append("=" * 70)
+        html_parts.append(f'<span style="color:{ACCENT};font-weight:bold">{"=" * 70}\n')
+        html_parts.append("PAIRWISE LOG-RANK TESTS (Bonferroni)\n")
+        html_parts.append(f'{"=" * 70}</span>\n')
         if len(result.pairwise_lr) > 0:
             for _, row in result.pairwise_lr.iterrows():
-                lines.append(f"\n  {row['group1']}  vs  {row['group2']}")
-                lines.append(f"    Chi-square:        {row['chi2']:.4f}")
-                lines.append(f"    p-value (raw):     {row['p_value']:.6f}")
-                lines.append(f"    p-value (Bonf.):   {row['p_bonferroni']:.6f}")
-                sig = "*" if row["p_bonferroni"] < 0.05 else "ns"
-                lines.append(f"    Significance:      {sig}")
-        lines.append("")
+                pb = row["p_bonferroni"]
+                html_parts.append(f"\n  {row['group1']}  vs  {row['group2']}\n")
+                html_parts.append(f"    Chi²:         {row['chi2']:.4f}\n")
+                html_parts.append(f"    p raw:        {row['p_value']:.6f}\n")
+                html_parts.append(f"    p Bonferroni: {pb:.6f}  {self._sig_html(pb)}\n")
+        html_parts.append("\n")
+
+        # Gehan-Wilcoxon
+        pairwise_gw = getattr(result, "pairwise_gw", None)
+        if pairwise_gw is not None and len(pairwise_gw) > 0:
+            html_parts.append(f'<span style="color:{ACCENT};font-weight:bold">{"=" * 70}\n')
+            html_parts.append("GEHAN-WILCOXON WEIGHTED LOG-RANK TESTS\n")
+            html_parts.append(f'{"=" * 70}</span>\n')
+            for _, row in pairwise_gw.iterrows():
+                pb = row["p_bonferroni"]
+                html_parts.append(f"\n  {row['group1']}  vs  {row['group2']}\n")
+                html_parts.append(f"    Chi²:         {row['chi2']:.4f}\n")
+                html_parts.append(f"    p Bonferroni: {pb:.6f}  {self._sig_html(pb)}\n")
+            html_parts.append("\n")
 
         # Hazard ratios
-        lines.append("=" * 70)
-        lines.append("HAZARD RATIO ESTIMATES (log-rank O/E method)")
-        lines.append("=" * 70)
+        html_parts.append(f'<span style="color:{ACCENT};font-weight:bold">{"=" * 70}\n')
+        html_parts.append("HAZARD RATIO ESTIMATES (O/E method)\n")
+        html_parts.append(f'{"=" * 70}</span>\n')
         if len(result.hazard_ratios) > 0:
             for _, row in result.hazard_ratios.iterrows():
-                lines.append(f"\n  {row['group1']}  vs  {row['group2']}")
+                html_parts.append(f"\n  {row['group1']}  vs  {row['group2']}\n")
                 if pd.notna(row["hazard_ratio"]):
-                    lines.append(f"    HR:                {row['hazard_ratio']:.4f}")
-                    lines.append(f"    95% CI:            ({row['hr_ci_lo']:.4f}, {row['hr_ci_hi']:.4f})")
+                    hr = row["hazard_ratio"]
+                    color = DANGER if hr > 1.0 else SUCCESS
+                    html_parts.append(f'    HR: <span style="color:{color};font-weight:bold">{hr:.4f}</span>  ')
+                    html_parts.append(f"95% CI: ({row['hr_ci_lo']:.3f}, {row['hr_ci_hi']:.3f})\n")
                 else:
-                    lines.append("    HR:                N/A")
-        lines.append("")
+                    html_parts.append("    HR: N/A\n")
+        html_parts.append("\n")
 
-        # Summary
-        lines.append("=" * 70)
-        lines.append("SAMPLE SUMMARY")
-        lines.append("=" * 70)
-        for _, row in result.summary.iterrows():
-            lines.append(
-                f"  {row['treatment']:30s}  N={row['n_individuals']:4d}  "
-                f"Deaths={row['n_deaths']:4d}  Censored={row['n_censored']:4d}  "
-                f"({row['pct_censored']:.1f}% censored)"
-            )
-        lines.append("")
+        # Survival quantiles
+        sq = getattr(result, "surv_quantiles", None)
+        if sq is not None and len(sq) > 0:
+            html_parts.append(f'<span style="color:{ACCENT};font-weight:bold">{"=" * 70}\n')
+            html_parts.append("SURVIVAL QUANTILES (time at given survival fraction)\n")
+            html_parts.append(f'{"=" * 70}</span>\n')
+            q_cols = [c for c in sq.columns if c != "treatment"]
+            header = f"  {'Treatment':<28s}  " + "  ".join(f"{c:>8s}" for c in q_cols)
+            html_parts.append(header + "\n")
+            html_parts.append("  " + "-" * (len(header) - 2) + "\n")
+            for _, row in sq.iterrows():
+                vals = "  ".join(
+                    f"{row[c]:>8.1f}" if not pd.isna(row[c]) else "      NR"
+                    for c in q_cols
+                )
+                html_parts.append(f"  {str(row['treatment']):<28s}  {vals}\n")
+            html_parts.append("\n")
 
-        # Lifespan statistics
+        # Lifespan stats
         ls = result.lifespan_stats
-        has_top_pct = False
-
         if ls and "treatment_stats" in ls and len(ls["treatment_stats"]) > 0:
             ts = ls["treatment_stats"]
-            has_top_pct = "top_10pct_mean" in ts.columns
-
-            lines.append("=" * 70)
-            lines.append("LIFESPAN STATISTICS BY TREATMENT (KM-adjusted)")
-            lines.append("=" * 70)
+            html_parts.append(f'<span style="color:{ACCENT};font-weight:bold">{"=" * 70}\n')
+            html_parts.append("LIFESPAN STATISTICS BY TREATMENT\n")
+            html_parts.append(f'{"=" * 70}</span>\n')
             for _, row in ts.iterrows():
-                lines.append(f"\n  {row['group']}")
-                lines.append(f"    N={int(row['n'])}  Deaths={int(row['n_deaths'])}  Censored={int(row['n_censored'])}")
-                mean_str = f"{row['mean_rmst']:.1f}" if pd.notna(row["mean_rmst"]) else "N/A"
-                med_str = f"{row['median']:.1f}" if pd.notna(row["median"]) else "Not reached"
-                lines.append(f"    Mean (RMST):     {mean_str} hours")
-                lines.append(f"    Median:          {med_str} hours")
-                if has_top_pct and pd.notna(row.get("top_10pct_mean")):
-                    lines.append(f"    Top 10% mean:    {row['top_10pct_mean']:.1f} hours")
-                    lines.append(f"    Top  5% mean:    {row['top_5pct_mean']:.1f} hours")
-            lines.append("")
+                html_parts.append(f"\n  {row['group']}\n")
+                html_parts.append(f"    N={int(row['n'])}  Deaths={int(row['n_deaths'])}  Censored={int(row['n_censored'])}\n")
+                mean_s = f"{row['mean_rmst']:.1f}" if pd.notna(row["mean_rmst"]) else "N/A"
+                med_s = f"{row['median']:.1f}" if pd.notna(row["median"]) else "Not reached"
+                html_parts.append(f"    Mean (RMST): {mean_s} hours\n")
+                html_parts.append(f"    Median:      {med_s} hours\n")
+            html_parts.append("\n")
 
-        if ls and "factor_stats" in ls and len(ls["factor_stats"]) > 0:
-            fs = ls["factor_stats"]
-            has_top_pct_f = "top_10pct_mean" in fs.columns
+        # Sample summary
+        html_parts.append(f'<span style="color:{ACCENT};font-weight:bold">{"=" * 70}\n')
+        html_parts.append("SAMPLE SUMMARY\n")
+        html_parts.append(f'{"=" * 70}</span>\n')
+        for _, row in result.summary.iterrows():
+            html_parts.append(
+                f"  {row['treatment']:<30s}  N={row['n_individuals']:4d}  "
+                f"Deaths={row['n_deaths']:4d}  Censored={row['n_censored']:4d}  "
+                f"({row['pct_censored']:.1f}% censored)\n"
+            )
 
-            lines.append("=" * 70)
-            lines.append("LIFESPAN STATISTICS BY FACTOR LEVEL (pooled)")
-            lines.append("=" * 70)
-            for _, row in fs.iterrows():
-                lines.append(f"\n  {row['group']}")
-                lines.append(f"    N={int(row['n'])}  Deaths={int(row['n_deaths'])}  Censored={int(row['n_censored'])}")
-                mean_str = f"{row['mean_rmst']:.1f}" if pd.notna(row["mean_rmst"]) else "N/A"
-                med_str = f"{row['median']:.1f}" if pd.notna(row["median"]) else "Not reached"
-                lines.append(f"    Mean (RMST):     {mean_str} hours")
-                lines.append(f"    Median:          {med_str} hours")
-                if has_top_pct_f and pd.notna(row.get("top_10pct_mean")):
-                    lines.append(f"    Top 10% mean:    {row['top_10pct_mean']:.1f} hours")
-                    lines.append(f"    Top  5% mean:    {row['top_5pct_mean']:.1f} hours")
-            lines.append("")
+        html_parts.append("</pre>")
+        self.text.setHtml("".join(html_parts))
 
-        self.text.setPlainText("\n".join(lines))
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Parametric models tab
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ParametricModelsWidget(QWidget):
+    """Display AIC comparison table for parametric survival models."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._table = QTableWidget()
+        self._table.setAlternatingRowColors(True)
+        self._note = QLabel(
+            "Parametric AFT models (Weibull, Log-Normal, Log-Logistic) fitted per treatment.\n"
+            "Lower AIC indicates better fit.  ✓ = best model."
+        )
+        self._note.setWordWrap(True)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self._note)
+        layout.addWidget(self._table)
+
+    def set_data(self, parametric_models: dict):
+        aic_df = parametric_models.get("aic_comparison")
+        best = parametric_models.get("best_model_per_treatment", {})
+        if aic_df is None or len(aic_df) == 0:
+            self._table.setRowCount(0)
+            self._table.setColumnCount(0)
+            return
+
+        cols = ["treatment", "model", "aic", "log_likelihood", "median_survival"]
+        display_cols = ["Treatment", "Model", "AIC", "Log-Likelihood", "Median Survival"]
+        self._table.setColumnCount(len(display_cols))
+        self._table.setHorizontalHeaderLabels(display_cols)
+        self._table.setRowCount(len(aic_df))
+
+        for i, (_, row) in enumerate(aic_df.iterrows()):
+            is_best = best.get(row["treatment"]) == row["model"]
+            for j, col in enumerate(cols):
+                val = row.get(col, "")
+                if isinstance(val, float):
+                    text = f"{val:.2f}" if not pd.isna(val) else "N/A"
+                else:
+                    text = str(val)
+                if j == 1 and is_best:
+                    text += " ✓"
+                item = QTableWidgetItem(text)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if is_best:
+                    item.setBackground(QColor("#d4edda"))
+                self._table.setItem(i, j, item)
+
+        self._table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cox interaction analysis widget
+# ─────────────────────────────────────────────────────────────────────────────
 
 class CoxAnalysisWidget(QWidget):
     """Widget for configuring and running Cox PH and RMST interaction analyses."""
@@ -553,10 +823,8 @@ class CoxAnalysisWidget(QWidget):
 
         layout = QVBoxLayout()
 
-        # Config tab widget: Select Factors | Filter Data
         config_tabs = QTabWidget()
 
-        # Tab 1: Factor selection
         factor_tab = QWidget()
         factor_tab_layout = QVBoxLayout()
         self._factor_checkboxes: dict[str, QCheckBox] = {}
@@ -566,7 +834,6 @@ class CoxAnalysisWidget(QWidget):
         factor_tab.setLayout(factor_tab_layout)
         config_tabs.addTab(factor_tab, "Select Factors")
 
-        # Tab 2: Filter Data
         filter_tab = QWidget()
         filter_layout = QVBoxLayout()
 
@@ -593,7 +860,6 @@ class CoxAnalysisWidget(QWidget):
 
         layout.addWidget(config_tabs)
 
-        # Run buttons
         btn_layout = QHBoxLayout()
         self.run_cox_btn = QPushButton("Run Cox PH Analysis")
         self.run_cox_btn.setEnabled(False)
@@ -605,13 +871,16 @@ class CoxAnalysisWidget(QWidget):
         self.run_rmst_btn.clicked.connect(self._run_rmst)
         btn_layout.addWidget(self.run_rmst_btn)
 
+        clear_btn = QPushButton("Clear Results")
+        clear_btn.clicked.connect(self._clear_results)
+        btn_layout.addWidget(clear_btn)
+
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
 
-        # Results display
         self.results_text = QTextEdit()
         self.results_text.setReadOnly(True)
-        self.results_text.setFontFamily("monospace")
+        self.results_text.setFont(QFont("Courier New", 10))
         layout.addWidget(self.results_text)
 
         self.setLayout(layout)
@@ -620,7 +889,6 @@ class CoxAnalysisWidget(QWidget):
         self._result = result
         self._factors = result.factors
 
-        # Rebuild factor checkboxes
         for cb in self._factor_checkboxes.values():
             self._factor_container.removeWidget(cb)
             cb.deleteLater()
@@ -635,7 +903,6 @@ class CoxAnalysisWidget(QWidget):
             self._factor_checkboxes[f] = cb
             self._factor_container.addWidget(cb)
 
-        # Repopulate filter factor combo
         self._filter_factor_combo.blockSignals(True)
         self._filter_factor_combo.clear()
         self._filter_factor_combo.addItem("(None)")
@@ -647,19 +914,13 @@ class CoxAnalysisWidget(QWidget):
         self._filter_level_combo.setEnabled(False)
 
         self._update_run_buttons()
-
-        # Render any existing analyses
         self._render_results()
 
     def _selected_factors(self) -> list[str]:
-        return [
-            f for f, cb in self._factor_checkboxes.items()
-            if cb.isChecked()
-        ]
+        return [f for f, cb in self._factor_checkboxes.items() if cb.isChecked()]
 
     def _on_filter_factor_changed(self, text: str):
         self._filter_level_combo.clear()
-        # Restore all checkboxes first, then hide the one being used as filter
         for f, cb in self._factor_checkboxes.items():
             cb.setVisible(True)
         if text == "(None)" or self._result is None:
@@ -674,7 +935,6 @@ class CoxAnalysisWidget(QWidget):
         self._update_run_buttons()
 
     def _get_filter(self) -> tuple[str | None, str | None]:
-        """Return (factor, level) for the active data filter, or (None, None)."""
         factor = self._filter_factor_combo.currentText()
         if factor == "(None)":
             return None, None
@@ -702,18 +962,11 @@ class CoxAnalysisWidget(QWidget):
         selected = self._selected_factors()
         min_required = 2 if filter_factor else 1
         if len(selected) < min_required:
-            msg = ("Select at least 2 factors to run the analysis when a filter is active."
-                   if filter_factor else
-                   "Select at least one factor to run the analysis.")
-            QMessageBox.warning(self, "Insufficient Factors Selected", msg)
+            QMessageBox.warning(self, "Insufficient Factors", "Select at least one factor to run.")
             return
 
         data = self._apply_filter(self._result.individual_data)
-        cox_result = statistics.cox_interaction_analysis(
-            data,
-            self._result.factors,
-            selected_factors=selected,
-        )
+        cox_result = statistics.cox_interaction_analysis(data, self._result.factors, selected_factors=selected)
         if filter_factor:
             cox_result["filter_factor"] = filter_factor
             cox_result["filter_level"] = filter_level
@@ -729,18 +982,11 @@ class CoxAnalysisWidget(QWidget):
         selected = self._selected_factors()
         min_required = 2 if filter_factor else 1
         if len(selected) < min_required:
-            msg = ("Select at least 2 factors to run the analysis when a filter is active."
-                   if filter_factor else
-                   "Select at least one factor to run the analysis.")
-            QMessageBox.warning(self, "Insufficient Factors Selected", msg)
+            QMessageBox.warning(self, "Insufficient Factors", "Select at least one factor to run.")
             return
 
         data = self._apply_filter(self._result.individual_data)
-        rmst_result = statistics.rmst_interaction_analysis(
-            data,
-            self._result.factors,
-            selected_factors=selected,
-        )
+        rmst_result = statistics.rmst_interaction_analysis(data, self._result.factors, selected_factors=selected)
         if filter_factor:
             rmst_result["filter_factor"] = filter_factor
             rmst_result["filter_level"] = filter_level
@@ -749,19 +995,21 @@ class CoxAnalysisWidget(QWidget):
         output_dir = self._result.input_file.parent / f"{self._result.input_file.stem}_results"
         report.generate_report(self._result, output_dir)
 
+    def _clear_results(self):
+        if self._result is not None:
+            self._result.cox_analyses.clear()
+        self._render_results()
+
     def _render_results(self):
         if self._result is None or not self._result.cox_analyses:
             self.results_text.setPlainText(
                 "No interaction analyses run yet.\n\n"
-                "Select factors above and click one of the analysis buttons:\n\n"
-                "  Cox PH:  Fits a Cox proportional hazards model.\n"
+                "Select factors above and click an analysis button:\n\n"
+                "  Cox PH:  Cox proportional hazards model.\n"
                 "           Coefficients are log-hazard ratios.\n\n"
-                "  RMST:    Fits an OLS model on jackknife pseudo-values\n"
-                "           of restricted mean survival time.\n"
-                "           Coefficients are differences in mean survival (hours).\n"
-                "           Does not assume proportional hazards.\n\n"
-                "Results are accumulated and will be appended to the report\n"
-                "when the application is closed or a new file is opened."
+                "  RMST:    OLS on jackknife pseudo-values of RMST.\n"
+                "           Coefficients in hours. No PH assumption.\n\n"
+                "Results are appended to the report automatically."
             )
             return
 
@@ -769,7 +1017,7 @@ class CoxAnalysisWidget(QWidget):
         for i, result in enumerate(self._result.cox_analyses, 1):
             model_type = result.get("model_type", "cox_ph")
             is_rmst = model_type == "rmst_pseudo"
-            type_label = "RMST Pseudo-Value Regression" if is_rmst else "Cox Proportional Hazards"
+            type_label = "RMST" if is_rmst else "Cox PH"
             factors_str = ", ".join(result.get("factors_used", []))
 
             lines.append("=" * 70)
@@ -781,140 +1029,69 @@ class CoxAnalysisWidget(QWidget):
                 lines.append("")
                 continue
 
-            filter_factor = result.get("filter_factor")
-            filter_level = result.get("filter_level")
-            if filter_factor:
-                lines.append(f"  Filter:        {filter_factor} == {filter_level}")
-            lines.append(f"  Model:         {result.get('formula', 'N/A')}")
-            lines.append(f"  N subjects:    {result.get('n_subjects', 'N/A')}")
-            lines.append(f"  N events:      {result.get('n_events', 'N/A')}")
+            if result.get("filter_factor"):
+                lines.append(f"  Filter: {result['filter_factor']} == {result['filter_level']}")
+            lines.append(f"  Model:     {result.get('formula', 'N/A')}")
+            lines.append(f"  N subj:    {result.get('n_subjects', 'N/A')}")
+            lines.append(f"  N events:  {result.get('n_events', 'N/A')}")
 
             if is_rmst:
-                lines.append(f"  Tau (restrict): {result.get('tau', 'N/A')} hours")
-                lines.append(f"  Overall RMST:  {result.get('rmst_overall', 'N/A')} hours")
-                lines.append(f"  R-squared:     {result.get('r_squared', 'N/A')}")
-                if result.get("f_statistic") is not None:
-                    lines.append(f"  F-statistic:   {result['f_statistic']}")
+                lines.append(f"  Tau:       {result.get('tau', 'N/A')} hours")
+                lines.append(f"  RMST:      {result.get('rmst_overall', 'N/A')} hours")
+                lines.append(f"  R²:        {result.get('r_squared', 'N/A')}")
                 if result.get("f_p_value") is not None:
                     p = result["f_p_value"]
                     sig = "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else "ns"
-                    lines.append(f"  F p-value:     {p:.6f}  {sig}")
+                    lines.append(f"  F p-val:   {p:.6f}  {sig}")
             else:
                 if result.get("concordance") is not None:
-                    lines.append(f"  Concordance:   {result['concordance']}")
+                    lines.append(f"  C-index:   {result['concordance']}")
                 if result.get("AIC") is not None:
-                    lines.append(f"  AIC (partial): {result['AIC']}")
-                if result.get("log_likelihood") is not None:
-                    lines.append(f"  Log-lik:       {result['log_likelihood']}")
-                if result.get("log_likelihood_ratio_p") is not None:
-                    p = result["log_likelihood_ratio_p"]
-                    sig = "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else "ns"
-                    lines.append(f"  LR test p:     {p:.6f}  {sig}")
+                    lines.append(f"  AIC:       {result['AIC']}")
             lines.append("")
 
             coefs = result.get("coefficients")
             if coefs is not None and len(coefs) > 0:
-                # Column headers differ between Cox and RMST
-                if is_rmst:
-                    hdr_coef = "Coef(hrs)"
-                    hdr_extra = "95% CI (hours)"
-                else:
-                    hdr_coef = "Coef"
-                    hdr_extra = "95% CI (HR)"
-
                 for section_type, section_label in [
                     ("intercept", "INTERCEPT:"),
                     ("main_effect", "MAIN EFFECTS:"),
-                    ("interaction", "INTERACTION EFFECTS:"),
+                    ("interaction", "INTERACTIONS:"),
                 ]:
                     subset = coefs[coefs["term_type"] == section_type]
                     if len(subset) == 0:
                         continue
                     lines.append(f"  {section_label}")
-                    if is_rmst:
-                        lines.append(f"  {'Covariate':<30s} {hdr_coef:>10s} "
-                                     f"{'SE':>8s} {'t':>8s} {'p':>10s}  {hdr_extra}")
-                    else:
-                        lines.append(f"  {'Covariate':<30s} {hdr_coef:>8s} {'HR':>8s} "
-                                     f"{'SE':>8s} {'z':>8s} {'p':>10s}  {hdr_extra}")
-                    lines.append("  " + "-" * 100)
                     for _, row in subset.iterrows():
-                        p_str = f"{row['p_value']:.2e}" if row['p_value'] < 0.0001 else f"{row['p_value']:.4f}"
-                        sig = "***" if row['p_value'] < 0.001 else "**" if row['p_value'] < 0.01 else "*" if row['p_value'] < 0.05 else "   "
+                        p = row["p_value"]
+                        sig = "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else "   "
+                        p_str = f"{p:.2e}" if p < 0.0001 else f"{p:.4f}"
                         if is_rmst:
                             lines.append(
-                                f"  {row['covariate']:<30s} {row['coef']:>10.2f} "
-                                f"{row['se']:>8.2f} {row['z']:>8.3f} {p_str:>10s} {sig} "
-                                f"({row['coef_lo']:.2f}, {row['coef_hi']:.2f})"
+                                f"    {row['covariate']:<28s}  coef={row['coef']:>8.2f}  "
+                                f"SE={row['se']:>6.2f}  p={p_str:>10s} {sig}"
                             )
                         else:
                             lines.append(
-                                f"  {row['covariate']:<30s} {row['coef']:>8.4f} {row['HR']:>8.4f} "
-                                f"{row['se']:>8.4f} {row['z']:>8.3f} {p_str:>10s} {sig} "
-                                f"({row['HR_lo']:.3f}, {row['HR_hi']:.3f})"
+                                f"    {row['covariate']:<28s}  HR={row['HR']:>7.4f}  "
+                                f"p={p_str:>10s} {sig}"
                             )
                     lines.append("")
 
-            if result.get("warnings"):
-                lines.append("  WARNINGS:")
-                for w in result["warnings"]:
-                    lines.append(f"    - {w}")
-                lines.append("")
-
-            # ── LR omnibus interaction test (Cox only) ──────────────────
             if not is_rmst:
                 lr = result.get("lr_interaction")
-                lines.append("  " + "-" * 68)
-                lines.append("  OMNIBUS LR INTERACTION TEST (main effects vs interaction model)")
-                lines.append("  " + "-" * 68)
-                if lr is None:
-                    lines.append("  (Not applicable — no interaction terms; only one factor selected.)")
-                else:
+                if lr is not None:
                     p = lr["p_value"]
                     sig = "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else "ns"
-                    p_str = f"{p:.2e}" if p < 0.0001 else f"{p:.6f}"
-                    lines.append(f"  Interaction terms:   {', '.join(lr.get('interaction_cols', []))}")
-                    lines.append(f"  Log-lik (main):      {lr['ll_main']}")
-                    lines.append(f"  Log-lik (interact.): {lr['ll_interaction']}")
-                    lines.append(f"  LR statistic:        {lr['lr_stat']:.4f}  (df={lr['df']})")
-                    lines.append(f"  p-value:             {p_str}  {sig}")
-                    conclusion = ("Significant interaction" if p < 0.05
-                                  else "No significant interaction")
-                    lines.append(f"  Conclusion:          {conclusion} (p {'<' if p < 0.05 else '≥'} 0.05)")
-                    lines.append(f"  Concordance (main):  {lr['concordance_main']}")
-                lines.append("")
-
-                # ── PH assumption test ──────────────────────────────────
-                lines.append("  " + "-" * 68)
-                lines.append("  PROPORTIONAL HAZARDS ASSUMPTION (Schoenfeld residuals)")
-                lines.append("  " + "-" * 68)
-                ph = result.get("ph_test")
-                if ph is None:
-                    lines.append("  (Test could not be computed — see warnings above.)")
-                else:
-                    lines.append(f"  {'Covariate':<30s} {'Test stat':>10s} {'p-value':>10s}")
-                    lines.append("  " + "-" * 55)
-                    all_ok = True
-                    for _, row in ph.iterrows():
-                        p = row.get("p_value", float("nan"))
-                        sig = "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else "   "
-                        if p < 0.05:
-                            all_ok = False
-                        p_str = f"{p:.2e}" if p < 0.0001 else f"{p:.4f}"
-                        ts = row.get("test_statistic", float("nan"))
-                        lines.append(
-                            f"  {str(row.get('covariate', '?')):<30s} {ts:>10.4f} {p_str:>10s} {sig}"
-                        )
+                    lines.append(f"  LR interaction test: χ²={lr['lr_stat']:.4f}  "
+                                 f"df={lr['df']}  p={p:.6f} {sig}")
                     lines.append("")
-                    if all_ok:
-                        lines.append("  PH assumption appears satisfied for all covariates (p ≥ 0.05).")
-                    else:
-                        lines.append("  WARNING: PH assumption may be violated for covariate(s) marked *.")
-                        lines.append("  Consider a stratified model or time-varying coefficients.")
-                lines.append("")
 
         self.results_text.setPlainText("\n".join(lines))
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Defined plots widget
+# ─────────────────────────────────────────────────────────────────────────────
 
 class DefinedPlotsWidget(QWidget):
     """Widget for browsing KM plots defined in the DefinedPlots sheet."""
@@ -966,37 +1143,147 @@ class DefinedPlotsWidget(QWidget):
         self._plot_widget.update_figure(fig)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Export dialog
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ExportDialog(QDialog):
+    """Dialog to export the current plot or full report."""
+
+    def __init__(self, plot_widget: PlotWidget, result: AnalysisResult, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Export")
+        self.setMinimumWidth(400)
+        self._plot_widget = plot_widget
+        self._result = result
+
+        layout = QVBoxLayout(self)
+
+        export_grp = QGroupBox("Export options")
+        export_layout = QVBoxLayout(export_grp)
+
+        self._rb_plot_png = QRadioButton("Current plot as PNG")
+        self._rb_plot_svg = QRadioButton("Current plot as SVG")
+        self._rb_plot_pdf = QRadioButton("Current plot as PDF")
+        self._rb_report = QRadioButton("Full Markdown report + all plots")
+        self._rb_plot_png.setChecked(True)
+
+        export_layout.addWidget(self._rb_plot_png)
+        export_layout.addWidget(self._rb_plot_svg)
+        export_layout.addWidget(self._rb_plot_pdf)
+        export_layout.addWidget(self._rb_report)
+        layout.addWidget(export_grp)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._do_export)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _do_export(self):
+        if self._rb_report.isChecked():
+            dir_path = QFileDialog.getExistingDirectory(
+                self, "Select Export Directory",
+                str(self._result.input_file.parent),
+            )
+            if not dir_path:
+                return
+            report_path = report.generate_report(self._result, Path(dir_path))
+            QMessageBox.information(self, "Export Complete",
+                                    f"Report saved to:\n{report_path}")
+            self.accept()
+            return
+
+        ext = "png" if self._rb_plot_png.isChecked() else ("svg" if self._rb_plot_svg.isChecked() else "pdf")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Plot", "",
+            f"{ext.upper()} Files (*.{ext});;All Files (*)",
+        )
+        if not path:
+            return
+        self._plot_widget.export(path)
+        QMessageBox.information(self, "Export Complete", f"Plot saved to:\n{path}")
+        self.accept()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main window
+# ─────────────────────────────────────────────────────────────────────────────
+
 class MainWindow(QMainWindow):
-    """Main application window for the survival analysis pipeline."""
+    """Main application window — survival analysis pipeline."""
+
+    MAX_RECENT = 5
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("pySurvAnalysis — Survival Analysis Pipeline")
-        self.setMinimumSize(1200, 800)
+        self.setWindowTitle("pySurvAnalysis v0.3.0 — Survival Analysis")
+        self.setMinimumSize(1280, 850)
 
         self.result: Optional[AnalysisResult] = None
         self._current_file: Optional[Path] = None
         self._csv_params: dict = {}
+        self._theme: str = "light"
+
+        self._settings = QSettings("PletcherLab", "pySurvAnalysis")
 
         self._build_menu()
         self._build_ui()
         self._build_status_bar()
+        self._apply_theme("light")
+
+        self.setAcceptDrops(True)
+
+    # ── Theme ──────────────────────────────────────────────────────────────
+
+    def _apply_theme(self, theme: str):
+        self._theme = theme
+        self.setStyleSheet(DARK_STYLE if theme == "dark" else LIGHT_STYLE)
+
+    # ── Drag-and-drop ──────────────────────────────────────────────────────
+
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event: QDropEvent):
+        for url in event.mimeData().urls():
+            path = Path(url.toLocalFile())
+            if path.is_dir() or path.suffix.lower() in {".xlsx", ".csv", ".tsv"}:
+                self.load_file(path)
+                break
+
+    # ── Menu bar ───────────────────────────────────────────────────────────
 
     def _build_menu(self):
         menubar = self.menuBar()
 
+        # File menu
         file_menu = menubar.addMenu("&File")
 
-        open_action = QAction("&Open Experiment...", self)
+        open_action = QAction("&Open Experiment…", self)
         open_action.setShortcut("Ctrl+O")
         open_action.triggered.connect(self._open_file)
         file_menu.addAction(open_action)
 
-        export_action = QAction("&Export Report...", self)
+        open_dir_action = QAction("Open &Project Directory…", self)
+        open_dir_action.setShortcut("Ctrl+Shift+O")
+        open_dir_action.triggered.connect(self._open_directory)
+        file_menu.addAction(open_dir_action)
+
+        file_menu.addSeparator()
+
+        export_action = QAction("&Export…", self)
         export_action.setShortcut("Ctrl+E")
-        export_action.triggered.connect(self._export_report)
+        export_action.triggered.connect(self._show_export_dialog)
         file_menu.addAction(export_action)
 
+        file_menu.addSeparator()
+
+        # Recent files submenu
+        self._recent_menu = file_menu.addMenu("Recent Files")
+        self._rebuild_recent_menu()
         file_menu.addSeparator()
 
         quit_action = QAction("&Quit", self)
@@ -1004,6 +1291,7 @@ class MainWindow(QMainWindow):
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
+        # Analysis menu
         analysis_menu = menubar.addMenu("&Analysis")
 
         rerun_action = QAction("&Re-run with Selected Treatments", self)
@@ -1011,34 +1299,74 @@ class MainWindow(QMainWindow):
         rerun_action.triggered.connect(self._rerun_selected)
         analysis_menu.addAction(rerun_action)
 
+        # View menu
+        view_menu = menubar.addMenu("&View")
+
+        light_action = QAction("Light Theme", self)
+        light_action.triggered.connect(lambda: self._apply_theme("light"))
+        view_menu.addAction(light_action)
+
+        dark_action = QAction("Dark Theme", self)
+        dark_action.triggered.connect(lambda: self._apply_theme("dark"))
+        view_menu.addAction(dark_action)
+
+    def _rebuild_recent_menu(self):
+        self._recent_menu.clear()
+        recents = self._settings.value("recentFiles", []) or []
+        if not recents:
+            self._recent_menu.addAction("(none)").setEnabled(False)
+            return
+        for p in recents[:self.MAX_RECENT]:
+            action = QAction(str(p), self)
+            action.triggered.connect(lambda checked, path=p: self.load_file(Path(path)))
+            self._recent_menu.addAction(action)
+
+    def _add_recent(self, path: Path):
+        recents = self._settings.value("recentFiles", []) or []
+        p_str = str(path)
+        if p_str in recents:
+            recents.remove(p_str)
+        recents.insert(0, p_str)
+        self._settings.setValue("recentFiles", recents[:self.MAX_RECENT])
+        self._rebuild_recent_menu()
+
+    # ── UI layout ──────────────────────────────────────────────────────────
+
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
-        main_layout = QHBoxLayout(central)
+        main_vbox = QVBoxLayout(central)
+        main_vbox.setContentsMargins(4, 4, 4, 4)
+        main_vbox.setSpacing(4)
 
-        # Left panel: treatment selector + options
+        # Dashboard bar
+        self.dashboard = DashboardWidget()
+        main_vbox.addWidget(self.dashboard)
+
+        # Splitter: left panel | tabs
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        # Left panel
         left_panel = QVBoxLayout()
+        left_panel.setContentsMargins(4, 4, 4, 4)
 
-        # Assume censored checkbox
+        load_btn = QPushButton("Open File / Directory")
+        load_btn.clicked.connect(self._open_file)
+        left_panel.addWidget(load_btn)
+
         self.assume_censored_cb = QCheckBox("Assume remaining are censored")
         self.assume_censored_cb.setChecked(True)
         self.assume_censored_cb.setToolTip(
-            "Checked: cohort size from Design SampleSize; unaccounted\n"
-            "individuals added as right-censored at last observation.\n\n"
-            "Unchecked: cohort size = sum of deaths + censored per chamber."
+            "Checked: cohort size from Design SampleSize;\n"
+            "unaccounted individuals added as right-censored.\n\n"
+            "Unchecked: cohort = deaths + explicit censored per chamber."
         )
         self.assume_censored_cb.stateChanged.connect(self._on_censoring_changed)
         left_panel.addWidget(self.assume_censored_cb)
 
         self.treatment_selector = TreatmentSelector()
         self.treatment_selector.selection_changed.connect(self._update_plots)
-
-        scroll = QScrollArea()
-        scroll.setWidget(self.treatment_selector)
-        scroll.setWidgetResizable(True)
-        scroll.setMaximumWidth(250)
-
-        left_panel.addWidget(scroll)
+        left_panel.addWidget(self.treatment_selector)
 
         rerun_btn = QPushButton("Re-analyze Selected")
         rerun_btn.clicked.connect(self._rerun_selected)
@@ -1046,53 +1374,88 @@ class MainWindow(QMainWindow):
 
         left_widget = QWidget()
         left_widget.setLayout(left_panel)
+        left_widget.setMaximumWidth(240)
 
         # Right panel: tabs
         self.tabs = QTabWidget()
+        self._build_tabs()
 
-        # Tab 1: KM curves
-        self.km_plot = PlotWidget()
-        self.tabs.addTab(self.km_plot, "Kaplan\u2013Meier")
-
-        # Tab 2: Hazard
-        self.hazard_plot = PlotWidget()
-        self.tabs.addTab(self.hazard_plot, "Hazard Rate")
-
-        # Tab 3: Mortality
-        self.mortality_plot = PlotWidget()
-        self.tabs.addTab(self.mortality_plot, "Mortality (qx)")
-
-        # Tab 4: Number at risk
-        self.risk_plot = PlotWidget()
-        self.tabs.addTab(self.risk_plot, "Number at Risk")
-
-        # Tab 5: Lifetable data
-        self.lifetable_view = DataTableWidget()
-        self.tabs.addTab(self.lifetable_view, "Lifetable Data")
-
-        # Tab 6: Statistics
-        self.stats_view = StatisticsWidget()
-        self.tabs.addTab(self.stats_view, "Statistics")
-
-        # Tab 7: Summary
-        self.summary_view = DataTableWidget()
-        self.tabs.addTab(self.summary_view, "Summary")
-
-        # Tab 8: Cox Interaction Analysis
-        self.cox_view = CoxAnalysisWidget()
-        self.tabs.addTab(self.cox_view, "Cox / Interactions")
-
-        # Tab 9: Defined Plots (shown only when data has defined plots)
-        self.defined_plots_view = DefinedPlotsWidget()
-        self._defined_plots_tab_idx = self.tabs.addTab(self.defined_plots_view, "Defined Plots")
-        self.tabs.setTabVisible(self._defined_plots_tab_idx, False)
-
-        splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(left_widget)
         splitter.addWidget(self.tabs)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        main_layout.addWidget(splitter)
+
+        main_vbox.addWidget(splitter)
+
+    def _build_tabs(self):
+        # KM curves
+        self.km_plot = PlotWidget()
+        self.tabs.addTab(self.km_plot, "Kaplan–Meier")
+
+        # KM + risk table
+        self.km_risk_plot = PlotWidget()
+        self.tabs.addTab(self.km_risk_plot, "KM + Risk Table")
+
+        # Nelson-Aalen
+        self.na_plot = PlotWidget()
+        self.tabs.addTab(self.na_plot, "Nelson–Aalen")
+
+        # Log-Log diagnostic
+        self.loglog_plot = PlotWidget()
+        self.tabs.addTab(self.loglog_plot, "Log-Log (PH Check)")
+
+        # Cumulative events
+        self.cumevents_plot = PlotWidget()
+        self.tabs.addTab(self.cumevents_plot, "Cumulative Events")
+
+        # Hazard rate
+        self.hazard_plot = PlotWidget()
+        self.tabs.addTab(self.hazard_plot, "Hazard Rate")
+
+        # Smoothed hazard
+        self.smooth_hazard_plot = PlotWidget()
+        self.tabs.addTab(self.smooth_hazard_plot, "Smoothed Hazard")
+
+        # Survival distribution
+        self.dist_plot = PlotWidget()
+        self.tabs.addTab(self.dist_plot, "Survival Distribution")
+
+        # Mortality
+        self.mortality_plot = PlotWidget()
+        self.tabs.addTab(self.mortality_plot, "Mortality (qx)")
+
+        # Number at risk
+        self.risk_plot = PlotWidget()
+        self.tabs.addTab(self.risk_plot, "Number at Risk")
+
+        # Hazard ratio forest
+        self.forest_plot = PlotWidget()
+        self.tabs.addTab(self.forest_plot, "HR Forest")
+
+        # Lifetable data
+        self.lifetable_view = DataTableWidget()
+        self.tabs.addTab(self.lifetable_view, "Lifetable")
+
+        # Statistics
+        self.stats_view = StatisticsWidget()
+        self.tabs.addTab(self.stats_view, "Statistics")
+
+        # Summary
+        self.summary_view = DataTableWidget()
+        self.tabs.addTab(self.summary_view, "Summary")
+
+        # Parametric models
+        self.parametric_view = ParametricModelsWidget()
+        self.tabs.addTab(self.parametric_view, "Parametric Models")
+
+        # Cox / RMST interactions
+        self.cox_view = CoxAnalysisWidget()
+        self.tabs.addTab(self.cox_view, "Cox / RMST")
+
+        # Defined Plots
+        self.defined_plots_view = DefinedPlotsWidget()
+        self._defined_plots_tab_idx = self.tabs.addTab(self.defined_plots_view, "Defined Plots")
+        self.tabs.setTabVisible(self._defined_plots_tab_idx, False)
 
     def _build_status_bar(self):
         self.status_bar = QStatusBar()
@@ -1101,34 +1464,52 @@ class MainWindow(QMainWindow):
         self.progress_bar.setMaximumWidth(200)
         self.progress_bar.setVisible(False)
         self.status_bar.addPermanentWidget(self.progress_bar)
-        self.status_bar.showMessage("Ready. Open an experiment file to begin.")
+        self.status_bar.showMessage("Ready. Open an experiment file or project directory.")
+
+    # ── File loading ───────────────────────────────────────────────────────
 
     def _open_file(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Open Experiment File", "",
-            "Experiment Files (*.xlsx *.xls *.csv *.tsv);;Excel Files (*.xlsx *.xls);;CSV/TSV Files (*.csv *.tsv);;All Files (*)",
+            "Experiment Files (*.xlsx *.xls *.csv *.tsv);;All Files (*)",
         )
-        if not path:
-            return
-        self.load_file(Path(path))
+        if path:
+            self.load_file(Path(path))
 
-    def _save_pending_cox(self):
-        """No-op: report is rewritten immediately after each Cox/RMST analysis run."""
-        pass
-
-    def closeEvent(self, event):
-        """Save Cox analyses to report when the window is closed."""
-        self._save_pending_cox()
-        super().closeEvent(event)
+    def _open_directory(self):
+        dir_path = QFileDialog.getExistingDirectory(self, "Open Project Directory", "")
+        if dir_path:
+            self.load_file(Path(dir_path))
 
     def load_file(self, input_path: Path):
-        """Load an experiment file (Excel or CSV/TSV)."""
-        self._save_pending_cox()
+        """Load an experiment file or project directory."""
         self._current_file = input_path
+
+        # Project directory: auto-discover xlsx
+        if input_path.is_dir():
+            xlsx_files = list(input_path.glob("*.xlsx"))
+            if len(xlsx_files) == 0:
+                QMessageBox.critical(self, "No Excel File",
+                                     f"No .xlsx file found in:\n{input_path}")
+                return
+            if len(xlsx_files) > 1:
+                QMessageBox.critical(self, "Multiple Excel Files",
+                                     f"Found {len(xlsx_files)} .xlsx files. Place exactly one.")
+                return
+            xlsx_path = xlsx_files[0]
+            output_dir = input_path
+            self._csv_params = {}
+            self.assume_censored_cb.setEnabled(True)
+            assume_censored = data_loader.read_assume_censored(xlsx_path)
+            self.assume_censored_cb.blockSignals(True)
+            self.assume_censored_cb.setChecked(assume_censored)
+            self.assume_censored_cb.blockSignals(False)
+            self._add_recent(input_path)
+            self._run_analysis(xlsx_path, output_dir=output_dir, assume_censored=assume_censored)
+            return
 
         ext = input_path.suffix.lower()
         if ext in {".csv", ".tsv"}:
-            # Read column names and show the mapping dialog
             import pandas as pd
             sep = "\t" if ext == ".tsv" else ","
             try:
@@ -1148,10 +1529,8 @@ class MainWindow(QMainWindow):
             csv_format = dlg.csv_format()
 
             if not factor_cols:
-                QMessageBox.warning(
-                    self, "No Factors",
-                    "No factor columns selected. Select at least one factor column.",
-                )
+                QMessageBox.warning(self, "No Factors",
+                                    "Select at least one factor column.")
                 return
 
             self._csv_params = {
@@ -1160,48 +1539,56 @@ class MainWindow(QMainWindow):
                 "factor_cols": factor_cols,
                 "csv_format": csv_format,
             }
-            # Disable the assume-censored checkbox for CSV (not applicable)
             self.assume_censored_cb.setEnabled(False)
-            self.assume_censored_cb.setToolTip(
-                "Not applicable for CSV/TSV input — data is already individual-level."
-            )
+            self.assume_censored_cb.setToolTip("Not applicable for CSV/TSV input.")
+            self._add_recent(input_path)
             self._run_analysis(input_path, assume_censored=True, **self._csv_params)
         else:
-            # Excel path: read AssumeCensored from PrivateData
             self._csv_params = {}
             self.assume_censored_cb.setEnabled(True)
             self.assume_censored_cb.setToolTip(
-                "Checked: cohort size from Design SampleSize; unaccounted\n"
-                "individuals added as right-censored at last observation.\n\n"
-                "Unchecked: cohort size = sum of deaths + censored per chamber."
+                "Checked: cohort size from Design SampleSize.\n"
+                "Unchecked: cohort = deaths + censored per chamber."
             )
             assume_censored = data_loader.read_assume_censored(input_path)
             self.assume_censored_cb.blockSignals(True)
             self.assume_censored_cb.setChecked(assume_censored)
             self.assume_censored_cb.blockSignals(False)
+            self._add_recent(input_path)
             self._run_analysis(input_path, assume_censored=assume_censored)
 
     def _on_censoring_changed(self):
-        """Re-run analysis when the user toggles the censoring checkbox (Excel only)."""
         if self._current_file is None:
             return
         assume_censored = self.assume_censored_cb.isChecked()
-        self._run_analysis(self._current_file, assume_censored=assume_censored, **getattr(self, "_csv_params", {}))
+        # For directory mode, find the xlsx
+        input_path = self._current_file
+        output_dir = None
+        if input_path.is_dir():
+            xlsx_files = list(input_path.glob("*.xlsx"))
+            if xlsx_files:
+                output_dir = input_path
+                input_path = xlsx_files[0]
+        self._run_analysis(input_path, output_dir=output_dir,
+                           assume_censored=assume_censored,
+                           **getattr(self, "_csv_params", {}))
 
     def _run_analysis(
         self,
         input_path: Path,
+        output_dir: Optional[Path] = None,
         assume_censored: bool = True,
         time_col: str = "Age",
         event_col: str = "Event",
         factor_cols: list[str] | None = None,
         csv_format: str = "auto",
     ):
-        output_dir = input_path.parent / f"{input_path.stem}_results"
+        if output_dir is None:
+            output_dir = input_path.parent / f"{input_path.stem}_results"
 
         self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, 0)  # indeterminate
-        self.status_bar.showMessage("Running analysis...")
+        self.progress_bar.setRange(0, 0)
+        self.status_bar.showMessage("Running analysis…")
 
         self.worker = AnalysisWorker(
             input_path,
@@ -1227,13 +1614,18 @@ class MainWindow(QMainWindow):
         treatments = sorted(result.individual_data["treatment"].unique())
         self.treatment_selector.set_treatments(treatments)
 
+        # Dashboard
+        self.dashboard.set_data(result)
+
+        # Update all tabs
         self._update_plots()
         self.lifetable_view.set_data(result.lifetables)
         self.stats_view.set_results(result)
         self.summary_view.set_data(result.summary)
         self.cox_view.set_result(result)
+        self.parametric_view.set_data(result.parametric_models)
 
-        # Defined Plots tab: show only when plots are defined
+        # Defined plots tab
         dp = result.defined_plots
         if dp:
             self.defined_plots_view.set_data(result.lifetables, dp)
@@ -1241,14 +1633,14 @@ class MainWindow(QMainWindow):
         else:
             self.tabs.setTabVisible(self._defined_plots_tab_idx, False)
 
-        # Generate report on the main thread (matplotlib requires it)
+        # Generate report
         output_dir = result.input_file.parent / f"{result.input_file.stem}_results"
         report.generate_report(result, output_dir)
 
         self.status_bar.showMessage(
             f"Analysis complete: {result.input_file.name} — "
             f"{len(treatments)} treatments, {len(result.individual_data)} individuals. "
-            f"Results saved to {result.input_file.stem}_results/"
+            f"Results saved to {output_dir.name}/"
         )
 
     def _on_analysis_error(self, msg: str):
@@ -1256,31 +1648,45 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Analysis failed.")
         QMessageBox.critical(self, "Analysis Error", f"An error occurred:\n\n{msg}")
 
+    # ── Plot updates ───────────────────────────────────────────────────────
+
     def _update_plots(self):
         if self.result is None:
             return
 
         selected = self.treatment_selector.selected_treatments()
         if not selected:
-            self.km_plot.clear()
-            self.hazard_plot.clear()
-            self.mortality_plot.clear()
-            self.risk_plot.clear()
+            for pw in (self.km_plot, self.km_risk_plot, self.na_plot,
+                       self.loglog_plot, self.cumevents_plot,
+                       self.hazard_plot, self.smooth_hazard_plot,
+                       self.dist_plot, self.mortality_plot,
+                       self.risk_plot, self.forest_plot):
+                pw.clear()
             return
 
         lt = self.result.lifetables
 
-        fig_km = plotting.plot_km_curves(lt, treatments=selected)
-        self.km_plot.update_figure(fig_km)
+        self.km_plot.update_figure(plotting.plot_km_curves(lt, treatments=selected))
+        self.km_risk_plot.update_figure(plotting.plot_km_with_risk_table(lt, treatments=selected))
+        self.na_plot.update_figure(plotting.plot_nelson_aalen(lt, treatments=selected))
+        self.loglog_plot.update_figure(plotting.plot_log_log(lt, treatments=selected))
+        self.cumevents_plot.update_figure(plotting.plot_cumulative_events(lt, treatments=selected))
+        self.hazard_plot.update_figure(plotting.plot_hazard(lt, treatments=selected))
+        self.smooth_hazard_plot.update_figure(plotting.plot_smoothed_hazard(lt, treatments=selected))
 
-        fig_hz = plotting.plot_hazard(lt, treatments=selected)
-        self.hazard_plot.update_figure(fig_hz)
+        ind = self.result.individual_data
+        ind_sel = ind[ind["treatment"].isin(selected)]
+        self.dist_plot.update_figure(plotting.plot_survival_distribution(ind_sel, treatments=selected))
 
-        fig_qx = plotting.plot_mortality(lt, treatments=selected)
-        self.mortality_plot.update_figure(fig_qx)
+        self.mortality_plot.update_figure(plotting.plot_mortality(lt, treatments=selected))
+        self.risk_plot.update_figure(plotting.plot_number_at_risk(lt, treatments=selected))
 
-        fig_nr = plotting.plot_number_at_risk(lt, treatments=selected)
-        self.risk_plot.update_figure(fig_nr)
+        if len(self.result.hazard_ratios) > 0:
+            self.forest_plot.update_figure(
+                plotting.plot_hazard_ratio_forest(self.result.hazard_ratios)
+            )
+
+    # ── Re-analyze selected ────────────────────────────────────────────────
 
     def _rerun_selected(self):
         if self.result is None:
@@ -1289,23 +1695,22 @@ class MainWindow(QMainWindow):
 
         selected = self.treatment_selector.selected_treatments()
         if len(selected) < 2:
-            QMessageBox.warning(
-                self, "Insufficient Selection",
-                "Select at least 2 treatments to run statistical comparisons.",
-            )
+            QMessageBox.warning(self, "Insufficient Selection",
+                                "Select at least 2 treatments to run statistical comparisons.")
             return
 
-        # Re-run statistics on the selected subset
         subset = self.result.individual_data[
             self.result.individual_data["treatment"].isin(selected)
         ].copy()
 
-        pairwise_lr = statistics.pairwise_logrank(subset)
-        omnibus_lr = statistics.logrank_multi(subset)
-        hazard_ratios = statistics.pairwise_hazard_ratios(subset)
         lt_subset = self.result.lifetables[
             self.result.lifetables["treatment"].isin(selected)
         ].copy()
+
+        pairwise_lr = statistics.pairwise_logrank(subset)
+        omnibus_lr = statistics.logrank_multi(subset)
+        pairwise_gw = statistics.pairwise_gehan_wilcoxon(subset)
+        hazard_ratios = statistics.pairwise_hazard_ratios(subset)
         summary = statistics.summary_statistics(subset)
         median_surv = lifetable.median_survival(lt_subset)
         mean_surv = lifetable.mean_survival(subset)
@@ -1313,6 +1718,8 @@ class MainWindow(QMainWindow):
             subset, self.result.factors,
             assume_censored=self.result.assume_censored,
         )
+        surv_quantiles = lifetable.survival_quantiles(lt_subset)
+        exp_summary = statistics.experiment_summary(subset)
 
         sub_result = AnalysisResult(
             input_file=self.result.input_file,
@@ -1327,34 +1734,46 @@ class MainWindow(QMainWindow):
             hazard_ratios=hazard_ratios,
             lifespan_stats=lifespan_stats,
             assume_censored=self.result.assume_censored,
+            pairwise_gw=pairwise_gw,
+            surv_quantiles=surv_quantiles,
+            experiment_summary=exp_summary,
         )
 
         self.stats_view.set_results(sub_result)
         self.summary_view.set_data(summary)
         self.tabs.setCurrentWidget(self.stats_view)
-        self.status_bar.showMessage(
-            f"Re-analyzed {len(selected)} selected treatments."
-        )
+        self.status_bar.showMessage(f"Re-analyzed {len(selected)} treatments.")
 
-    def _export_report(self):
+    # ── Export ─────────────────────────────────────────────────────────────
+
+    def _show_export_dialog(self):
         if self.result is None:
             QMessageBox.information(self, "No Data", "Load an experiment first.")
             return
 
-        dir_path = QFileDialog.getExistingDirectory(
-            self, "Select Export Directory", str(self.result.input_file.parent),
-        )
-        if not dir_path:
-            return
+        current_tab = self.tabs.currentWidget()
+        plot_widget = None
+        if hasattr(current_tab, "figure"):
+            plot_widget = current_tab
+        elif hasattr(current_tab, "_plot_widget"):
+            plot_widget = current_tab._plot_widget
 
-        output_dir = Path(dir_path)
-        report_path = report.generate_report(self.result, output_dir)
-        self.status_bar.showMessage(f"Report exported to {report_path}")
-        QMessageBox.information(
-            self, "Export Complete",
-            f"Report saved to:\n{report_path}",
-        )
+        if plot_widget is None:
+            # Fall back to KM
+            plot_widget = self.km_plot
 
+        dlg = ExportDialog(plot_widget, self.result, parent=self)
+        dlg.exec()
+
+    # ── Close ──────────────────────────────────────────────────────────────
+
+    def closeEvent(self, event):
+        super().closeEvent(event)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public entry point
+# ─────────────────────────────────────────────────────────────────────────────
 
 def launch_ui():
     """Launch the PyQt6 survival analysis application."""

@@ -64,13 +64,28 @@ def generate_markdown(result: "AnalysisResult", output_dir: Path) -> str:
 
     lines: list[str] = []
 
-    lines.append(f"# Survival Analysis Report")
-    lines.append(f"")
-    lines.append(f"**Input file:** `{result.input_file.name}`  ")
-    lines.append(f"**Treatment factors:** {', '.join(result.factors)}  ")
+    lines.append("# Survival Analysis Report")
+    lines.append("")
+
+    # ── Experiment summary block ───────────────────────────────────────────
+    es = getattr(result, "experiment_summary", {})
+    lines.append("**Input file:** `{}`  ".format(result.input_file.name))
+    lines.append("**Treatment factors:** {}  ".format(", ".join(result.factors)))
     treatments = sorted(result.individual_data["treatment"].unique())
-    lines.append(f"**Number of treatment groups:** {len(treatments)}  ")
-    lines.append(f"**Total individuals:** {len(result.individual_data)}  ")
+    lines.append("**Number of treatment groups:** {}  ".format(len(treatments)))
+    lines.append("**Total individuals:** {}  ".format(len(result.individual_data)))
+    if es:
+        n_dead = es.get("n_deaths", "?")
+        n_cens = es.get("n_censored", "?")
+        pct_cens = es.get("pct_censored", "?")
+        t_min = es.get("time_min", "?")
+        t_max = es.get("time_max", "?")
+        n_ch = es.get("n_chambers")
+        if n_ch is not None:
+            lines.append(f"**Chambers:** {n_ch}  ")
+        lines.append(f"**Deaths / Censored:** {n_dead} / {n_cens} ({pct_cens}% censored)  ")
+        lines.append(f"**Observation window:** {t_min} – {t_max} hours  ")
+
     is_excel = result.input_file.suffix.lower() == ".xlsx"
     if is_excel:
         ac = getattr(result, "assume_censored", True)
@@ -80,16 +95,15 @@ def generate_markdown(result: "AnalysisResult", output_dir: Path) -> str:
         lines.append(f"**Assume unobserved individuals censored:** {ac_label}  ")
     lines.append("")
 
-    # --- Excluded chambers notice ---
+    # ── Excluded chambers ──────────────────────────────────────────────────
     excl = getattr(result, "excluded_chambers", set())
     if excl:
         sorted_excl = sorted(excl, key=lambda x: (str(type(x).__name__), x))
-        lines.append("> **Note — Excluded chambers:** The following chambers were flagged "
-                     f"as Excluded in ChamberFlags and omitted from all analyses: "
+        lines.append("> **Note — Excluded chambers:** "
                      f"{', '.join(str(c) for c in sorted_excl)}")
         lines.append("")
 
-    # --- Summary Table ---
+    # ── 1. Sample Summary ──────────────────────────────────────────────────
     lines.append("## 1. Sample Summary")
     lines.append("")
     lines.append("| Treatment | N | Deaths | Censored | % Censored |")
@@ -101,15 +115,17 @@ def generate_markdown(result: "AnalysisResult", output_dir: Path) -> str:
         )
     lines.append("")
 
-    # --- Median & Mean Survival ---
+    # ── 2. Survival Time Estimates ─────────────────────────────────────────
     lines.append("## 2. Survival Time Estimates")
     lines.append("")
+
     lines.append("### Median Survival Time")
     lines.append("")
     lines.append("| Treatment | Median Survival (hours) |")
     lines.append("|-----------|------------------------|")
     for _, row in result.median_surv.iterrows():
-        val = f"{row['median_survival']:.1f}" if not np.isnan(row["median_survival"]) else "Not reached"
+        val = (f"{row['median_survival']:.1f}"
+               if not np.isnan(row["median_survival"]) else "Not reached")
         lines.append(f"| {row['treatment']} | {val} |")
     lines.append("")
 
@@ -117,7 +133,7 @@ def generate_markdown(result: "AnalysisResult", output_dir: Path) -> str:
     lines.append("")
     if len(result.mean_surv) > 0:
         t_restrict = result.mean_surv["restriction_time"].iloc[0]
-        lines.append(f"*Restricted to t = {t_restrict:.1f} hours (common max observed time)*")
+        lines.append(f"*Restricted to t = {t_restrict:.1f} hours*")
         lines.append("")
         lines.append("| Treatment | RMST (hours) |")
         lines.append("|-----------|-------------|")
@@ -126,7 +142,27 @@ def generate_markdown(result: "AnalysisResult", output_dir: Path) -> str:
             lines.append(f"| {row['treatment']} | {val} |")
     lines.append("")
 
-    # --- Lifespan Statistics ---
+    # ── 2b. Survival Quantiles ─────────────────────────────────────────────
+    sq = getattr(result, "surv_quantiles", None)
+    if sq is not None and len(sq) > 0:
+        lines.append("### Survival Quantiles")
+        lines.append("")
+        lines.append("*Time (hours) at which survival drops to the given fraction.*")
+        lines.append("")
+        quantile_cols = [c for c in sq.columns if c != "treatment"]
+        header = "| Treatment | " + " | ".join(quantile_cols) + " |"
+        sep = "|-----------|" + "|".join(["---"] * len(quantile_cols)) + "|"
+        lines.append(header)
+        lines.append(sep)
+        for _, row in sq.iterrows():
+            vals = []
+            for col in quantile_cols:
+                v = row[col]
+                vals.append(f"{v:.1f}" if not np.isnan(v) else "NR")
+            lines.append(f"| {row['treatment']} | " + " | ".join(vals) + " |")
+        lines.append("")
+
+    # ── 3. Lifespan Statistics ─────────────────────────────────────────────
     ls = result.lifespan_stats
     if ls:
         ts = ls.get("treatment_stats")
@@ -176,89 +212,136 @@ def generate_markdown(result: "AnalysisResult", output_dir: Path) -> str:
                     lines.append(f"{base} |")
             lines.append("")
 
-    # --- KM Plot ---
-    lines.append("## 3. Kaplan\u2013Meier Survival Curves")
+    # ── 4. Kaplan–Meier Curves ────────────────────────────────────────────
+    lines.append("## 3. Kaplan–Meier Survival Curves")
     lines.append("")
-    fig_km = plotting.plot_km_curves(result.lifetables)
-    _fig_to_file(fig_km, plots_dir / "kaplan_meier.png")
+
+    _save_if_missing(lambda: plotting.plot_km_curves(result.lifetables),
+                     plots_dir / "kaplan_meier.png")
     lines.append("![Kaplan-Meier Survival Curves](plots/kaplan_meier.png)")
     lines.append("")
 
-    # --- Hazard Plot ---
-    lines.append("## 4. Hazard Rate Over Time")
+    _save_if_missing(lambda: plotting.plot_km_with_risk_table(result.lifetables),
+                     plots_dir / "km_with_risk_table.png")
+    lines.append("### KM Curves with Number-at-Risk Table")
     lines.append("")
-    fig_hz = plotting.plot_hazard(result.lifetables)
-    _fig_to_file(fig_hz, plots_dir / "hazard_rate.png")
+    lines.append("![KM with Risk Table](plots/km_with_risk_table.png)")
+    lines.append("")
+
+    # ── 5. Nelson-Aalen ───────────────────────────────────────────────────
+    lines.append("## 4. Nelson–Aalen Cumulative Hazard")
+    lines.append("")
+    lines.append("*Complementary non-parametric estimator of the cumulative hazard H(t). "
+                 "Shaded bands show 95% confidence intervals.*")
+    lines.append("")
+    _save_if_missing(lambda: plotting.plot_nelson_aalen(result.lifetables),
+                     plots_dir / "nelson_aalen.png")
+    lines.append("![Nelson-Aalen Cumulative Hazard](plots/nelson_aalen.png)")
+    lines.append("")
+
+    # ── 6. PH Assumption Check ─────────────────────────────────────────────
+    lines.append("## 5. Proportional Hazards Assumption Check")
+    lines.append("")
+    lines.append("*Log(−log S(t)) vs log(t). Parallel lines support the PH assumption.*")
+    lines.append("")
+    _save_if_missing(lambda: plotting.plot_log_log(result.lifetables),
+                     plots_dir / "log_log_diagnostic.png")
+    lines.append("![Log-Log Diagnostic](plots/log_log_diagnostic.png)")
+    lines.append("")
+
+    # ── 7. Cumulative Events ───────────────────────────────────────────────
+    lines.append("## 6. Cumulative Events")
+    lines.append("")
+    _save_if_missing(lambda: plotting.plot_cumulative_events(result.lifetables),
+                     plots_dir / "cumulative_events.png")
+    lines.append("![Cumulative Events](plots/cumulative_events.png)")
+    lines.append("")
+
+    # ── 8. Hazard Rate ─────────────────────────────────────────────────────
+    lines.append("## 7. Hazard Rate")
+    lines.append("")
+    _save_if_missing(lambda: plotting.plot_hazard(result.lifetables),
+                     plots_dir / "hazard_rate.png")
     lines.append("![Hazard Rate](plots/hazard_rate.png)")
     lines.append("")
 
-    # --- Mortality Plot ---
-    lines.append("## 5. Interval Mortality (qx)")
+    _save_if_missing(lambda: plotting.plot_smoothed_hazard(result.lifetables),
+                     plots_dir / "smoothed_hazard.png")
+    lines.append("### Smoothed Hazard Rate")
     lines.append("")
-    fig_qx = plotting.plot_mortality(result.lifetables)
-    _fig_to_file(fig_qx, plots_dir / "mortality_qx.png")
+    lines.append("![Smoothed Hazard Rate](plots/smoothed_hazard.png)")
+    lines.append("")
+
+    # ── 9. Survival Distribution ───────────────────────────────────────────
+    lines.append("## 8. Survival Time Distribution")
+    lines.append("")
+    _save_if_missing(lambda: plotting.plot_survival_distribution(result.individual_data),
+                     plots_dir / "survival_distribution.png")
+    lines.append("![Survival Distribution](plots/survival_distribution.png)")
+    lines.append("")
+
+    # ── 10. Mortality ─────────────────────────────────────────────────────
+    lines.append("## 9. Interval Mortality (qx)")
+    lines.append("")
+    _save_if_missing(lambda: plotting.plot_mortality(result.lifetables),
+                     plots_dir / "mortality_qx.png")
     lines.append("![Interval Mortality](plots/mortality_qx.png)")
     lines.append("")
 
-    # --- Number at Risk ---
-    lines.append("## 6. Number at Risk")
+    # ── 11. Number at Risk ─────────────────────────────────────────────────
+    lines.append("## 10. Number at Risk")
     lines.append("")
-    fig_nr = plotting.plot_number_at_risk(result.lifetables)
-    _fig_to_file(fig_nr, plots_dir / "number_at_risk.png")
+    _save_if_missing(lambda: plotting.plot_number_at_risk(result.lifetables),
+                     plots_dir / "number_at_risk.png")
     lines.append("![Number at Risk](plots/number_at_risk.png)")
     lines.append("")
 
-    # --- Defined Plots ---
+    # ── 12. Defined Plots (Excel) ──────────────────────────────────────────
     defined_plots = getattr(result, "defined_plots", [])
+    sec_offset = 11
     if defined_plots:
-        lines.append("## 7. Defined Plots (from DefinedPlots sheet)")
-        lines.append("")
-        lines.append("Each plot below shows a subset of treatments as specified in the "
-                     "DefinedPlots sheet of the workbook.")
+        lines.append(f"## {sec_offset}. Defined Plots (from DefinedPlots sheet)")
         lines.append("")
         for i, (plot_name, treatment_list) in enumerate(defined_plots, 1):
             valid = [t for t in treatment_list if t in result.lifetables["treatment"].unique()]
             heading = plot_name if plot_name else f"Plot {i}"
             if not valid:
                 lines.append(f"### {heading}")
-                lines.append("")
                 lines.append("*No valid treatments found for this plot.*")
                 lines.append("")
                 continue
-            lines.append(f"### {heading}")
-            lines.append("")
             fname = f"defined_plot_{i:02d}.png"
             fpath = plots_dir / fname
-            if not fpath.exists():
-                fig_dp = plotting.plot_km_curves(
-                    result.lifetables, treatments=valid, title=plot_name
-                )
-                _fig_to_file(fig_dp, fpath)
+            _save_if_missing(
+                lambda lt=result.lifetables, v=valid, pn=plot_name: plotting.plot_km_curves(lt, treatments=v, title=pn),
+                fpath,
+            )
+            lines.append(f"### {heading}")
+            lines.append("")
             lines.append(f"![{heading}](plots/{fname})")
             lines.append("")
+        sec_offset += 1
 
-    # --- Omnibus Log-Rank ---
-    sec_base = 8 if defined_plots else 7
-    lines.append(f"## {sec_base}. Omnibus Log-Rank Test")
+    # ── 13. Omnibus Log-Rank ───────────────────────────────────────────────
+    lines.append(f"## {sec_offset}. Omnibus Log-Rank Test")
     lines.append("")
     lr = result.omnibus_lr
     lines.append(f"- **Chi-square statistic:** {lr['chi2']}")
     lines.append(f"- **Degrees of freedom:** {lr['df']}")
     lines.append(f"- **p-value:** {_format_pvalue(lr['p_value'])} {_significance_stars(lr['p_value'])}")
     lines.append("")
-    if lr["p_value"] < 0.05:
-        lines.append("*The omnibus test indicates statistically significant differences in "
-                      "survival among the treatment groups.*")
-    else:
-        lines.append("*The omnibus test does not indicate statistically significant differences "
-                      "in survival among the treatment groups.*")
+    conclusion = ("*Statistically significant differences in survival among treatment groups.*"
+                  if lr["p_value"] < 0.05
+                  else "*No statistically significant differences in survival among treatment groups.*")
+    lines.append(conclusion)
     lines.append("")
+    sec_offset += 1
 
-    # --- Pairwise Log-Rank ---
-    lines.append(f"## {sec_base + 1}. Pairwise Log-Rank Tests")
+    # ── 14. Pairwise Log-Rank ──────────────────────────────────────────────
+    lines.append(f"## {sec_offset}. Pairwise Log-Rank Tests (Bonferroni corrected)")
     lines.append("")
     if len(result.pairwise_lr) > 0:
-        lines.append("| Comparison | Chi\u00b2 | p-value | p (Bonferroni) | Sig. |")
+        lines.append("| Comparison | Chi² | p-value | p (Bonferroni) | Sig. |")
         lines.append("|------------|-------|---------|----------------|------|")
         for _, row in result.pairwise_lr.iterrows():
             lines.append(
@@ -269,13 +352,34 @@ def generate_markdown(result: "AnalysisResult", output_dir: Path) -> str:
                 f"| {_significance_stars(row['p_bonferroni'])} |"
             )
     lines.append("")
+    sec_offset += 1
 
-    # --- Hazard Ratios ---
-    lines.append(f"## {sec_base + 2}. Hazard Ratio Estimates")
+    # ── 15. Gehan-Wilcoxon Tests ───────────────────────────────────────────
+    pairwise_gw = getattr(result, "pairwise_gw", None)
+    if pairwise_gw is not None and len(pairwise_gw) > 0:
+        lines.append(f"## {sec_offset}. Gehan-Wilcoxon Weighted Log-Rank Tests")
+        lines.append("")
+        lines.append("*Gehan-Wilcoxon test uses number-at-risk as weights, emphasising "
+                      "early differences in survival.*")
+        lines.append("")
+        lines.append("| Comparison | Chi² | p-value | p (Bonferroni) | Sig. |")
+        lines.append("|------------|-------|---------|----------------|------|")
+        for _, row in pairwise_gw.iterrows():
+            lines.append(
+                f"| {row['group1']} vs {row['group2']} "
+                f"| {row['chi2']:.4f} "
+                f"| {_format_pvalue(row['p_value'])} "
+                f"| {_format_pvalue(row['p_bonferroni'])} "
+                f"| {_significance_stars(row['p_bonferroni'])} |"
+            )
+        lines.append("")
+        sec_offset += 1
+
+    # ── 16. Hazard Ratios ──────────────────────────────────────────────────
+    lines.append(f"## {sec_offset}. Hazard Ratio Estimates")
     lines.append("")
     if len(result.hazard_ratios) > 0:
-        lines.append("*Hazard ratios estimated from log-rank O/E method. "
-                      "HR > 1 indicates higher risk in the first group.*")
+        lines.append("*Hazard ratios estimated from log-rank O/E method. HR > 1 → higher risk in first group.*")
         lines.append("")
         lines.append("| Comparison | HR | 95% CI |")
         lines.append("|------------|-----|--------|")
@@ -288,30 +392,75 @@ def generate_markdown(result: "AnalysisResult", output_dir: Path) -> str:
                     f"| {row['hazard_ratio']:.3f} "
                     f"| ({row['hr_ci_lo']:.3f}, {row['hr_ci_hi']:.3f}) |"
                 )
-    lines.append("")
+        lines.append("")
 
-    # --- Lifetable excerpt ---
-    lines.append(f"## {sec_base + 3}. Lifetable (First 10 Rows per Treatment)")
+    # Hazard ratio forest plot
+    _save_if_missing(lambda: plotting.plot_hazard_ratio_forest(result.hazard_ratios),
+                     plots_dir / "hazard_ratio_forest.png")
+    lines.append("![Hazard Ratio Forest Plot](plots/hazard_ratio_forest.png)")
+    lines.append("")
+    sec_offset += 1
+
+    # ── 17. Parametric Models ──────────────────────────────────────────────
+    pm = getattr(result, "parametric_models", {})
+    aic_df = pm.get("aic_comparison")
+    best_pm = pm.get("best_model_per_treatment", {})
+    if aic_df is not None and len(aic_df) > 0:
+        lines.append(f"## {sec_offset}. Parametric Survival Models (AIC Comparison)")
+        lines.append("")
+        lines.append("*Weibull, Log-Normal, and Log-Logistic AFT models fitted per treatment. "
+                      "Lower AIC indicates better fit.*")
+        lines.append("")
+        lines.append("| Treatment | Model | AIC | Log-Likelihood | Median Survival |")
+        lines.append("|-----------|-------|-----|----------------|-----------------|")
+        for _, row in aic_df.iterrows():
+            best_marker = " ✓" if best_pm.get(row["treatment"]) == row["model"] else ""
+            median_str = f"{row['median_survival']:.1f}" if not np.isnan(row.get("median_survival", np.nan)) else "N/A"
+            lines.append(
+                f"| {row['treatment']} | {row['model']}{best_marker} "
+                f"| {row['aic']:.1f} "
+                f"| {row['log_likelihood']:.2f} "
+                f"| {median_str} |"
+            )
+        lines.append("")
+        lines.append("*✓ = best-fitting model (lowest AIC) for that treatment.*")
+        lines.append("")
+        sec_offset += 1
+
+    # ── 18. Lifetable Excerpt ──────────────────────────────────────────────
+    lines.append(f"## {sec_offset}. Lifetable (First 10 Rows per Treatment)")
     lines.append("")
     for treatment in treatments:
         grp = result.lifetables[result.lifetables["treatment"] == treatment].head(10)
         lines.append(f"### {treatment}")
         lines.append("")
-        lines.append("| Time | n_at_risk | Deaths | Censored | lx | qx | px | hx | SE(KM) |")
-        lines.append("|------|-----------|--------|----------|-----|-----|-----|-----|--------|")
+        lines.append("| Time | n_at_risk | Deaths | Censored | lx | qx | px | hx | SE(KM) | H(t) NA |")
+        lines.append("|------|-----------|--------|----------|-----|-----|-----|-----|--------|---------|")
         for _, row in grp.iterrows():
+            na_h = row.get("na_H", 0.0)
             lines.append(
                 f"| {row['time']:.1f} | {row['n_at_risk']} | {row['n_deaths']} "
                 f"| {row['n_censored']} | {row['lx']:.4f} | {row['qx']:.4f} "
-                f"| {row['px']:.4f} | {row['hx']:.6f} | {row['se_km']:.4f} |"
+                f"| {row['px']:.4f} | {row['hx']:.6f} | {row['se_km']:.4f} "
+                f"| {na_h:.4f} |"
             )
         lines.append("")
 
     lines.append("---")
-    lines.append("*Report generated by pySurvAnalysis*")
+    lines.append("*Report generated by pySurvAnalysis v0.3.0*")
     lines.append("")
 
     return "\n".join(lines)
+
+
+def _save_if_missing(fig_factory, path: Path) -> None:
+    """Generate and save a plot only if the file does not yet exist."""
+    if not path.exists():
+        try:
+            fig = fig_factory()
+            _fig_to_file(fig, path)
+        except Exception:
+            pass
 
 
 def _render_coef_table_md(coefs: "pd.DataFrame", section_type: str, is_rmst: bool) -> list[str]:
@@ -370,7 +519,7 @@ def generate_cox_markdown(cox_analyses: list[dict]) -> str:
         return ""
 
     lines: list[str] = []
-    lines.append("## 11. Factorial Interaction Analyses")
+    lines.append("## Factorial Interaction Analyses")
     lines.append("")
 
     for i, result in enumerate(cox_analyses, 1):
@@ -400,8 +549,7 @@ def generate_cox_markdown(cox_analyses: list[dict]) -> str:
             if result.get("f_p_value") is not None:
                 p = result["f_p_value"]
                 lines.append(
-                    f"**F-test p-value:** "
-                    f"{_format_pvalue(p)} {_significance_stars(p)}  "
+                    f"**F-test p-value:** {_format_pvalue(p)} {_significance_stars(p)}  "
                 )
         else:
             if result.get("concordance") is not None:
@@ -429,7 +577,6 @@ def generate_cox_markdown(cox_analyses: list[dict]) -> str:
                 lines.append(f"- {w}")
             lines.append("")
 
-        # ── LR omnibus interaction test (Cox only) ──────────────────────
         if not is_rmst:
             lines.append("#### Omnibus LR Interaction Test")
             lines.append("")
@@ -459,7 +606,6 @@ def generate_cox_markdown(cox_analyses: list[dict]) -> str:
                 lines.append(f"*{conclusion} (p {'<' if p < 0.05 else '≥'} 0.05).*")
                 lines.append("")
 
-            # ── PH assumption test (Schoenfeld residuals) ────────────────
             lines.append("#### Proportional Hazards Assumption (Schoenfeld Residuals)")
             lines.append("")
             ph = result.get("ph_test")
@@ -487,7 +633,7 @@ def generate_cox_markdown(cox_analyses: list[dict]) -> str:
                 if all_ok:
                     lines.append("*PH assumption appears satisfied for all covariates (p ≥ 0.05).*")
                 else:
-                    lines.append("*Warning: PH assumption may be violated for covariate(s) marked \\*. "
+                    lines.append("*Warning: PH assumption may be violated for marked covariate(s). "
                                  "Consider a stratified model or time-varying coefficients.*")
                 lines.append("")
 
@@ -509,7 +655,7 @@ def generate_report(result: "AnalysisResult", output_dir: Path) -> Path:
     if cox_analyses:
         cox_md = generate_cox_markdown(cox_analyses)
         if cox_md:
-            footer = "---\n*Report generated by pySurvAnalysis*\n"
+            footer = "---\n*Report generated by pySurvAnalysis v0.3.0*\n"
             if footer in md_content:
                 md_content = md_content.replace(footer, cox_md + "\n" + footer)
             else:
