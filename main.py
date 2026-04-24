@@ -2,13 +2,26 @@
 
 Usage:
     python main.py                              # Launch the interactive UI
+    python main.py <project_dir>                # Load project directory in UI
+                                                # (auto-discovers the .xlsx file)
     python main.py <file.xlsx>                  # Load Excel file in UI
     python main.py <file.csv>                   # Load CSV file in UI (column dialog shown)
+    python main.py --headless <project_dir>     # Headless project directory analysis
     python main.py --headless <file.xlsx>       # Headless Excel analysis
-    python main.py --headless <file.csv>        # Headless CSV analysis (auto-detect columns)
+    python main.py --headless <file.csv>        # Headless CSV analysis
     python main.py --headless <file.csv> \\
         --time-col Age --event-col Event \\
-        --factor-cols IRS1 Foxo               # Headless CSV with explicit column names
+        --factor-cols IRS1 Foxo               # Headless CSV with explicit columns
+
+Project directory mode
+----------------------
+When a directory is passed, pySurvAnalysis will:
+  1. Locate the single .xlsx file inside the directory.
+  2. Write all outputs into organised subdirectories:
+       <project_dir>/plots/           — all plot images
+       <project_dir>/statistics/      — CSV statistics tables
+       <project_dir>/data_output/     — individual & lifetable CSVs
+       <project_dir>/report.md        — full Markdown report
 """
 
 from __future__ import annotations
@@ -23,9 +36,13 @@ def main():
         description="pySurvAnalysis — Survival Analysis Pipeline",
     )
     parser.add_argument(
-        "input_file",
+        "input_path",
         nargs="?",
-        help="Input file: Excel (.xlsx) with RawData/Design sheets, or CSV/TSV (.csv/.tsv)",
+        metavar="INPUT",
+        help=(
+            "Project directory (containing one .xlsx file), "
+            "or a direct file path (.xlsx / .csv / .tsv)"
+        ),
     )
     parser.add_argument(
         "--headless",
@@ -36,7 +53,11 @@ def main():
         "--output-dir", "-o",
         type=str,
         default=None,
-        help="Output directory for results (default: <input_stem>_results/)",
+        help=(
+            "Output directory for results. "
+            "Defaults to the project directory (for directory input) "
+            "or <input_stem>_results/ (for file input)."
+        ),
     )
     parser.add_argument(
         "--no-assume-censored",
@@ -61,8 +82,10 @@ def main():
         nargs="+",
         default=None,
         metavar="COL",
-        help="CSV long format: factor column names. If omitted, all columns other than "
-             "--time-col and --event-col are used as factors.",
+        help=(
+            "CSV long format: factor column names. "
+            "If omitted, all columns other than --time-col and --event-col are used."
+        ),
     )
     parser.add_argument(
         "--format",
@@ -76,8 +99,10 @@ def main():
         type=str,
         default=None,
         metavar="YAML_FILE",
-        help="CSV wide format: path to a YAML file specifying the column-to-group mapping. "
-             "Each entry should have keys: column, factor1_level, factor2_level, event (0 or 1).",
+        help=(
+            "CSV wide format: path to a YAML file specifying the column-to-group mapping. "
+            "Each entry should have keys: column, factor1_level, factor2_level, event (0 or 1)."
+        ),
     )
     parser.add_argument(
         "--factor-names",
@@ -89,14 +114,13 @@ def main():
     args = parser.parse_args()
 
     if args.headless:
-        if not args.input_file:
-            parser.error("--headless requires an input file")
+        if not args.input_path:
+            parser.error("--headless requires an input path (file or project directory)")
 
         from pysurvanalysis.pipeline import run_analysis
 
         assume_censored = not args.no_assume_censored
 
-        # Load optional YAML column mapping for wide CSV
         col_mapping = None
         if args.col_mapping:
             import yaml
@@ -104,7 +128,7 @@ def main():
                 col_mapping = yaml.safe_load(fh)
 
         result = run_analysis(
-            args.input_file,
+            args.input_path,
             args.output_dir,
             assume_censored=assume_censored,
             time_col=args.time_col,
@@ -114,20 +138,36 @@ def main():
             col_mapping=col_mapping,
             factor_names=args.factor_names,
         )
-        output_dir = args.output_dir or f"{Path(args.input_file).stem}_results"
-        print(f"Analysis complete. Results saved to {output_dir}/")
+
+        p = Path(args.input_path)
+        if p.is_dir():
+            output_str = str(p)
+        else:
+            output_str = args.output_dir or f"{p.stem}_results"
+        print(f"Analysis complete. Results saved to {output_str}/")
+
+        # Print experiment summary
+        es = result.experiment_summary
+        if es:
+            print(f"\nExperiment summary:")
+            print(f"  Treatments:  {es.get('n_treatments', '?')}")
+            print(f"  Chambers:    {es.get('n_chambers', 'N/A')}")
+            print(f"  Total N:     {es.get('n_total', '?')}")
+            print(f"  Deaths:      {es.get('n_deaths', '?')}")
+            print(f"  Censored:    {es.get('n_censored', '?')} ({es.get('pct_censored', '?')}%)")
+            print(f"  Time range:  {es.get('time_min', '?')} – {es.get('time_max', '?')} hours")
         return
 
-    # Launch UI
+    # ── Launch UI ──────────────────────────────────────────────────────────
     from pysurvanalysis.ui import MainWindow, QApplication
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     window = MainWindow()
 
-    if args.input_file:
+    if args.input_path:
         window.show()
-        window.load_file(Path(args.input_file))
+        window.load_file(Path(args.input_path))
     else:
         window.show()
 

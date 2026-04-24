@@ -37,6 +37,8 @@ def _lifetable_one_treatment(df: pd.DataFrame) -> pd.DataFrame:
     n_at_risk = len(df)
     cum_surv = 1.0
     greenwood_sum = 0.0
+    na_H = 0.0       # Nelson-Aalen cumulative hazard
+    na_var = 0.0     # Variance for NA CI
 
     for i, t in enumerate(times):
         at_t = df[df["time"] == t]
@@ -71,6 +73,15 @@ def _lifetable_one_treatment(df: pd.DataFrame) -> pd.DataFrame:
         else:
             hx = 0.0
 
+        # Nelson-Aalen cumulative hazard
+        if n_at_risk > 0 and d > 0:
+            na_H += d / n_at_risk
+            na_var += d / (n_at_risk ** 2)
+
+        na_se = np.sqrt(na_var)
+        na_ci_lo = max(0.0, na_H - 1.96 * na_se)
+        na_ci_hi = na_H + 1.96 * na_se
+
         records.append({
             "time": t,
             "n_at_risk": n_at_risk,
@@ -84,6 +95,10 @@ def _lifetable_one_treatment(df: pd.DataFrame) -> pd.DataFrame:
             "se_km": se_km,
             "km_ci_lo": max(0.0, cum_surv - 1.96 * se_km),
             "km_ci_hi": min(1.0, cum_surv + 1.96 * se_km),
+            "na_H": na_H,
+            "na_se": na_se,
+            "na_ci_lo": na_ci_lo,
+            "na_ci_hi": na_ci_hi,
         })
 
         n_at_risk -= (d + c)
@@ -260,3 +275,76 @@ def lifespan_statistics(
         "treatment_stats": treatment_stats,
         "factor_stats": factor_stats,
     }
+
+
+def survival_quantiles(
+    lifetable: pd.DataFrame,
+    quantiles: list[float] | None = None,
+) -> pd.DataFrame:
+    """Compute survival time quantiles from the KM lifetable.
+
+    Returns the time at which KM survival crosses each threshold for each
+    treatment.
+
+    Parameters
+    ----------
+    lifetable : DataFrame from ``compute_lifetables()``
+    quantiles : survival fractions at which to report time, e.g. [0.90, 0.75, 0.50, 0.25, 0.10]
+
+    Returns
+    -------
+    DataFrame with treatment and one column per quantile label.
+    """
+    if quantiles is None:
+        quantiles = [0.90, 0.75, 0.50, 0.25, 0.10]
+
+    records = []
+    for treatment, grp in lifetable.groupby("treatment"):
+        row: dict = {"treatment": treatment}
+        for q in quantiles:
+            below = grp[grp["km_lx"] <= q]
+            col_name = f"S={int(q * 100)}%"
+            row[col_name] = float(below["time"].iloc[0]) if len(below) > 0 else np.nan
+        records.append(row)
+
+    return pd.DataFrame(records)
+
+
+def at_risk_table(
+    lifetable: pd.DataFrame,
+    timepoints: list[float] | None = None,
+) -> pd.DataFrame:
+    """Build a number-at-risk table at specified timepoints.
+
+    Parameters
+    ----------
+    lifetable : DataFrame from ``compute_lifetables()``
+    timepoints : specific times at which to report n_at_risk (auto-chosen if None)
+
+    Returns
+    -------
+    DataFrame with treatments as rows and timepoints as columns.
+    """
+    all_times = sorted(lifetable["time"].unique())
+    if timepoints is None:
+        # Pick ~8 evenly spaced timepoints
+        n_pts = min(8, len(all_times))
+        indices = np.linspace(0, len(all_times) - 1, n_pts, dtype=int)
+        timepoints = [all_times[i] for i in indices]
+
+    records = []
+    for treatment, grp in lifetable.groupby("treatment"):
+        row: dict = {"treatment": treatment}
+        for tp in timepoints:
+            # Find the row just before or at this timepoint
+            at_or_before = grp[grp["time"] <= tp]
+            if len(at_or_before) == 0:
+                n_risk = grp["n_at_risk"].iloc[0] if len(grp) > 0 else 0
+            else:
+                last_row = at_or_before.iloc[-1]
+                n_risk = int(last_row["n_at_risk"] - last_row["n_deaths"] - last_row["n_censored"])
+                n_risk = max(0, n_risk)
+            row[f"t={tp:.0f}"] = n_risk
+        records.append(row)
+
+    return pd.DataFrame(records)
