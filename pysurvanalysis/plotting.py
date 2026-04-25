@@ -575,3 +575,79 @@ def plot_smoothed_hazard(
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     return fig
+
+
+def plot_chamber_overlay_km(
+    per_chamber_lt: pd.DataFrame,
+    treatment: str,
+    excluded_chambers: Optional[set] = None,
+    ax: Optional[plt.Axes] = None,
+    title: Optional[str] = None,
+) -> plt.Figure:
+    """Overlay KM curves for every chamber within a single treatment.
+
+    Each chamber gets one translucent step line; line ``gid`` is set to
+    ``f"chamber-{chamber_id}"`` so :mod:`mplcursors` can read it back to
+    annotate the hovered curve. Excluded chambers (by id) render as red
+    dashed lines so the user can visually confirm what's being dropped.
+
+    Parameters
+    ----------
+    per_chamber_lt : DataFrame
+        Output of :func:`lifetable.compute_lifetables_per_chamber`.
+    treatment : str
+        Treatment to display on this panel.
+    excluded_chambers : set, optional
+        Chamber ids to render as excluded.
+    ax : matplotlib Axes, optional
+    title : str, optional
+
+    Returns
+    -------
+    matplotlib Figure
+    """
+    excluded_chambers = excluded_chambers or set()
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(10, 6))
+    else:
+        fig = ax.get_figure()
+
+    sub = per_chamber_lt[per_chamber_lt["treatment"] == treatment]
+    chambers = sorted(sub["chamber"].unique(), key=lambda c: (isinstance(c, str), c))
+
+    base_color = "#1f77b4"
+    for chamber in chambers:
+        grp = sub[sub["chamber"] == chamber]
+        if grp.empty:
+            continue
+        times = np.concatenate([[0], grp["time"].values])
+        surv = np.concatenate([[1.0], grp["km_lx"].values])
+        n_events = int(grp["n_deaths"].sum())
+        last_t = float(grp["time"].max()) if len(grp) else 0.0
+
+        is_excluded = chamber in excluded_chambers
+        color = "#dc2626" if is_excluded else base_color
+        linestyle = "--" if is_excluded else "-"
+        alpha = 0.7 if is_excluded else 0.4
+        line, = ax.step(
+            times, surv, where="post",
+            color=color, linestyle=linestyle, alpha=alpha, linewidth=1.5,
+        )
+        line.set_gid(f"chamber-{chamber}")
+        # Stash metadata for mplcursors hover annotations
+        line.set_label(
+            f"Chamber {chamber} — {n_events} events, last t={last_t:.1f}"
+        )
+
+    ax.set_xlabel("Time (hours)", fontsize=12)
+    ax.set_ylabel("Survival probability (KM)", fontsize=12)
+    ax.set_title(
+        title if title is not None else f"{treatment} — per-chamber KM overlay",
+        fontsize=14,
+    )
+    ax.set_xlim(left=0)
+    ax.set_ylim(0.0, 1.05)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    return fig
+

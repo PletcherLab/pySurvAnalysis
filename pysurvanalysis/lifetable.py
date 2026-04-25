@@ -128,6 +128,37 @@ def compute_lifetables(individual_data: pd.DataFrame) -> pd.DataFrame:
     return pd.concat(parts, ignore_index=True)
 
 
+def compute_lifetables_per_chamber(individual_data: pd.DataFrame) -> pd.DataFrame:
+    """Compute one lifetable per (treatment, chamber).
+
+    Used by the QC viewer to draw an overlay of every chamber's KM curve
+    inside a treatment, so outliers can be picked out by eye.
+
+    Returns a DataFrame with columns
+    ``treatment, chamber, time, n_at_risk, n_deaths, km_lx`` (plus all the
+    other lifetable columns from :func:`_lifetable_one_treatment`).
+    Chambers with fewer than 2 individuals are still included; chambers
+    with no events show a flat km_lx=1.0 line.
+    """
+    if "chamber" not in individual_data.columns:
+        return pd.DataFrame(
+            columns=["treatment", "chamber", "time", "km_lx", "n_at_risk", "n_deaths"]
+        )
+    parts = []
+    for (treatment, chamber), grp in individual_data.groupby(["treatment", "chamber"]):
+        if len(grp) == 0:
+            continue
+        lt = _lifetable_one_treatment(grp)
+        lt.insert(0, "chamber", chamber)
+        lt.insert(0, "treatment", treatment)
+        parts.append(lt)
+    if not parts:
+        return pd.DataFrame(
+            columns=["treatment", "chamber", "time", "km_lx", "n_at_risk", "n_deaths"]
+        )
+    return pd.concat(parts, ignore_index=True)
+
+
 def median_survival(lifetable: pd.DataFrame) -> pd.DataFrame:
     """Extract median survival time for each treatment.
 

@@ -106,6 +106,9 @@ def run_analysis(
     col_mapping: list[dict] | None = None,
     factor_names: list[str] | None = None,
     factor_levels: dict[str, list] | None = None,
+    # New: extra chamber ids to exclude on top of any Excel ChamberFlags sheet.
+    # Sourced by callers from remove_chambers.csv (see ``pysurvanalysis.exclusions``).
+    extra_excluded_chambers: set | None = None,
 ) -> AnalysisResult:
     """Run the complete survival analysis pipeline.
 
@@ -154,6 +157,12 @@ def run_analysis(
     if input_path.suffix.lower() == ".xlsx":
         excluded_chambers = data_loader.load_chamber_flags(input_path)
         defined_plots = data_loader.load_defined_plots(input_path)
+
+    # Merge in any extra exclusions sourced from remove_chambers.csv (CSV inputs
+    # included — chamber will be "N/A" there and the loader will simply find no
+    # matches, which is the correct no-op).
+    if extra_excluded_chambers:
+        excluded_chambers = set(excluded_chambers) | set(extra_excluded_chambers)
 
     # ── 1. Load data ───────────────────────────────────────────────────────
     individual_data, factors = data_loader.load_experiment(
