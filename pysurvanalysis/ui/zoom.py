@@ -5,19 +5,23 @@
 * :class:`ZoomableTextView` displays a UTF-8 text file (txt/csv) in a
   read-only monospaced editor; the wheel zooms the font size with
   +/−/100% buttons.
+* :class:`ZoomableMarkdownView` renders a Markdown file via
+  ``QTextBrowser.setMarkdown`` (headings, tables, inline images) with the
+  same zoom toolbar; relative image paths resolve against the file's folder.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, Qt
-from PyQt6.QtGui import QFont, QPixmap
+from PyQt6.QtCore import QEvent, Qt, QUrl
+from PyQt6.QtGui import QFont, QImage, QPixmap, QTextDocument
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
     QScrollArea,
+    QTextBrowser,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -212,3 +216,116 @@ def _mk_btn(text: str, tooltip: str, slot) -> QToolButton:
     b.setAutoRaise(True)
     b.clicked.connect(slot)
     return b
+
+
+class _ImageScalingBrowser(QTextBrowser):
+    """QTextBrowser that downscales oversized images on load.
+
+    Plot PNGs from matplotlib are typically 800–1600 px wide and would
+    overflow the dock at full resolution. We override :meth:`loadResource`
+    to load each image as a :class:`QImage`, downscale it to ``max_width``
+    if larger, and return the scaled version. Smaller images pass through
+    untouched (no upscaling).
+    """
+
+    def __init__(self, parent: QWidget | None = None, *, max_width: int = 640) -> None:
+        super().__init__(parent)
+        self._max_img_width = max_width
+
+    def loadResource(self, resource_type, name):  # noqa: N802 — Qt API
+        if int(resource_type) == int(QTextDocument.ResourceType.ImageResource):
+            local = self._resolve_local(name)
+            if local is not None:
+                img = QImage(local)
+                if not img.isNull() and img.width() > self._max_img_width:
+                    return img.scaledToWidth(
+                        self._max_img_width,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                if not img.isNull():
+                    return img
+        return super().loadResource(resource_type, name)
+
+    def _resolve_local(self, url: QUrl) -> str | None:
+        if url.scheme() == "file":
+            return url.toLocalFile()
+        s = url.toString()
+        if not s:
+            return None
+        p = Path(s)
+        if p.is_absolute() and p.exists():
+            return str(p)
+        for base in self.searchPaths():
+            candidate = Path(base) / s
+            if candidate.exists():
+                return str(candidate)
+        return None
+
+
+class ZoomableMarkdownView(QWidget):
+    """Rendered-markdown view (headings, tables, inline images) with zoom buttons.
+
+    Uses ``QTextBrowser.setMarkdown`` (Qt 6's built-in CommonMark renderer).
+    Relative image and link references resolve against the markdown file's
+    folder so a ``report.md`` that embeds plots from the same directory
+    displays them inline. Oversized images are downscaled at load time so
+    plots don't overflow the dock width.
+    """
+
+    _ZOOM_STEP = 1.15
+    _MIN_PT = 6.0
+    _MAX_PT = 36.0
+    _IMG_MAX_WIDTH = 640
+
+    def __init__(self, md_path: Path, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._path = Path(md_path)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(6, 4, 6, 4)
+        toolbar.setSpacing(4)
+
+        toolbar.addWidget(_mk_btn("−", "Smaller text", lambda: self.zoom_by(1.0 / self._ZOOM_STEP)))
+        toolbar.addWidget(_mk_btn("+", "Larger text", lambda: self.zoom_by(self._ZOOM_STEP)))
+        toolbar.addWidget(_mk_btn("100%", "Default size", self.reset_zoom))
+        self._zoom_label = QLabel("")
+        self._zoom_label.setStyleSheet("color: palette(mid); padding-left: 6px;")
+        toolbar.addWidget(self._zoom_label)
+        toolbar.addStretch(1)
+        outer.addLayout(toolbar)
+
+        self._browser = _ImageScalingBrowser(max_width=self._IMG_MAX_WIDTH)
+        self._browser.setOpenExternalLinks(True)
+        # Resolve relative image / link references against the markdown's folder.
+        self._browser.setSearchPaths([str(self._path.parent)])
+        self._browser.document().setBaseUrl(QUrl.fromLocalFile(str(self._path.parent) + "/"))
+        self._default_pt = self._browser.font().pointSizeF() or 10.0
+        outer.addWidget(self._browser, 1)
+
+        try:
+            text = self._path.read_text(encoding="utf-8", errors="replace")
+            self._browser.setMarkdown(text)
+        except Exception as err:  # noqa: BLE001
+            self._browser.setPlainText(f"(could not read {self._path}: {err})")
+        self._update_label()
+
+    def zoom_by(self, factor: float) -> None:
+        font = self._browser.font()
+        new_pt = max(self._MIN_PT, min(self._MAX_PT, font.pointSizeF() * factor))
+        font.setPointSizeF(new_pt)
+        self._browser.setFont(font)
+        self._update_label()
+
+    def reset_zoom(self) -> None:
+        font = self._browser.font()
+        font.setPointSizeF(self._default_pt)
+        self._browser.setFont(font)
+        self._update_label()
+
+    def _update_label(self) -> None:
+        ratio = self._browser.font().pointSizeF() / self._default_pt
+        self._zoom_label.setText(f"{ratio * 100:.0f}%")

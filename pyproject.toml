@@ -29,5 +29,4 @@ packages = ["pysurvanalysis"]
 [project.scripts]
 pysurvanalysis = "main:main"
 psurv-hub = "pysurvanalysis.apps.hub:main"
-psurv-config = "pysurvanalysis.apps.config_editor:main"
 psurv-qc = "pysurvanalysis.apps.qc_viewer:main"

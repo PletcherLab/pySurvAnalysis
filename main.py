@@ -3,7 +3,6 @@
 Subcommands::
 
     pysurvanalysis hub [project_dir]      # launch the Analysis Hub
-    pysurvanalysis config [project_dir]   # launch the Config Editor
     pysurvanalysis qc [project_dir]       # launch the QC Viewer
     pysurvanalysis run <input> [opts]     # run the headless pipeline (writes report.md)
 
@@ -46,14 +45,6 @@ def _cmd_hub(args: argparse.Namespace) -> int:
 
     sys.argv = [sys.argv[0]] + ([str(args.path)] if args.path else [])
     hub_main()
-    return 0
-
-
-def _cmd_config(args: argparse.Namespace) -> int:
-    from pysurvanalysis.apps.config_editor import main as cfg_main
-
-    sys.argv = [sys.argv[0]] + ([str(args.path)] if args.path else [])
-    cfg_main()
     return 0
 
 
@@ -123,7 +114,6 @@ def main() -> None:
 
     for name, summary in (
         ("hub", "Launch the Analysis Hub (default)."),
-        ("config", "Launch the Config Editor."),
         ("qc", "Launch the QC Viewer."),
     ):
         sp = sub.add_parser(name, help=summary)
@@ -133,8 +123,6 @@ def main() -> None:
     _add_run_args(sp_run)
 
     args = parser.parse_args()
-    if args.cmd == "config":
-        sys.exit(_cmd_config(args))
     if args.cmd == "qc":
         sys.exit(_cmd_qc(args))
     if args.cmd == "run":

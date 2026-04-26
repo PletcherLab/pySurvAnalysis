@@ -38,7 +38,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .. import config as cfg_mod, data_loader, exclusions, lifetable, plotting
+from .. import data_loader, exclusions, lifetable, plotting
 from ..ui import ActionButton, Category, TopBar, apply_theme, icon, resolved_mode
 from ..ui import settings as ui_settings
 
@@ -148,8 +148,6 @@ class QcViewerWindow(QMainWindow):
         self.resize(1300, 820)
 
         self._project_dir: Path | None = None
-        self._cfg = cfg_mod.default_config()
-        self._cfg_path: Path | None = None
         self._data = None
         self._per_chamber_lt = None
         self._panels: dict[str, _ChamberPanel] = {}
@@ -257,10 +255,6 @@ class QcViewerWindow(QMainWindow):
             return
         self._project_dir = path
         self._proj_label.setText(str(path))
-        cfg_path = cfg_mod.find_config(path)
-        if cfg_path is not None:
-            self._cfg_path = cfg_path
-            self._cfg = cfg_mod.load_config(cfg_path)
         # Populate group combo
         self._group_combo.blockSignals(True)
         self._group_combo.clear()
@@ -268,13 +262,6 @@ class QcViewerWindow(QMainWindow):
             self._group_combo.addItem(g)
         if self._group_combo.count() == 0:
             self._group_combo.addItem("default")
-        # Pick the cfg's default group if present
-        default_grp = (self._cfg.get("global", {}) or {}).get("default_exclusion_group", "default")
-        idx = self._group_combo.findText(default_grp)
-        if idx >= 0:
-            self._group_combo.setCurrentIndex(idx)
-        else:
-            self._group_combo.setEditText(default_grp)
         self._group_combo.blockSignals(False)
         self._excluded = set(exclusions.chambers_for_group(path, self._group_combo.currentText().strip()))
         self._reload_data()
@@ -306,24 +293,13 @@ class QcViewerWindow(QMainWindow):
             )
             return
         try:
-            g = self._cfg.get("global", {}) or {}
-            cw = self._cfg.get("csv_wide", {}) or {}
-            kwargs = dict(
-                assume_censored=bool(g.get("assume_censored", True)),
-                excluded_chambers=set(),  # don't drop anything yet — we visualise *all*
-                time_col=g.get("time_col", "Age"),
-                event_col=g.get("event_col", "Event"),
-                factor_cols=g.get("factor_cols"),
+            # QC needs to see *every* chamber so the user can choose which to
+            # exclude — so we never pre-drop chambers here. The data file's
+            # Design sheet (Excel) is the authoritative source for the
+            # experimental factor names; CSV inputs auto-detect.
+            self._data, _factors = data_loader.load_experiment(
+                path, excluded_chambers=set(),
             )
-            ext = path.suffix.lower()
-            if ext in {".csv", ".tsv"}:
-                fmt = (g.get("input_format") or "csv_long").replace("csv_", "")
-                kwargs["csv_format"] = fmt if fmt in ("long", "wide") else "auto"
-                if fmt == "wide":
-                    kwargs["factor_names"] = cw.get("factor_names")
-                    kwargs["factor_levels"] = cw.get("factor_levels")
-                    kwargs["col_mapping"] = cw.get("col_mapping")
-            self._data, _factors = data_loader.load_experiment(path, **kwargs)
         except Exception as err:  # noqa: BLE001
             QMessageBox.warning(self, "Load failed", str(err))
             return

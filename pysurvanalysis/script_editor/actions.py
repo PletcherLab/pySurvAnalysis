@@ -46,10 +46,14 @@ class ParamSpec:
 
 @dataclass
 class RunContext:
-    """State threaded through a script run."""
+    """State threaded through a script run.
+
+    Experimental design (time/event columns, factor names) is read from the
+    data file itself; only the input *format* and a couple of toggles need
+    to be passed explicitly. ``wide_factor_names`` is required for csv_wide.
+    """
 
     project_dir: Any = None
-    cfg: dict | None = None
     data: Any = None  # individual-level DataFrame
     factors: list[str] | None = None
     lifetables: Any = None
@@ -57,6 +61,8 @@ class RunContext:
     figure: Callable[[str, Any], None] = lambda _title, _fig: None
     excluded_chambers: set | None = None
     assume_censored: bool = True
+    input_format: str = "excel"  # excel | csv (auto long/wide) | csv_long | csv_wide
+    wide_factor_names: list[str] | None = None
 
 
 @dataclass
@@ -106,9 +112,7 @@ def _exec_load_data(params: dict, ctx: RunContext) -> None:
 
     if ctx.project_dir is None:
         raise RuntimeError("load_data: no project directory in context")
-    g = (ctx.cfg or {}).get("global", {}) or {}
-    cw = (ctx.cfg or {}).get("csv_wide", {}) or {}
-    fmt = g.get("input_format", "excel")
+    fmt = ctx.input_format or "excel"
     pdir = ctx.project_dir
     target = None
     if fmt == "excel":
@@ -127,17 +131,21 @@ def _exec_load_data(params: dict, ctx: RunContext) -> None:
     kwargs = dict(
         assume_censored=ctx.assume_censored,
         excluded_chambers=ctx.excluded_chambers or set(),
-        time_col=g.get("time_col", "Age"),
-        event_col=g.get("event_col", "Event"),
-        factor_cols=g.get("factor_cols"),
     )
     if fmt == "csv_long":
         kwargs["csv_format"] = "long"
     elif fmt == "csv_wide":
+        if not ctx.wide_factor_names:
+            raise RuntimeError(
+                "load_data: csv_wide format requires wide_factor_names in the run context"
+            )
         kwargs["csv_format"] = "wide"
-        kwargs["factor_names"] = cw.get("factor_names")
-        kwargs["factor_levels"] = cw.get("factor_levels")
-        kwargs["col_mapping"] = cw.get("col_mapping")
+        kwargs["factor_names"] = ctx.wide_factor_names
+    elif fmt == "csv":
+        # Auto-detect long vs wide; supply factor_names as a fallback for wide.
+        kwargs["csv_format"] = "auto"
+        if ctx.wide_factor_names:
+            kwargs["factor_names"] = ctx.wide_factor_names
     data, factors = data_loader.load_experiment(target, **kwargs)
     ctx.data = data
     ctx.factors = factors
@@ -356,14 +364,16 @@ def _exec_report(params: dict, ctx: RunContext) -> None:
 
     if ctx.project_dir is None:
         raise RuntimeError("report: no project directory in context")
-    out = params.get("output_dir") or str(ctx.project_dir)
-    run_analysis(
+    # Empty/None output_dir lets pipeline.run_analysis derive
+    # <project>/<datafile_stem>_results/ — the project-wide convention.
+    out = params.get("output_dir") or None
+    result = run_analysis(
         input_path=str(ctx.project_dir),
         output_dir=out,
         assume_censored=ctx.assume_censored,
         extra_excluded_chambers=ctx.excluded_chambers or set(),
     )
-    ctx.log(f"Saved: {out}/report.md")
+    ctx.log(f"Saved: {result.output_dir / 'report.md'}")
 
 
 # ---------------------------------------------------------------------------
@@ -374,7 +384,7 @@ ACTIONS: dict[str, Action] = {
     "load_data": Action(
         key="load_data",
         title="Load data",
-        description="Load the project's data file using config settings.",
+        description="Load the project's data file (Excel, CSV-long, or CSV-wide).",
         category=Category.LOAD,
         icon_name="load",
         params=(),

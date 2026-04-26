@@ -1,1 +1,1 @@
-"""Visual node editor for survival_config.yaml ``scripts:`` entries."""
+"""Visual node editor for survival_scripts.yaml entries."""

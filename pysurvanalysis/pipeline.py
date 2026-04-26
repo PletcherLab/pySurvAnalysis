@@ -27,6 +27,7 @@ class AnalysisResult:
     def __init__(
         self,
         input_file: Path,
+        output_dir: Path,
         factors: list[str],
         individual_data: pd.DataFrame,
         lifetables: pd.DataFrame,
@@ -48,6 +49,7 @@ class AnalysisResult:
         nelson_aalen: pd.DataFrame | None = None,
     ):
         self.input_file = input_file
+        self.output_dir = output_dir
         self.factors = factors
         self.individual_data = individual_data
         self.lifetables = lifetables
@@ -117,8 +119,8 @@ def run_analysis(
     input_path : path to a project directory (containing one .xlsx file) **or**
         path to an experiment file (.xlsx, .csv, or .tsv) directly.
     output_dir : directory for output files.  Defaults to
-        ``<project_dir>/`` when a directory is given, or
-        ``<stem>_results/`` next to the input file otherwise.
+        ``<project_dir>/<stem>_results/`` (where ``stem`` comes from the
+        discovered or supplied input file).
     assume_censored : bool
         Excel only.  If True, unaccounted individuals are added as
         right-censored at the last census time.
@@ -136,10 +138,10 @@ def run_analysis(
     if input_path.is_dir():
         project_dir = input_path
         input_path = _discover_xlsx(project_dir)
-        if output_dir is None:
-            output_dir = project_dir
 
     # ── Output directory setup ─────────────────────────────────────────────
+    # Convention: every run writes into <project>/<datafile_stem>_results/ so
+    # multiple input files in one project don't clobber each other.
     if output_dir is None:
         output_dir = input_path.parent / f"{input_path.stem}_results"
     output_dir = Path(output_dir)
@@ -263,6 +265,7 @@ def run_analysis(
     # ── 13. Build result and generate report ───────────────────────────────
     result = AnalysisResult(
         input_file=input_path,
+        output_dir=output_dir,
         factors=factors,
         individual_data=individual_data,
         lifetables=lifetables,

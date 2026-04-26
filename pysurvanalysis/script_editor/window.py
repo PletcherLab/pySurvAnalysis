@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
 
 import yaml
 
-from .. import config as cfg_mod
+from .. import scripts_io
 from ..ui import ActionButton, Category, TopBar, icon, resolved_mode
 from ..ui import settings as ui_settings
 from .actions import ACTIONS
@@ -35,13 +35,13 @@ from .palette import Palette
 
 
 class ScriptEditorWindow(QMainWindow):
-    """Edit ``cfg["scripts"]`` visually and write back to YAML."""
+    """Edit a project's saved scripts and write to ``survival_scripts.yaml``."""
 
     scriptsSaved = pyqtSignal(str)  # absolute YAML path
 
     def __init__(
         self,
-        cfg_path: str | Path,
+        project_dir: str | Path,
         factors: list[str] | None = None,
         parent: QWidget | None = None,
     ) -> None:
@@ -49,13 +49,10 @@ class ScriptEditorWindow(QMainWindow):
         self.setWindowTitle("pySurvAnalysis — Script Editor")
         self.resize(1280, 780)
 
-        self._cfg_path = Path(cfg_path)
-        self._cfg = cfg_mod.load_config(self._cfg_path) if self._cfg_path.is_file() else cfg_mod.default_config()
-        self._scripts: list[dict] = list(self._cfg.get("scripts") or [])
+        self._project_dir = Path(project_dir)
+        self._scripts: list[dict] = scripts_io.load_scripts(self._project_dir)
         self._active_idx = 0 if self._scripts else -1
-        self._factors = list(factors or list(
-            (self._cfg.get("global", {}) or {}).get("experimental_design_factors", {}).keys()
-        ))
+        self._factors = list(factors or [])
         self._dirty = False
 
         self._build_ui()
@@ -70,7 +67,7 @@ class ScriptEditorWindow(QMainWindow):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        self._top_bar = TopBar(f"Script Editor — {self._cfg_path.name}")
+        self._top_bar = TopBar(f"Script Editor — {self._project_dir.name}")
         save_btn = ActionButton("Save", Category.LOAD, icon_name="save", primary=True)
         save_btn.clicked.connect(self._save)
         new_btn = ActionButton("+ New script", Category.SCRIPTS, icon_name="add")
@@ -251,9 +248,7 @@ class ScriptEditorWindow(QMainWindow):
     # ------------------------------------------------------------- IO
 
     def _save(self) -> None:
-        cfg = cfg_mod.load_config(self._cfg_path) if self._cfg_path.is_file() else cfg_mod.default_config()
-        cfg["scripts"] = deepcopy(self._scripts)
-        cfg_mod.save_config(self._cfg_path, cfg)
+        path = scripts_io.save_scripts(self._project_dir, deepcopy(self._scripts))
         self._dirty = False
-        self.scriptsSaved.emit(str(self._cfg_path.resolve()))
-        QMessageBox.information(self, "Saved", f"Wrote {len(self._scripts)} script(s) to {self._cfg_path}.")
+        self.scriptsSaved.emit(str(path))
+        QMessageBox.information(self, "Saved", f"Wrote {len(self._scripts)} script(s) to {path}.")

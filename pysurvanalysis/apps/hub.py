@@ -51,12 +51,12 @@ from PyQt6.QtWidgets import (
 )
 
 from .. import (
-    config as cfg_mod,
     data_loader,
     exclusions,
     lifetable,
     plotting,
     report,
+    scripts_io,
     statistics,
 )
 from ..pipeline import run_analysis
@@ -69,6 +69,7 @@ from ..ui import (
     SidebarNav,
     TopBar,
     ZoomableImageView,
+    ZoomableMarkdownView,
     ZoomableTextView,
     apply_theme,
     icon,
@@ -96,14 +97,17 @@ class HubWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         self._project_dir: Path | None = None
+        self._loaded_path: Path | None = None  # absolute path of last-loaded data file
         self._data = None  # individual-level DataFrame
         self._factors: list[str] = []
         self._lifetables = None  # cached
-        self._cfg: dict = cfg_mod.default_config()
-        self._cfg_path: Path | None = None
+        self._scripts: list[dict] = []
         self._worker: TaskWorker | None = None
         self._cards: dict[str, Card] = {}
         self._factor_checks: dict[str, QCheckBox] = {}
+        self._factor_filter_btns: dict[str, QToolButton] = {}
+        self._factor_levels: dict[str, list[str]] = {}
+        self._factor_allowed: dict[str, set[str]] = {}
         self._artifact_tabs: dict[str, QWidget] = {}
 
         self._build_ui()
@@ -211,7 +215,7 @@ class HubWindow(QMainWindow):
         card = Card(
             "Project",
             category=Category.LOAD,
-            subtitle="Pick the experiment folder, choose its config, and pick an exclusion group.",
+            subtitle="Pick the experiment folder and the active exclusion group.",
             icon_name="project",
         )
         form = QFormLayout()
@@ -237,11 +241,6 @@ class HubWindow(QMainWindow):
         proj_col.addLayout(btn_row)
         form.addRow("Project dir:", _wrap_layout(proj_col))
 
-        self._config_combo = QComboBox()
-        self._config_combo.setToolTip("YAML configs found in the project dir.")
-        self._config_combo.currentTextChanged.connect(self._on_config_changed)
-        form.addRow("Config:", self._config_combo)
-
         self._group_combo = QComboBox()
         self._group_combo.setEditable(True)
         self._group_combo.setToolTip(
@@ -253,11 +252,8 @@ class HubWindow(QMainWindow):
         card.add_body(form)
 
         launchers = QHBoxLayout()
-        edit_cfg = ActionButton("Edit config…", Category.TOOLS, icon_name="config")
-        edit_cfg.clicked.connect(lambda: self._launch_subapp("config"))
         qc_view = ActionButton("QC viewer…", Category.QC, icon_name="qc")
         qc_view.clicked.connect(lambda: self._launch_subapp("qc"))
-        launchers.addWidget(edit_cfg)
         launchers.addWidget(qc_view)
         launchers.addStretch(1)
         card.add_body(launchers)
@@ -271,27 +267,36 @@ class HubWindow(QMainWindow):
         card = Card(
             "Load",
             category=Category.LOAD,
-            subtitle="Excel (.xlsx, DLife), CSV long, or CSV wide.",
+            subtitle=(
+                "DLife workbook (.xlsx) or comma-delimited (.csv). "
+                "Experimental design is read directly from the data file."
+            ),
             icon_name="load",
         )
-        self._fmt_excel = QRadioButton("Excel (.xlsx)")
-        self._fmt_long = QRadioButton("CSV long")
-        self._fmt_wide = QRadioButton("CSV wide")
+        self._fmt_excel = QRadioButton("DLife (.xlsx)")
+        self._fmt_csv = QRadioButton("Comma-delimited (.csv)")
         self._fmt_excel.setChecked(True)
         grp = QButtonGroup(self)
         grp.addButton(self._fmt_excel)
-        grp.addButton(self._fmt_long)
-        grp.addButton(self._fmt_wide)
+        grp.addButton(self._fmt_csv)
         fmt_row = QHBoxLayout()
         fmt_row.addWidget(self._fmt_excel)
-        fmt_row.addWidget(self._fmt_long)
-        fmt_row.addWidget(self._fmt_wide)
+        fmt_row.addWidget(self._fmt_csv)
         fmt_row.addStretch(1)
         card.add_body(fmt_row)
 
-        self._assume_censored = QCheckBox("Assume censored at last census (Excel)")
-        self._assume_censored.setChecked(True)
-        card.add_body(self._assume_censored)
+        # Used only when the CSV is auto-detected as wide format (two factors,
+        # one column per group×event). Long-format CSVs ignore this field.
+        wide_row = QHBoxLayout()
+        wide_row.addWidget(QLabel("Wide factor names:"))
+        self._wide_factor_names = QLineEdit()
+        self._wide_factor_names.setPlaceholderText("e.g. Sex, Diet (only for wide CSV)")
+        self._wide_factor_names.setToolTip(
+            "Only needed when a CSV is auto-detected as wide format. Leave "
+            "blank for long CSV or DLife .xlsx files."
+        )
+        wide_row.addWidget(self._wide_factor_names, 1)
+        card.add_body(wide_row)
 
         load_btn = ActionButton(
             "Load data", Category.LOAD, icon_name="load", primary=True
@@ -330,14 +335,6 @@ class HubWindow(QMainWindow):
         self._factors_placeholder.setStyleSheet("color: palette(mid); font-style: italic;")
         self._factors_lay.addWidget(self._factors_placeholder)
         card.add_body(self._factors_host)
-
-        self._interactions_check = QCheckBox("Include interactions")
-        self._interactions_check.setChecked(True)
-        self._interactions_check.setToolTip(
-            "When checked, Cox PH and RMST run the full factorial model with "
-            "all pairwise interaction terms. Off: main-effects only."
-        )
-        card.add_body(self._interactions_check)
 
         tau_row = QHBoxLayout()
         tau_row.addWidget(QLabel("RMST τ (hours, 0 = auto):"))
@@ -411,7 +408,7 @@ class HubWindow(QMainWindow):
         card = Card(
             "Scripts",
             category=Category.SCRIPTS,
-            subtitle="Saved analysis pipelines from the active config.",
+            subtitle="Saved analysis pipelines (survival_scripts.yaml).",
             icon_name="scripts",
         )
         self._scripts_list = QListWidget()
@@ -496,62 +493,14 @@ class HubWindow(QMainWindow):
         self._project_dir = p
         self._project_edit.setText(str(p))
         ui_settings.add_recent_project(p)
-        self._refresh_config_combo()
+        # Auto-detect input format from what's in the directory
+        if any(p.glob("*.xlsx")):
+            self._fmt_excel.setChecked(True)
+        elif any(p.glob("*.csv")) or any(p.glob("*.tsv")):
+            self._fmt_csv.setChecked(True)
         self._refresh_group_combo()
         self._refresh_scripts_list()
         self._log.append_line(f"\nProject: {p}")
-
-    def _refresh_config_combo(self) -> None:
-        self._config_combo.blockSignals(True)
-        self._config_combo.clear()
-        if self._project_dir is None:
-            self._config_combo.blockSignals(False)
-            return
-        configs = cfg_mod.list_yaml_configs(self._project_dir)
-        if configs:
-            for c in configs:
-                self._config_combo.addItem(c.name)
-            preferred = cfg_mod.CONFIG_FILENAME
-            idx = self._config_combo.findText(preferred)
-            if idx >= 0:
-                self._config_combo.setCurrentIndex(idx)
-        else:
-            self._config_combo.addItem("(none — using defaults)")
-        self._config_combo.blockSignals(False)
-        self._on_config_changed(self._config_combo.currentText())
-
-    def _on_config_changed(self, name: str) -> None:
-        if self._project_dir is None or not name or name.startswith("(none"):
-            self._cfg = cfg_mod.default_config()
-            self._cfg_path = None
-        else:
-            self._cfg_path = self._project_dir / name
-            self._cfg = cfg_mod.load_config(self._cfg_path)
-            self._log.append_line(f"Loaded config: {self._cfg_path}")
-        # Apply config defaults to the Load card
-        fmt = (self._cfg.get("global", {}) or {}).get("input_format", "excel")
-        if fmt == "csv_long":
-            self._fmt_long.setChecked(True)
-        elif fmt == "csv_wide":
-            self._fmt_wide.setChecked(True)
-        else:
-            self._fmt_excel.setChecked(True)
-        self._assume_censored.setChecked(
-            bool((self._cfg.get("global", {}) or {}).get("assume_censored", True))
-        )
-        tau = (self._cfg.get("global", {}) or {}).get("rmst_tau") or 0.0
-        try:
-            self._tau_spin.setValue(float(tau or 0.0))
-        except (TypeError, ValueError):
-            self._tau_spin.setValue(0.0)
-        # Default exclusion group
-        default_grp = (self._cfg.get("global", {}) or {}).get("default_exclusion_group", "default")
-        idx = self._group_combo.findText(default_grp)
-        if idx >= 0:
-            self._group_combo.setCurrentIndex(idx)
-        else:
-            self._group_combo.setEditText(default_grp)
-        self._refresh_scripts_list()
 
     def _refresh_group_combo(self) -> None:
         self._group_combo.blockSignals(True)
@@ -566,8 +515,11 @@ class HubWindow(QMainWindow):
 
     def _refresh_scripts_list(self) -> None:
         self._scripts_list.clear()
-        scripts = (self._cfg or {}).get("scripts") or []
-        for s in scripts:
+        if self._project_dir is None:
+            self._scripts = []
+            return
+        self._scripts = scripts_io.load_scripts(self._project_dir)
+        for s in self._scripts:
             name = str(s.get("name", "(unnamed)"))
             n_steps = len(s.get("steps", []) or [])
             QListWidgetItem(f"{name}  ({n_steps} steps)", self._scripts_list)
@@ -575,10 +527,8 @@ class HubWindow(QMainWindow):
     # ------------------------------------------------------------ load/run
 
     def _selected_format(self) -> str:
-        if self._fmt_long.isChecked():
-            return "csv_long"
-        if self._fmt_wide.isChecked():
-            return "csv_wide"
+        if self._fmt_csv.isChecked():
+            return "csv"
         return "excel"
 
     def _resolve_input_path(self) -> Path | None:
@@ -587,24 +537,31 @@ class HubWindow(QMainWindow):
             return None
         fmt = self._selected_format()
         if fmt == "excel":
-            xlsx = list(self._project_dir.glob("*.xlsx"))
-            if not xlsx:
+            candidates = sorted(self._project_dir.glob("*.xlsx"))
+            if not candidates:
                 QMessageBox.warning(self, "No .xlsx", "No .xlsx file found in the project dir.")
                 return None
-            if len(xlsx) > 1:
-                QMessageBox.warning(
-                    self, "Multiple .xlsx",
-                    f"Found {len(xlsx)} .xlsx files; place exactly one in the project dir.",
-                )
-                return None
-            return xlsx[0]
-        # CSV long/wide: pick first .csv or .tsv
-        for ext in ("*.csv", "*.tsv"):
-            files = list(self._project_dir.glob(ext))
-            if files:
-                return files[0]
-        QMessageBox.warning(self, "No CSV", "No .csv or .tsv file found in the project dir.")
-        return None
+            if len(candidates) == 1:
+                return candidates[0]
+            picked, _ = QFileDialog.getOpenFileName(
+                self, "Select .xlsx file", str(self._project_dir),
+                "Excel files (*.xlsx)",
+            )
+            return Path(picked) if picked else None
+        # csv (long or wide — auto-detected by data_loader)
+        candidates = sorted(
+            list(self._project_dir.glob("*.csv")) + list(self._project_dir.glob("*.tsv"))
+        )
+        if not candidates:
+            QMessageBox.warning(self, "No CSV", "No .csv or .tsv file found in the project dir.")
+            return None
+        if len(candidates) == 1:
+            return candidates[0]
+        picked, _ = QFileDialog.getOpenFileName(
+            self, "Select CSV/TSV file", str(self._project_dir),
+            "CSV/TSV files (*.csv *.tsv)",
+        )
+        return Path(picked) if picked else None
 
     def _excluded_set(self) -> set:
         if self._project_dir is None:
@@ -617,29 +574,32 @@ class HubWindow(QMainWindow):
         if path is None:
             return
         fmt = self._selected_format()
-        g = self._cfg.get("global", {}) or {}
-        cw = self._cfg.get("csv_wide", {}) or {}
         excluded = self._excluded_set()
+        is_excel = path.suffix.lower() == ".xlsx"
         excel_excluded = (
-            data_loader.load_chamber_flags(path)
-            if path.suffix.lower() == ".xlsx" else set()
+            data_loader.load_chamber_flags(path) if is_excel else set()
         )
         merged_excluded = excluded | excel_excluded
 
-        kwargs = dict(
-            assume_censored=self._assume_censored.isChecked(),
-            excluded_chambers=merged_excluded,
-            time_col=g.get("time_col", "Age"),
-            event_col=g.get("event_col", "Event"),
-            factor_cols=g.get("factor_cols"),
+        # Excel: read AssumeCensored from the PrivateData sheet.
+        # CSV: data is already individual-level so the flag is irrelevant; pass True.
+        assume_censored = (
+            data_loader.read_assume_censored(path) if is_excel else True
         )
-        if fmt == "csv_long":
-            kwargs["csv_format"] = "long"
-        elif fmt == "csv_wide":
-            kwargs["csv_format"] = "wide"
-            kwargs["factor_names"] = cw.get("factor_names")
-            kwargs["factor_levels"] = cw.get("factor_levels")
-            kwargs["col_mapping"] = cw.get("col_mapping")
+
+        kwargs = dict(
+            assume_censored=assume_censored,
+            excluded_chambers=merged_excluded,
+        )
+        if fmt == "csv":
+            # data_loader auto-detects long vs wide; provide factor_names as a
+            # fallback in case the file is wide.
+            kwargs["csv_format"] = "auto"
+            wide_factors = [
+                p.strip() for p in self._wide_factor_names.text().split(",") if p.strip()
+            ]
+            if wide_factors:
+                kwargs["factor_names"] = wide_factors
 
         excluded_msg = (
             f"Excluded {len(merged_excluded)} chamber(s) "
@@ -659,6 +619,7 @@ class HubWindow(QMainWindow):
             data, factors = payload
             self._data = data
             self._factors = factors
+            self._loaded_path = path
             self._lifetables = lifetable.compute_lifetables(data)
             self._refresh_factor_checks()
             self._dataset_summary.setText(
@@ -677,19 +638,118 @@ class HubWindow(QMainWindow):
             if item.widget():
                 item.widget().deleteLater()
         self._factor_checks.clear()
-        if not self._factors:
+        self._factor_filter_btns.clear()
+        self._factor_levels.clear()
+        self._factor_allowed.clear()
+        if not self._factors or self._data is None:
             placeholder = QLabel("Load data to see factors.")
             placeholder.setStyleSheet("color: palette(mid); font-style: italic;")
             self._factors_lay.addWidget(placeholder)
             return
         for f in self._factors:
+            levels = sorted({str(v) for v in self._data[f].dropna().unique()})
+            self._factor_levels[f] = levels
+            self._factor_allowed[f] = set(levels)
+
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(4)
             cb = QCheckBox(f)
             cb.setChecked(True)
-            self._factors_lay.addWidget(cb)
+            row.addWidget(cb)
+
+            btn = QToolButton()
+            btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+            btn.setAutoRaise(True)
+            btn.setToolTip(f"Filter levels of '{f}' included in the analysis.")
+            btn.setMenu(self._build_levels_menu(f))
+            self._update_filter_btn_label(f, btn)
+            row.addWidget(btn)
+            row.addStretch(1)
+
+            host = QWidget()
+            host.setLayout(row)
+            self._factors_lay.addWidget(host)
             self._factor_checks[f] = cb
+            self._factor_filter_btns[f] = btn
+
+    def _build_levels_menu(self, factor: str) -> QMenu:
+        menu = QMenu(self)
+        for lvl in self._factor_levels.get(factor, []):
+            act = QAction(str(lvl), self)
+            act.setCheckable(True)
+            act.setChecked(lvl in self._factor_allowed[factor])
+            act.toggled.connect(
+                lambda checked, f=factor, level=lvl: self._on_level_toggled(f, level, checked)
+            )
+            menu.addAction(act)
+        if self._factor_levels.get(factor):
+            menu.addSeparator()
+        all_act = menu.addAction("Select all")
+        all_act.triggered.connect(lambda _=False, f=factor: self._set_all_levels(f, True))
+        none_act = menu.addAction("Select none")
+        none_act.triggered.connect(lambda _=False, f=factor: self._set_all_levels(f, False))
+        return menu
+
+    def _on_level_toggled(self, factor: str, level: str, checked: bool) -> None:
+        allowed = self._factor_allowed.setdefault(factor, set())
+        if checked:
+            allowed.add(level)
+        else:
+            allowed.discard(level)
+        btn = self._factor_filter_btns.get(factor)
+        if btn is not None:
+            self._update_filter_btn_label(factor, btn)
+
+    def _set_all_levels(self, factor: str, checked: bool) -> None:
+        levels = self._factor_levels.get(factor, [])
+        self._factor_allowed[factor] = set(levels) if checked else set()
+        # Rebuild menu so the action checkmarks reflect the new state
+        btn = self._factor_filter_btns.get(factor)
+        if btn is not None:
+            old = btn.menu()
+            btn.setMenu(self._build_levels_menu(factor))
+            if old is not None:
+                old.deleteLater()
+            self._update_filter_btn_label(factor, btn)
+
+    def _update_filter_btn_label(self, factor: str, btn: QToolButton) -> None:
+        total = len(self._factor_levels.get(factor, []))
+        kept = len(self._factor_allowed.get(factor, set()))
+        if total == 0:
+            text = "(no levels)"
+        elif kept == total:
+            text = f"all ({total}) ▾"
+        else:
+            text = f"{kept}/{total} ▾"
+        btn.setText(text)
 
     def _selected_factors(self) -> list[str]:
         return [f for f, cb in self._factor_checks.items() if cb.isChecked()]
+
+    def _subset_data(self) -> tuple:
+        """Apply factor selection + per-factor level filters to ``self._data``.
+
+        Returns ``(data, factors)`` where ``factors`` are the selected factor
+        names and ``data`` has rows dropped for any disallowed level on a
+        selected factor, with ``treatment`` rebuilt from the selected factors.
+        Returns ``(None, [])`` if no data is loaded.
+        """
+        if self._data is None:
+            return None, []
+        selected = self._selected_factors()
+        if not selected:
+            selected = list(self._factors)
+        df = self._data.copy()
+        for f in selected:
+            allowed = self._factor_allowed.get(f)
+            if allowed is None:
+                continue
+            df = df[df[f].astype(str).isin(allowed)]
+        df = df.reset_index(drop=True)
+        if len(df) and selected:
+            df["treatment"] = df[selected].astype(str).agg("/".join, axis=1)
+        return df, selected
 
     # ------------------------------------------------------------ workers
 
@@ -769,7 +829,12 @@ class HubWindow(QMainWindow):
             idx = self._plot_dock.addTab(view, icon("plot"), path.name)
             self._plot_dock.setCurrentIndex(idx)
             self._artifact_tabs[key] = view
-        elif ext in {".csv", ".tsv", ".txt", ".md"}:
+        elif ext == ".md":
+            view = ZoomableMarkdownView(path)
+            idx = self._plot_dock.addTab(view, icon("report"), path.name)
+            self._plot_dock.setCurrentIndex(idx)
+            self._artifact_tabs[key] = view
+        elif ext in {".csv", ".tsv", ".txt"}:
             view = ZoomableTextView(path)
             idx = self._plot_dock.addTab(view, icon("csv"), path.name)
             self._plot_dock.setCurrentIndex(idx)
@@ -785,10 +850,26 @@ class HubWindow(QMainWindow):
 
     # ----------------------------------------------------- analyze actions
 
+    def _prep_subset(self, action: str) -> tuple:
+        """Return (data, factors) after applying selection + level filters.
+
+        Returns (None, []) and shows a message if there's nothing to analyze.
+        """
+        data, selected = self._subset_data()
+        if data is None or len(data) == 0:
+            QMessageBox.information(
+                self, "No data after filtering",
+                f"{action}: every row was excluded by the active factor/level filters.",
+            )
+            return None, []
+        return data, selected
+
     def _action_logrank_pairwise(self) -> None:
         if not self._require_data():
             return
-        data = self._data
+        data, _ = self._prep_subset("Log-rank pairwise")
+        if data is None:
+            return
         def _do():
             res = statistics.pairwise_logrank(data)
             print("Pairwise log-rank tests:")
@@ -799,7 +880,9 @@ class HubWindow(QMainWindow):
     def _action_logrank_omnibus(self) -> None:
         if not self._require_data():
             return
-        data = self._data
+        data, _ = self._prep_subset("Log-rank omnibus")
+        if data is None:
+            return
         def _do():
             res = statistics.logrank_multi(data)
             print("Omnibus log-rank test:")
@@ -811,7 +894,9 @@ class HubWindow(QMainWindow):
     def _action_gehan_wilcoxon(self) -> None:
         if not self._require_data():
             return
-        data = self._data
+        data, _ = self._prep_subset("Gehan-Wilcoxon pairwise")
+        if data is None:
+            return
         def _do():
             res = statistics.pairwise_gehan_wilcoxon(data)
             print("Pairwise Gehan-Wilcoxon tests:")
@@ -822,7 +907,9 @@ class HubWindow(QMainWindow):
     def _action_hazard_ratios(self) -> None:
         if not self._require_data():
             return
-        data = self._data
+        data, _ = self._prep_subset("Hazard ratios")
+        if data is None:
+            return
         def _do():
             res = statistics.pairwise_hazard_ratios(data)
             print("Pairwise hazard ratios:")
@@ -833,47 +920,62 @@ class HubWindow(QMainWindow):
     def _action_cox_ph(self) -> None:
         if not self._require_data():
             return
-        data = self._data
-        factors = self._factors
-        selected = self._selected_factors() or factors
-        include_inter = self._interactions_check.isChecked()
+        data, selected = self._prep_subset("Cox PH")
+        if data is None:
+            return
         def _do():
             res = statistics.cox_interaction_analysis(
-                data, factors=factors, selected_factors=selected,
+                data, factors=selected, selected_factors=selected,
             )
             if "error" in res:
                 print(res["error"])
                 return None
             print(f"Cox PH — factors: {selected} · n={res.get('n_subjects')}, events={res.get('n_events')}")
             print(f"  formula: {res.get('formula')}")
-            print(f"  log-likelihood={res.get('log_likelihood'):.2f}, AIC={res.get('AIC'):.2f}, "
-                  f"C={res.get('concordance'):.3f}")
+            print(
+                "  "
+                + ", ".join(
+                    f"{label}={value:{spec}}" if isinstance(value, (int, float)) else f"{label}={value}"
+                    for label, value, spec in (
+                        ("log-likelihood", res.get("log_likelihood"), ".2f"),
+                        ("AIC", res.get("AIC"), ".2f"),
+                        ("C", res.get("concordance"), ".3f"),
+                    )
+                    if value is not None
+                )
+            )
             coefs = res.get("coefficients")
             if coefs is not None and len(coefs):
-                if not include_inter:
-                    coefs = coefs[~coefs["covariate"].astype(str).str.contains(":", regex=False)]
                 print("\nCoefficients:")
                 print(coefs.to_string(index=False))
             lr = res.get("lr_interaction")
-            if lr is not None:
-                print(f"\nLR interaction test: chi2={lr.get('chi2'):.3f}, df={lr.get('df')}, p={lr.get('p_value'):.4f}")
+            if isinstance(lr, dict):
+                lr_stat = lr.get("lr_stat")
+                lr_df = lr.get("df")
+                lr_p = lr.get("p_value")
+                if lr_stat is not None and lr_p is not None:
+                    print(f"\nLR interaction test: lr_stat={lr_stat:.3f}, df={lr_df}, p={lr_p:.4f}")
+            elif len(selected) >= 2:
+                print("\nLR interaction test: not applicable.")
             ph = res.get("ph_test")
             if ph is not None and len(ph):
                 print("\nProportional hazards (Schoenfeld):")
                 print(ph.to_string(index=False))
+            for w in res.get("warnings", []) or []:
+                print(f"  warning: {w}")
             return None
         self._spawn_task("Cox PH", _do)
 
     def _action_rmst(self) -> None:
         if not self._require_data():
             return
-        data = self._data
-        factors = self._factors
-        selected = self._selected_factors() or factors
+        data, selected = self._prep_subset("RMST")
+        if data is None:
+            return
         tau_value = float(self._tau_spin.value()) or None
         def _do():
             res = statistics.rmst_interaction_analysis(
-                data, factors=factors, selected_factors=selected, tau=tau_value,
+                data, factors=selected, selected_factors=selected, tau=tau_value,
             )
             if "error" in res:
                 print(res["error"])
@@ -883,7 +985,7 @@ class HubWindow(QMainWindow):
             if coefs is not None and len(coefs):
                 print("\nCoefficients (hours):")
                 print(coefs.to_string(index=False))
-            for k in ("r_squared", "F_statistic", "F_p_value"):
+            for k in ("r_squared", "f_statistic", "f_p_value", "AIC", "log_likelihood"):
                 if res.get(k) is not None:
                     print(f"  {k}: {res[k]}")
             return None
@@ -892,7 +994,9 @@ class HubWindow(QMainWindow):
     def _action_parametric(self) -> None:
         if not self._require_data():
             return
-        data = self._data
+        data, _ = self._prep_subset("Parametric AFT")
+        if data is None:
+            return
         def _do():
             res = statistics.fit_parametric_models(data)
             if not res:
@@ -908,17 +1012,26 @@ class HubWindow(QMainWindow):
             return None
         self._spawn_task("Parametric AFT", _do)
 
+    def _results_dir_for(self, input_path: Path) -> Path:
+        """Project-relative output dir for a given data file (``<stem>_results/``)."""
+        return self._project_dir / f"{input_path.stem}_results"
+
     def _action_full_pipeline(self) -> None:
         path = self._resolve_input_path()
         if path is None:
             return
         excluded = self._excluded_set()
-        out_dir = self._project_dir
+        out_dir = self._results_dir_for(path)
+        is_excel = path.suffix.lower() == ".xlsx"
+        assume_censored = (
+            data_loader.read_assume_censored(path) if is_excel else True
+        )
         def _do():
+            out_dir.mkdir(parents=True, exist_ok=True)
             run_analysis(
                 input_path=path,
                 output_dir=out_dir,
-                assume_censored=self._assume_censored.isChecked(),
+                assume_censored=assume_censored,
                 extra_excluded_chambers=excluded,
             )
             print(f"Saved: {out_dir / 'report.md'}")
@@ -930,11 +1043,11 @@ class HubWindow(QMainWindow):
     def _plot_call(self, title: str, fn) -> None:
         if not self._require_data():
             return
-        if self._lifetables is None:
-            self._lifetables = lifetable.compute_lifetables(self._data)
-        lt = self._lifetables
-        data = self._data
+        data, _ = self._prep_subset(title)
+        if data is None:
+            return
         def _do():
+            lt = lifetable.compute_lifetables(data)
             fig = fn(lt, data)
             return [(title, fig)]
         self._spawn_task(title, _do)
@@ -966,7 +1079,9 @@ class HubWindow(QMainWindow):
     def _action_plot_forest(self) -> None:
         if not self._require_data():
             return
-        data = self._data
+        data, _ = self._prep_subset("Hazard-ratio forest")
+        if data is None:
+            return
         def _do():
             hr = statistics.pairwise_hazard_ratios(data)
             return [("Hazard-ratio forest", plotting.plot_hazard_ratio_forest(hr))]
@@ -975,7 +1090,9 @@ class HubWindow(QMainWindow):
     def _action_plot_distribution(self) -> None:
         if not self._require_data():
             return
-        data = self._data
+        data, _ = self._prep_subset("Survival distribution")
+        if data is None:
+            return
         def _do():
             return [("Survival distribution", plotting.plot_survival_distribution(data))]
         self._spawn_task("Survival distribution", _do)
@@ -992,7 +1109,14 @@ class HubWindow(QMainWindow):
         if self._project_dir is None:
             QMessageBox.information(self, "No project", "Pick a project first.")
             return
-        target = str(self._project_dir)
+        # Prefer the results subdir for the loaded data file; fall back to the
+        # project dir if nothing's loaded yet or the subdir doesn't exist.
+        out = None
+        if self._loaded_path is not None:
+            candidate = self._results_dir_for(self._loaded_path)
+            if candidate.is_dir():
+                out = candidate
+        target = str(out or self._project_dir)
         try:
             if sys.platform == "darwin":
                 subprocess.Popen(["open", target])
@@ -1020,59 +1144,62 @@ class HubWindow(QMainWindow):
             QMessageBox.information(self, "No script selected", "Pick a script first.")
             return
         idx = self._scripts_list.row(item)
-        scripts = (self._cfg or {}).get("scripts") or []
-        if idx >= len(scripts):
+        if idx >= len(self._scripts):
             return
-        script = scripts[idx]
+        script = self._scripts[idx]
         from ..script_editor.runner import run_script, RunContext
 
         project_dir = self._project_dir
         data = self._data
         factors = self._factors
         lifetables = self._lifetables
+        input_format = self._selected_format()
+        wide_factors = [
+            p.strip() for p in self._wide_factor_names.text().split(",") if p.strip()
+        ]
+        # Mirror the Hub's load behavior: AssumeCensored comes from the Excel
+        # PrivateData sheet; CSV is already individual-level so the flag is moot.
+        resolved_path = self._resolve_input_path()
+        if resolved_path is not None and resolved_path.suffix.lower() == ".xlsx":
+            assume_censored = data_loader.read_assume_censored(resolved_path)
+        else:
+            assume_censored = True
 
         def _do():
             ctx = RunContext(
                 project_dir=project_dir,
-                cfg=self._cfg,
                 data=data,
                 factors=factors,
                 lifetables=lifetables,
                 log=lambda m: print(m),
-                figure=lambda title, fig: _emit_figure(title, fig),
+                figure=lambda title, fig: print(f"[figure] {title}"),
                 excluded_chambers=self._excluded_set(),
-                assume_censored=self._assume_censored.isChecked(),
+                assume_censored=assume_censored,
+                input_format=input_format,
+                wide_factor_names=wide_factors or None,
             )
             run_script(script, ctx)
             return None
 
-        figs: list[tuple] = []
-
-        def _emit_figure(title: str, fig) -> None:
-            figs.append((title, fig))
-
-        self._spawn_task(f"Script: {script.get('name', '?')}", lambda: (_do(), figs)[1])
+        self._spawn_task(f"Script: {script.get('name', '?')}", _do)
 
     def _open_script_editor(self) -> None:
-        from ..script_editor.window import ScriptEditorWindow
-
-        cfg_path = self._cfg_path
-        if cfg_path is None and self._project_dir is not None:
-            cfg_path = self._project_dir / cfg_mod.CONFIG_FILENAME
-        if cfg_path is None:
+        if self._project_dir is None:
             QMessageBox.information(
-                self, "No config", "Pick a project directory first; the editor saves to the project's config."
+                self, "No project",
+                "Pick a project directory first; the editor saves "
+                "survival_scripts.yaml inside the project.",
             )
             return
-        win = ScriptEditorWindow(cfg_path, factors=self._factors, parent=self)
+        from ..script_editor.window import ScriptEditorWindow
+
+        win = ScriptEditorWindow(self._project_dir, factors=self._factors, parent=self)
         win.scriptsSaved.connect(self._on_scripts_saved)
         win.show()
 
     def _on_scripts_saved(self, path: str) -> None:
-        if self._cfg_path is not None and Path(path).resolve() == self._cfg_path.resolve():
-            self._cfg = cfg_mod.load_config(self._cfg_path)
-            self._refresh_scripts_list()
-            self._log.append_line(f"Reloaded scripts from {path}.")
+        self._refresh_scripts_list()
+        self._log.append_line(f"Reloaded scripts from {path}.")
 
     # -------------------------------------------------------- subprocesses
 

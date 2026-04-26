@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QPalette, QPixmap, QTextCursor
+from PyQt6.QtGui import QFontDatabase, QPalette, QPixmap, QTextCursor
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -279,6 +279,13 @@ class OutputLog(QPlainTextEdit):
         self.setObjectName("PsurvLog")
         self.setReadOnly(True)
         self.setMaximumBlockCount(max_lines)
+        # Force a fixed-width font so tabular pandas output (.to_string) lines up.
+        # QSS font-family doesn't always apply to QPlainTextEdit, and the named
+        # fonts in theme.py may not be installed on every platform.
+        mono = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        mono.setStyleHint(mono.StyleHint.Monospace)
+        self.setFont(mono)
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
 
     def append_line(self, text: str) -> None:
         self.appendPlainText(text.rstrip())
