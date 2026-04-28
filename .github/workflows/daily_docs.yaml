@@ -25,20 +25,45 @@ jobs:
         run: |
           SINCE=$(date -u -d 'yesterday 00:00' '+%Y-%m-%dT%H:%M:%SZ')
           UNTIL=$(date -u -d 'today 00:00'      '+%Y-%m-%dT%H:%M:%SZ')
+
+          # Plain bullet list for the PR description.
           LOG=$(git log main --since="$SINCE" --until="$UNTIL" \
                         --pretty=format:"- %h %s (%an)")
           if [ -z "$LOG" ]; then
             echo "has_commits=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_commits=true" >> "$GITHUB_OUTPUT"
-            echo "since=$SINCE" >> "$GITHUB_OUTPUT"
-            echo "until=$UNTIL" >> "$GITHUB_OUTPUT"
-            {
-              echo "commits<<EOF"
-              echo "$LOG"
-              echo "EOF"
-            } >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          # Cap at 20 commits to bound prompt size and worst-case cost.
+          SHA_COUNT=$(git log main --since="$SINCE" --until="$UNTIL" --pretty=format:"%H" | wc -l)
+          MAX=20
+          if [ "$SHA_COUNT" -gt "$MAX" ]; then
+            echo "::warning::$SHA_COUNT commits in window — only the most recent $MAX will be reviewed."
+            EXTRA="--max-count=$MAX"
+          else
+            EXTRA=""
+          fi
+
+          # Stat-only diff per commit. Claude can fetch full diffs on demand for
+          # the few that look documentation-relevant; pre-rendering the file
+          # change list saves a `git show` turn per commit.
+          DETAIL=$(git log main --since="$SINCE" --until="$UNTIL" $EXTRA \
+                        --no-color --stat \
+                        --pretty=format:"### %h — %s%n_author: %an, %ad_%n" \
+                        --date=short)
+
+          {
+            echo "has_commits=true"
+            echo "since=$SINCE"
+            echo "until=$UNTIL"
+            echo "commit_count=$SHA_COUNT"
+            echo "commits<<COMMITS_EOF"
+            echo "$LOG"
+            echo "COMMITS_EOF"
+            echo "details<<DETAILS_EOF"
+            echo "$DETAIL"
+            echo "DETAILS_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Nothing to do
         if: steps.commits.outputs.has_commits == 'false'
@@ -49,30 +74,31 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          claude_args: '--max-turns 60 --model claude-sonnet-4-6'
+          claude_args: '--max-turns 100 --model claude-haiku-4-5 --permission-mode bypassPermissions'
           prompt: |
             You are updating this repository's documentation in the "docs" directory based on yesterday's commits to the main branch.
 
             Time window (UTC): ${{ steps.commits.outputs.since }} to ${{ steps.commits.outputs.until }}
             Branch: main
 
-            Commits in that window:
+            Commits in that window (${{ steps.commits.outputs.commit_count }} total):
             ${{ steps.commits.outputs.commits }}
 
-            Your task:
-            1. Use `git log` and `git show <sha>` to inspect each commit's actual diff.
-            2. Decide which docs are affected — README.md, anything under docs/, API references,
-               CHANGELOG.md, inline code comments that are user-facing, etc. Ignore commits that
-               are pure internal refactors with no user-visible impact.
-            3. Edit the affected docs to reflect the changes. Match the existing tone and structure;
-               don't rewrite sections that didn't change.
-            4. Add a dated entry to CHANGELOG.md summarizing the day's user-facing changes. If there
-               are none, add a brief "Internal changes only" line under today's date.
-            5. Create a new branch named `claude/docs-YYYY-MM-DD` (use yesterday's date) based on main.
-            6. Commit with message: "docs: auto-update from <YYYY-MM-DD> commits"
-            7. Open a pull request into main titled "Daily docs update — <YYYY-MM-DD>" with a short
-               bulleted summary of what you changed and why, plus a list of the commit SHAs
-               you reviewed.
+            Per-commit file change stats (already rendered — DO NOT re-run `git log` or `git show` for these unless you need the full diff of a specific doc-relevant commit):
+            ${{ steps.commits.outputs.details }}
 
-            If after reviewing you conclude no documentation changes are warranted at all,
-            don't open a PR — just print a one-line explanation and exit.
+            Your task — be efficient, this runs daily and every turn costs money:
+
+            1. Triage the commit list above. Most commits will not need doc changes (refactors, tests,
+               internal-only code). Only dig deeper on commits whose file stats touch user-facing
+               surfaces: README.md, docs/**, public APIs, CLI flags, config schemas.
+            2. For each commit you decide is doc-relevant, run `git show <sha> -- <path>` for ONLY
+               the specific files that matter — do not fetch full diffs.
+            3. Edit affected docs in-place. Match existing tone; do not rewrite sections that didn't
+               change. Skip CHANGELOG entries unless there are clear user-visible changes.
+            4. If no doc changes are warranted, print one line explaining why and exit without
+               creating a branch or PR. This is the common case — prefer it when in doubt.
+            5. Otherwise: branch `claude/docs-YYYY-MM-DD` (yesterday's date), commit with
+               "docs: auto-update from <YYYY-MM-DD> commits", and open a PR titled
+               "Daily docs update — <YYYY-MM-DD>" with a brief bulleted summary plus the SHAs
+               you reviewed.
