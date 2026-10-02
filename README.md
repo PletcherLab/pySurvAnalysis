@@ -114,12 +114,20 @@ design) is simply absent.
   Active Focus that Analyze, Plots and AI act on, and New…/Edit… open the Focus
   window (live N, treatments and shape; Import from DefinedPlots; Copy Focuses
   from another member). Hand-editing the YAML works too.
-* **Focus Shape decides what runs.** A Focus whose two varying factors of two
-  levels each give four populated cells earns the **Factorial Battery** — the
-  Cox main-effects-vs-interaction model with its LR test and PH check, the RMST
-  companion, the faceted KM headline and the interaction plot. Any other shape
-  records it as **Not Applicable**, with the reason, in the log, the Run Summary
-  and the report — never silently.
+* **The Focus decides what is offered.** Each analysis declares what it needs:
+
+  | Needs | Offered when the Focus… | Computed when the data… | Analyses |
+  |---|---|---|---|
+  | nothing | always | always | KM, Nelson-Aalen, hazard, mortality, distribution, at-risk, parametric fits |
+  | a comparison | implies ≥2 treatments | populates ≥2 treatments | log-rank (pairwise, omnibus), Gehan-Wilcoxon, hazard-ratio forest, log-log PH check |
+  | a factorial figure | varies ≥2 factors | populates ≥2 treatments | faceted KM (the headline), lifespan interaction plot |
+  | a factorial model | varies ≥2 factors | crosses every pair of them fully | Cox and RMST factorial models (main effects + pairwise interactions) |
+
+  Something not offered has no Hub button, no figure and no report section — a
+  one-factor Focus is never asked about interactions. Something offered but not
+  computable (two varying factors with an empty cell) is greyed in the Hub with
+  the reason and recorded as **Not Applicable** in the log, the Run Summary and
+  the report — never silently.
 * **Results stay honest.** A Focus naming levels the file no longer has, or
   whose cells the Exclusion Group empties, is **Blocked** — named in the Batch
   preflight, skipped, while the member's other Focuses run. Results produced

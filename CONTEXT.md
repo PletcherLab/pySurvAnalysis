@@ -145,38 +145,58 @@ chambers/vials scored to death, assumed censoring on. Every analysis the app
 can do is reachable from it, gated by Focus Shape rather than by type.
 
 **Focus Shape**:
-The signature of a **Focus** — how many factors it names, how many levels
-each has, and which of the resulting cells actually hold individuals after the
-Exclusion Group — and the thing that decides which analyses and figures apply
-to it. A Focus is 2×2 only when two factors of two levels each give **four
-populated cells**; then it admits the **Factorial Battery** and the faceted
-figures. Three cells of four is not 2×2 — the interaction term is not
-estimable with an empty cell — so the battery is Not Applicable, with the
-missing cell named.
-Because a Focus is declared in `survival_config.yaml`, its shape is known
-without reading any data, so the Hub can grey an inapplicable step out while
-you author it. At run time a shape mismatch is **not fatal and not silent**: it
-is a **Not Applicable** result, never a hard stop (ADR-0011 amending
-ADR-0002).
+The signature of a **Focus** — which factors it varies and how many levels
+each has, which of the implied cells hold individuals after the Exclusion
+Group, and where the crossing of two varying factors has a hole — and what
+every **Requirement** is checked against. Its definition half is known from
+`survival_config.yaml` without reading any data; its populated half the Hub
+estimates from the Design sheet and the active exclusions, so both are on
+screen before anything runs.
 _Avoid_: design shape, factorial flag
 
+**Requirement**:
+What an analysis or figure needs from a Focus, in two halves.
+**Relevance** is decided by the Focus's *definition*: an action that is not
+relevant is **not offered** — no Hub button, no figure, no report section —
+because it is not a question the slice asks; one quiet line in the Hub says
+what is not offered and why. **Computability** is decided by the *data*: a
+relevant action the populated cells cannot support is **Not Applicable**,
+greyed in the Hub with the reason and recorded by the run. There are three:
+**comparison** (relevant with two or more implied treatments, computable with
+two populated — log-rank, Gehan-Wilcoxon, hazard ratios and their forest, the
+log-log PH diagnostic); **factorial plot** (relevant with two or more varying
+factors — the faceted KM and the interaction plot, where a missing cell is
+only a missing curve); and **factorial model** (relevant on the same
+condition, computable only when every pair of varying factors is fully
+crossed — the Cox and RMST models, whose interaction terms are not estimable
+across an empty cell). Everything else — KM, Nelson-Aalen, hazard, mortality,
+distribution, parametric fits — needs nothing.
+_Avoid_: precondition, gate, criteria
+
 **Not Applicable**:
-What a real action does when the active **Focus Shape** does not admit it —
-the `Factorial Battery` against a three-level Focus, say. Recorded in three
-places, because a warning in a log nobody reads at 2am is the silent skip
-ADR-0002 forbade: the run log, the Focus's **Run Summary** as a machine-readable
-entry, and one line of prose in that Focus's report section. Distinct from an
+What a real action does when it is **relevant** to the Focus but the data
+cannot **compute** it — the Factorial Battery for two varying factors whose
+crossing has an empty cell, say — or when a script step asks explicitly for
+one the Focus is not offered. Recorded in three places, because a warning in a
+log nobody reads at 2am is the silent skip ADR-0002 forbade: the run log, the
+Focus's **Run Summary** as a machine-readable entry, and one line of prose in
+that Focus's report section. An action merely *not offered* — the battery for
+a one-factor Focus — is not recorded at all: it was never a question the slice
+asked, and a note in every report would teach readers to skip the ones that
+matter. Distinct from an
 action name outside *core ∪ type*, which is a typo and remains a hard error
 that refuses to start the script.
 _Avoid_: skipped, warning (a warning is the severity, not the record), n/a
 
 **Factorial Battery**:
-The 2×2 analyses — Cox main-effects vs interaction model with the LR omnibus
-and Schoenfeld PH test, plus the RMST pseudo-value companion — together with
-the faceted KM, the lifespan interaction plot and the Cox forest including the
-interaction term. Formerly the whole point of an "Interaction Experiment"
-type; now a set of ordinary actions any experiment can reach, offered exactly
-when the active Focus Shape is 2×2 (ADR-0011).
+The interaction analyses — the Cox main-effects vs pairwise-interaction model
+with the LR omnibus and Schoenfeld PH test, plus the RMST pseudo-value
+companion — together with the faceted KM and the lifespan interaction plot.
+Formerly the whole point of an "Interaction Experiment" type, and limited to a
+2×2; now ordinary actions any experiment can reach, offered whenever the Focus
+varies **two or more factors**, of any number of levels each. The models are
+computed when every pair of those factors is fully crossed, and are Not
+Applicable, with the empty cell named, when one is not (ADR-0011).
 _Avoid_: interaction experiment (the retired type), factorial design, 2x2
 experiment
 
@@ -252,18 +272,19 @@ _Avoid_: current focus, selected focus, default focus (`Unfiltered` is the
 default *declared* Focus; which one is active is a separate matter)
 
 **Plot Set**:
-The ordered list of figures an Experiment Type produces as its standard
-output — what the report embeds and what the Plot Editor offers. Standard
-Lifespan's is the general survivorship battery; a 2×2 **Focus Shape** adds the
-faceted KM (that Focus's **Headline Figure**), the four-cell KM with at-risk
-counts, the lifespan interaction plot, the Cox forest including the
-interaction term, and the log-log PH diagnostic. The Plot Set is therefore a
-property of the run — type plus Focus — not of the directory.
+The ordered list of figures a run produces — what the report embeds and what
+the Plot Editor offers. Standard Lifespan's base set is the general
+survivorship battery, less any figure whose **Requirement** is not relevant
+to the Focus (a single-treatment Focus gets no forest and no log-log
+diagnostic); a Focus varying two or more factors adds the faceted KM (its
+**Headline Figure**) and the lifespan interaction plot. The Plot Set is
+therefore a property of the run — type plus Focus — not of the directory.
 _Avoid_: plot list, figure set
 
 **Headline Figure**:
 The one figure of a Plot Set that states a **Focus**'s primary result — the
-faceted KM when the Focus Shape is 2×2, the KM with at-risk counts otherwise.
+faceted KM when the Focus crosses factors, the KM with at-risk counts
+otherwise.
 It leads that Focus's report section and is the default plot the Plot Editor
 opens.
 _Avoid_: main plot, key figure
@@ -303,12 +324,14 @@ figure's first edit)
 **Defined Plot**:
 A named treatment grouping an experimenter writes into the DLife workbook's
 `DefinedPlots` sheet at design time — one column per plot, the name in row 1,
-treatment labels from row 6. It is a **figure**, not an analysis: under a Focus
-that pools over nothing and holds *all* of its treatments it renders as a KM
-figure named for the plot and the Focus (in practice `Unfiltered`, whose
-labels are the workbook's full composites); under any other it is **Not Applicable**, with the
-missing labels named, never drawn with fewer curves than the experimenter
-listed. Because experimenters often use it to mark the separate experiments in
+treatment labels from row 6. It is a **figure**, not an analysis. It is
+relevant to a Focus that pools over nothing and holds, within its levels,
+every listed treatment the data file has; there it renders as a KM figure
+named for the plot and the Focus, or — when a listed treatment is absent,
+emptied by exclusion, or a typo the file never had — is **Not Applicable**
+with the missing labels named, never drawn with fewer curves than the
+experimenter listed. A plot comparing the sexes is not about a females-only
+Focus, so it is simply not drawn there. Because experimenters often use it to mark the separate experiments in
 one file, the Focus window offers *Import from DefinedPlots*, proposing a
 Focus for each plot whose treatments form a rectangular product of levels —
 offered rather than automatic, since promotion turns a figure into an
@@ -665,6 +688,12 @@ _Avoid_: template config, full config
   making the drift visible rather than impossible: renames through the Focus
   window move their results, hand renames leave **Orphaned Results**, and a
   same-name redefinition is **Out of Date**.
+- "Not Applicable" was about to be printed for every analysis a Focus is never
+  asked — the interaction model in each one-factor Focus's report. Resolved:
+  a **Requirement** has two halves; failing *relevance* means not offered and
+  not mentioned, failing *computability* means Not Applicable and recorded.
+  The same split retired the "exactly 2×2" rule: the Factorial Battery is
+  offered for two or more varying factors of any number of levels.
 - "declared treatment" was used of a Focus, which declares *levels*, not
   treatments — so an unbalanced design read as a Focus with a missing
   treatment, and would have blocked. Resolved: a Focus's treatments are the

@@ -77,3 +77,23 @@ quality criteria, report sections.
   analyzed" rather than being moved into `analysis/Unfiltered/` — adopting them
   would vouch for a definition the old Run Summary never recorded. The cost is
   one re-run per experiment.
+
+## Amended 2026-10-02: relevance and computability
+
+The first cut offered the Factorial Battery for exactly a populated 2×2 and
+recorded a Not Applicable line wherever it did not apply — so every one-factor
+Focus's report said "Factorial Battery: not run", and every Hub showed a Cox
+factorial button that could only refuse. Both were noise. Each action now
+declares a **Requirement** with two halves. **Relevance** is decided by the
+Focus's definition: an irrelevant action is *not offered* — no button, no
+figure, no report section, no note. **Computability** is decided by the data:
+a relevant action the populated cells cannot support is Not Applicable,
+greyed in the Hub with the reason and recorded by the run, exactly as above.
+The interaction analyses are relevant whenever a Focus varies two or more
+factors, of any number of levels — the Cox and RMST code always fitted that;
+the 2×2 limit was the retired type's — and computable when every pair of
+those factors is fully crossed. The crossing figures need only the two
+varying factors, since a missing cell is just a missing curve. The rejected
+alternative was greying every irrelevant button: it keeps the Hub stable
+between Focuses, but a button that can never be pressed for this slice says
+nothing a quiet "not offered" line does not.

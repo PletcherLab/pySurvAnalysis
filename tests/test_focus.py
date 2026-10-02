@@ -138,9 +138,8 @@ def test_an_empty_crossing_cell_is_relevant_but_not_computable(frame):
 
 
 def test_more_than_two_levels_is_still_factorial(frame):
-    extra = frame.copy()
-    extra.loc[extra.index[:6], "Genotype"] = "InR"
-    extra.loc[extra.index[3:6], "Density"] = "40x"
+    extra = pd.concat([frame, _frame([(1.0, 1, "InR", d, "F") for d in ("20x", "40x")])],
+                      ignore_index=True)
     f = fm.Focus("G3", {"Genotype": ["wCS", "mDilp235bx", "InR"], "Density": ["20x", "40x"]})
     shape = fm.focus_shape(f, fm.apply_focus(extra, f))
     assert shape.describe() == "3×2"

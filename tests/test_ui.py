@@ -1629,7 +1629,7 @@ def test_import_from_defined_plots_offers_only_rectangular_plots(qapp, tmp_path)
 
 def test_the_qc_viewer_shows_only_the_active_focus(qapp, tmp_path):
     from pysurvanalysis.apps.qc_viewer import QcViewerWindow
-    from pysurvanalysis.domain import SurvivalExperiment, config as cfgmod
+    from pysurvanalysis.domain import config as cfgmod
     from pysurvanalysis.domain.focus import Focus
     from tests.conftest import write_dlife_workbook
 
