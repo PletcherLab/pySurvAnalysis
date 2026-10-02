@@ -7,9 +7,11 @@ imported — and validated — without matplotlib, and adding a figure to a type
 one tuple entry rather than a pipeline edit.
 
 Every builder takes the :class:`~pysurvanalysis.pipeline.AnalysisResult` and
-returns a matplotlib Figure, or ``None`` when the data cannot support it (too
-few treatments for a forest plot, say). ``None`` is a normal outcome, not an
-error: the report simply has one fewer figure.
+returns a matplotlib Figure. When the slice cannot support a figure — too few
+treatments for a forest plot, a Focus that is not a 2×2 — the builder raises
+:class:`~pysurvanalysis.domain.focus.NotApplicable` with the reason, and the
+run records it where the reader will see it: one fewer figure is a fact to
+state, not a gap to leave.
 """
 
 from __future__ import annotations
@@ -37,20 +39,19 @@ def _time_label(result) -> str:
     return "Age (hours)"
 
 
-def _factors_block(result) -> dict[str, list]:
-    from .experiment_types.interaction import factor_block
+def _focus_levels(result) -> dict[str, list]:
+    """The run's varying factors and their levels, in display order — what a
+    figure crossing factors draws. Raises NotApplicable unless the Focus
+    varies two or more factors and populates two or more treatments."""
+    from .domain.focus import FACTORIAL_PLOT, NotApplicable
 
-    exp = getattr(result, "experiment", None)
-    if exp is None:
-        return {}
-    declared = factor_block(exp.config)
-    if declared:
-        return declared
-    # A type that does not declare factors still gets a sensible pair from the
-    # data when a figure needs two axes of variation.
-    names = list(result.factors)[:2]
-    return {n: sorted(map(str, result.individual_data[n].dropna().unique()))
-            for n in names}
+    focus, shape = getattr(result, "focus", None), getattr(result, "focus_shape", None)
+    if focus is None or shape is None:
+        raise NotApplicable("no Focus to cross")
+    ok, reason = shape.admits(FACTORIAL_PLOT)
+    if not ok:
+        raise NotApplicable(reason)
+    return {f: list(focus.factors[f]) for f in focus.varying_factors}
 
 
 def _km(result):
@@ -63,25 +64,21 @@ def _km_risk(result):
 
 def _forest(result):
     if result.hazard_ratios is None or len(result.hazard_ratios) == 0:
-        return None
+        from .domain.focus import NotApplicable
+
+        raise NotApplicable("fewer than two treatments to compare")
     return plotting.plot_hazard_ratio_forest(result.hazard_ratios)
 
 
 def _faceted(result):
-    factors = _factors_block(result)
-    if len(factors) != 2:
-        return None
     return plotting.plot_km_faceted(
-        result.lifetables, factors, time_label=_time_label(result),
+        result.lifetables, _focus_levels(result), time_label=_time_label(result),
     )
 
 
 def _interaction(result):
-    factors = _factors_block(result)
-    if len(factors) != 2:
-        return None
     return plotting.plot_lifespan_interaction(
-        result.individual_data, factors, time_label=_time_label(result),
+        result.individual_data, _focus_levels(result), time_label=_time_label(result),
     )
 
 
@@ -131,5 +128,5 @@ def get(plot_id: str) -> PlotBuilder:
 
 
 def build(plot_id: str, result):
-    """Build one figure, or ``None`` when the data cannot support it."""
+    """Build one figure; raises NotApplicable when the slice cannot support it."""
     return get(plot_id).build(result)

@@ -4,6 +4,12 @@ This module is the only place that turns numbers into a document. It emits the
 backend-agnostic blocks of :mod:`pysurvanalysis.report_pkg.model`, so the PDF
 and the markdown are provably the same report — and an Experiment Type's
 ``report_sections()`` decides which sections appear and in what order.
+
+Every report is about one **Focus**, and says so: the cover names it, and the
+Focus section describes the slice — its varying factors and Reference Levels,
+its filters, what it pools over, which cells exist — and lists every action
+that was **Not Applicable** to it, with the reason (ADR-0011). A figure or
+model that did not run is stated, never just absent.
 """
 
 from __future__ import annotations
@@ -110,14 +116,27 @@ def figure_block(path: Path, title: str | None = None,
 # Experiment-level sections
 # ---------------------------------------------------------------------------
 
+def focus_record(result) -> dict:
+    """The run's Focus as a plain dict — live result or saved one alike."""
+    return dict(getattr(result, "focus_record", None) or {})
+
+
+def not_applicable(result) -> list[dict]:
+    return [dict(item) for item in (getattr(result, "not_applicable", None) or [])
+            if isinstance(item, dict)]
+
+
 def _cover(result, name: str) -> m.Cover:
     exp_type = result.experiment_type
     es = result.experiment_summary or {}
+    rec = focus_record(result)
     meta: list[tuple[str, str]] = [
-        ("Experiment type", getattr(exp_type, "label", "Custom Experiment")),
+        ("Focus", rec.get("name") or "—"),
+        ("Slice", rec.get("description") or "—"),
+        ("Experiment type", getattr(exp_type, "label", "Standard Lifespan")),
         ("Data file", result.input_file.name),
         ("Generated", datetime.now().strftime("%Y-%m-%d %H:%M")),
-        ("Factors", ", ".join(result.factors) or "none"),
+        ("Varying factors", ", ".join(result.factors) or "none"),
         ("Treatments", str(es.get("n_treatments", "?"))),
         ("Individuals", str(es.get("n_total", "?"))),
         ("Deaths", str(es.get("n_deaths", "?"))),
@@ -151,12 +170,72 @@ def _cover(result, name: str) -> m.Cover:
                    else "no overall difference detected")
         status.append(m.StatusLine(
             f"Omnibus log-rank: {verdict} (p = {format_pvalue(p)}).", level))
+    skipped = not_applicable(result)
+    if skipped:
+        status.append(m.StatusLine(
+            f"{len(skipped)} action(s) not applicable to this Focus — listed in "
+            f"the Focus section.", m.Level.WARN))
+    title_name = f"{name} · {rec['name']}" if rec.get("name") else name
     return m.Cover(
-        title=getattr(exp_type, "report_title", lambda n: n)(name),
+        title=getattr(exp_type, "report_title", lambda n: n)(title_name),
         subtitle=exp_type.report_intro() or "",
         metadata=meta,
         status=status or None,
     )
+
+
+def _section_focus(result) -> list:
+    """Name the slice, describe it, and state what did not apply to it."""
+    rec = focus_record(result)
+    if not rec:
+        return []
+    blocks: list = [m.Paragraph(
+        f"This analysis is under the Focus **{rec.get('name')}**: "
+        f"{rec.get('description') or 'a slice of the data file'}.")]
+    definition = rec.get("definition") or {}
+    factors = definition.get("factors") or {}
+    reference = definition.get("reference") or {}
+    if factors:
+        rows = []
+        for factor, levels in factors.items():
+            levels = list(levels or [])
+            role = ("varying" if len(levels) >= 2 else "filter")
+            rows.append([factor, ", ".join(map(str, levels)), role,
+                         str(reference.get(factor) or "—") if role == "varying" else "—"])
+        for factor in rec.get("pooled_over") or []:
+            rows.append([factor, "all levels", "pooled over", "—"])
+        blocks.append(m.Table(
+            columns=["Factor", "Levels (display order)", "Role", "Reference level"],
+            rows=rows, title="Focus definition",
+            caption=("Levels are discovered from the data file. A varying factor "
+                     "labels the treatments; a filter keeps one level; a factor "
+                     "the Focus does not name is pooled over. Model coefficients "
+                     "are relative to each Reference Level.")))
+    treatments = rec.get("treatments") or []
+    absent = rec.get("absent_cells") or []
+    shape = rec.get("shape")
+    line = f"Shape {shape}" if shape else "Shape unknown"
+    line += f"; {len(treatments)} treatment(s): {', '.join(map(str, treatments))}."
+    if absent:
+        line += (f" Cells the levels imply but the data never held (absent, "
+                 f"not an error): {', '.join(map(str, absent))}.")
+    blocks.append(m.Paragraph(line))
+    if rec.get("unassigned"):
+        blocks.append(m.Paragraph(
+            f"{rec['unassigned']} individual(s) in the data file have no recorded "
+            f"level for a factor this Focus names, so they belong to no "
+            f"treatment and are outside this analysis."))
+    skipped = not_applicable(result)
+    if skipped:
+        blocks.append(m.Table(
+            columns=["Not applicable", "Why"],
+            rows=[[str(i.get("action", "")), str(i.get("reason", ""))] for i in skipped],
+            row_levels=[m.Level.WARN] * len(skipped),
+            title="Not applicable to this Focus",
+            caption=("Real actions this slice does not admit. Recorded rather "
+                     "than omitted, so a missing figure or model is never "
+                     "mistaken for a result.")))
+    return blocks
 
 
 def _section_summary(result) -> list:
@@ -198,9 +277,11 @@ def _curated_figure(result, plot_id: str, specs, title: str,
     spec = specs.get(pubfigures._SPEC_ALIASES.get(plot_id, plot_id))
     if spec is None:
         return None
+    focus = getattr(result, "focus", None)
     try:
-        style = pubfigures.resolve_style(spec.style, experiment)
-        frame = pubfigures.data_for(experiment, spec)
+        style = pubfigures.effective_style(
+            pubfigures.resolve_style(spec.style, experiment), focus, spec)
+        frame = pubfigures.data_for(experiment, spec, focus=focus)
         if frame.empty:
             return None
         figure = pubfigures.build_ggplot(frame, spec, style)
@@ -222,7 +303,8 @@ def _section_figures(result) -> list:
     blocks: list = []
     paths = getattr(result, "figure_paths", {}) or {}
     exp_type = result.experiment_type
-    headline = getattr(exp_type, "headline_plot_id", None)
+    headline = (getattr(result, "headline_plot_id", None)
+                or getattr(exp_type, "headline_plot_id", None))
     order = [headline] + [pid for pid in paths if pid != headline] if headline in paths \
         else list(paths)
 
@@ -260,6 +342,12 @@ def _section_figures(result) -> list:
             placed.add(curated_id)
         else:
             block = figure_block(path, title=label, caption=registry_spec.caption)
+        if block:
+            blocks.append(block)
+    for name, path in (getattr(result, "defined_plot_paths", {}) or {}).items():
+        block = figure_block(path, title=f"Defined Plot — {name}",
+                             caption="Treatments the experimenter listed in the "
+                                     "workbook's DefinedPlots sheet.")
         if block:
             blocks.append(block)
     return blocks
@@ -313,8 +401,15 @@ def _section_tests(result) -> list:
 
 
 def _section_interaction(result) -> list:
-    """The factorial models — the Interaction Experiment's reason to exist."""
+    """The Factorial Battery's models — or the one line saying why it did not
+    apply to this Focus."""
     blocks: list = []
+    if not (result.cox_analyses or []):
+        for item in not_applicable(result):
+            if item.get("action") == "Factorial Battery":
+                blocks.append(m.Paragraph(
+                    f"**Factorial Battery: not run** — {item.get('reason')}."))
+        return blocks
     for model in result.cox_analyses or []:
         title = model.get("title") or model.get("model_type", "Factorial model")
         if model.get("error"):
@@ -346,8 +441,11 @@ def _section_interaction(result) -> list:
                          "factor depends on the level of the other."),
             ))
         coefs = model.get("coefficients")
+        ref = model.get("reference") or {}
+        ref_text = (", ".join(f"{f} = {lv}" for f, lv in ref.items())
+                    if isinstance(ref, dict) and ref else "each factor's reference level")
         table = dataframe_table(coefs, title="Coefficients",
-                                caption="Relative to each factor's reference level.")
+                                caption=f"Relative to the Reference Levels: {ref_text}.")
         if table is not None:
             if isinstance(coefs, pd.DataFrame) and "p_value" in coefs.columns:
                 table.row_levels = [_level_for_p(v) for v in coefs["p_value"].head(200)]
@@ -385,6 +483,7 @@ def _section_quality(result) -> list:
 
 
 _SECTION_BUILDERS = {
+    "focus": _section_focus,
     "summary": _section_summary,
     "figures": _section_figures,
     "lifespan": _section_lifespan,
@@ -417,22 +516,33 @@ def build_experiment_report(result, name: str | None = None) -> m.Report:
 def write_experiment_report(result, output_dir: str | Path,
                             formats: tuple[str, ...] = ("pdf", "md")) -> dict[str, Path]:
     """Render the experiment report. Returns ``{format: path}``."""
+    from .domain.focus import FocusOutputs
+
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     exp = getattr(result, "experiment", None)
     stem = exp.name if exp is not None else result.input_file.stem
     report = build_experiment_report(result)
+    outs = getattr(result, "outputs", None)
+    focus = getattr(result, "focus", None)
+    if outs is None and focus is not None:
+        outs = FocusOutputs.at(out, focus)
+
+    def _target(suffix: str) -> Path:
+        if outs is not None:
+            return outs.report(stem, suffix)
+        return out / (f"{stem}_report.pdf" if suffix == ".pdf" else "report.md")
 
     written: dict[str, Path] = {}
     if "pdf" in formats:
-        target = out / f"{stem}_report.pdf"
+        target = _target(".pdf")
         try:
             render(report, str(target), backend="reportlab")
             written["pdf"] = target
         except Exception:  # noqa: BLE001 - markdown must still be written
             pass
     if "md" in formats:
-        target = out / "report.md"
+        target = _target(".md")
         render(report, str(target), backend="markdown")
         written["md"] = target
     return written

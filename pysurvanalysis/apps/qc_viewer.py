@@ -28,6 +28,7 @@ use_agg_matplotlib()
 from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QHBoxLayout,
@@ -149,12 +150,16 @@ class _ChamberPanel(QWidget):
 class QcViewerWindow(QMainWindow):
     """QC Viewer main window."""
 
-    def __init__(self, project_dir: str | Path | None = None) -> None:
+    def __init__(self, project_dir: str | Path | None = None, focus=None) -> None:
         super().__init__()
         self.setWindowTitle("pySurvAnalysis — QC Viewer")
         self.resize(1300, 820)
 
         self._project_dir: Path | None = None
+        #: The Hub's Active Focus. The viewer SHOWS its chambers — that is
+        #: navigation — but the groups it saves belong to the directory: a
+        #: chamber's validity is a fact about the chamber, not the slice.
+        self._focus = focus
         self._data = None
         self._per_chamber_lt = None
         self._panels: dict[str, _ChamberPanel] = {}
@@ -210,6 +215,17 @@ class QcViewerWindow(QMainWindow):
         pick_btn = QPushButton("Pick project…")
         pick_btn.clicked.connect(self._pick_project)
         side_lay.addWidget(pick_btn)
+
+        self._focus_box = QCheckBox("")
+        self._focus_box.setToolTip(
+            "Show only the chambers in the Hub's Active Focus. Exclusions you "
+            "save still apply to the whole directory, every Focus alike.")
+        self._focus_box.setChecked(self._focus is not None)
+        self._focus_box.setVisible(self._focus is not None)
+        if self._focus is not None:
+            self._focus_box.setText(f"Only Focus {self._focus.name}")
+        self._focus_box.toggled.connect(lambda _on: self._reload_data())
+        side_lay.addWidget(self._focus_box)
 
         side_lay.addWidget(QLabel("Active exclusion group"))
         self._group_combo = QComboBox()
@@ -323,6 +339,12 @@ class QcViewerWindow(QMainWindow):
         except Exception as err:  # noqa: BLE001
             QMessageBox.warning(self, "Load failed", str(err))
             return
+
+        if self._focus is not None and self._focus_box.isChecked():
+            from ..domain.focus import apply_focus
+
+            self._data = apply_focus(self._data, self._focus)
+            self._data["treatment"] = self._data["treatment"].astype(str)
 
         if "chamber" not in self._data.columns or self._data["chamber"].astype(str).eq("N/A").all():
             QMessageBox.information(

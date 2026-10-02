@@ -56,7 +56,7 @@ def test_one_failing_project_does_not_stop_the_batch(tmp_path):
     # Break one member's config so validate_project fails for that Project only.
     broken = root / "proj_0" / "rep"
     config = cfgmod.load_config(broken)
-    config["experiment_type"] = "interaction"      # no factors declared
+    config["focuses"] = {"Empty": {"factors": {}}}   # a Focus naming nothing
     cfgmod.save_config(broken, config)
 
     cfgmod.write_yaml(root / cfgmod.BATCH_FILENAME, {
@@ -148,3 +148,35 @@ def test_an_empty_batch_says_so(tmp_path):
     result = Batch(tmp_path / "empty").run(log=logged.append)
     assert result.outcomes == []
     assert any("nothing to run" in line for line in logged)
+
+
+def _block_a_focus(root):
+    """Give proj_0's member a second Focus naming a level its data lacks."""
+    member = root / "proj_0" / "rep"
+    config = cfgmod.load_config(member)
+    config["focuses"]["Stale"] = {"factors": {"Genotype": ["wt", "mutant"]}}
+    cfgmod.save_config(member, config)
+
+
+def test_a_blocked_focus_is_reported_not_a_failure(tmp_path):
+    root = _batch(tmp_path)
+    _block_a_focus(root)
+    logged: list[str] = []
+    result = Batch(root).run(log=logged.append)
+    ## The member is not blocked by one of its Focuses: the Project runs, its
+    ## healthy Focus is analysed, and the blocked one is named before and after.
+    assert not result.failures
+    assert any("Stale is blocked" in line and "mutant" in line for line in logged)
+    assert "1 Focus(es) blocked" in result.summary()
+    rep = Project(root / "proj_0").member("rep")
+    states = {f.name: f.state for f in rep.status().focuses}
+    assert states == {"Factorial": "analysed", "Stale": "blocked"}
+
+
+def test_the_preflight_list_carries_blocked_focuses(tmp_path):
+    root = _batch(tmp_path)
+    _block_a_focus(root)
+    entry = next(p for p in Batch(root).batch_projects() if p.key == "proj_0")
+    [(member, focus, reasons)] = entry.blocked_focuses()
+    assert (member, focus) == ("rep", "Stale")
+    assert "mut" in reasons[0]          # the close match is offered

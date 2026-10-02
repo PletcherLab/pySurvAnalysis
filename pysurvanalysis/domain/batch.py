@@ -80,6 +80,37 @@ class BatchProject:
             text += f", {len(self.blocked)} blocked"
         return text
 
+    def blocked_focuses(self) -> list[tuple[str, str, tuple[str, ...]]]:
+        """``(member, focus, reasons)`` for every **Blocked Focus** in the
+        usable members.
+
+        Unlike the layout walk this reads each member's Design sheet (cached
+        on the file) — a deliberate bend of the no-data-read rule, because a
+        Focus silently narrowed in the middle of a run costs far more. A
+        member that cannot be read is left to fail at run time, where the
+        error is specific.
+        """
+        from .experiment import SurvivalExperiment
+        from .project import Project
+
+        try:
+            project = Project(self.directory)
+        except Exception:  # noqa: BLE001
+            return []
+        out: list[tuple[str, str, tuple[str, ...]]] = []
+        for member in self.usable:
+            try:
+                exp = SurvivalExperiment(member.directory, defaults=project.defaults,
+                                         project=project)
+                design = exp.design()
+                for focus in exp.focuses():
+                    fs = exp.focus_status(focus, design)
+                    if fs.blocked:
+                        out.append((member.name, focus.name, fs.blocked))
+            except Exception:  # noqa: BLE001
+                continue
+        return out
+
 
 def project_kind(directory: Path | str) -> tuple[str, tuple]:
     """Classify *directory* as a Batch Project candidate.
@@ -323,10 +354,13 @@ class ProjectOutcome:
     #: "succeeded" being read as "analysed everything".
     usable: int = 0
     total: int = 0
+    #: Focuses that could not run as declared — reported, never a refusal.
+    blocked_focuses: int = 0
 
     @property
     def partial(self) -> bool:
-        return self.ok and self.total > 0 and self.usable < self.total
+        return self.ok and ((self.total > 0 and self.usable < self.total)
+                            or self.blocked_focuses > 0)
 
 
 @dataclass
@@ -347,9 +381,14 @@ class BatchResult:
         partial = [o for o in self.outcomes if o.partial]
         tail = ""
         if partial:
+            def _detail(o) -> str:
+                text = f"{o.usable}/{o.total} members"
+                if o.blocked_focuses:
+                    text += f", {o.blocked_focuses} Focus(es) blocked"
+                return text
+
             tail = ("; incomplete: "
-                    + ", ".join(f"{o.name} ({o.usable}/{o.total} members)"
-                                for o in partial))
+                    + ", ".join(f"{o.name} ({_detail(o)})" for o in partial))
         if not bad:
             return f"Batch run: {total} Project(s) completed{tail}."
         names = ", ".join(o.name for o in self.failures)
@@ -481,6 +520,10 @@ class Batch:
                 emit(f"{prefix}{len(entry.blocked)} blocked member(s) will not "
                      f"be analysed: "
                      + "; ".join(m.describe() for m in entry.blocked))
+            stuck = entry.blocked_focuses()
+            for member_name, focus_name, reasons in stuck:
+                emit(f"{prefix}Focus {member_name} · {focus_name} is blocked and "
+                     f"will not be analysed: {'; '.join(reasons)}")
             try:
                 project = Project(entry.directory)
             except Exception as exc:  # noqa: BLE001 - one bad Project must not stop the Batch
@@ -513,7 +556,7 @@ class Batch:
             else:
                 result.outcomes.append(ProjectOutcome(
                     entry.key, True, usable=len(entry.usable),
-                    total=len(entry.members)))
+                    total=len(entry.members), blocked_focuses=len(stuck)))
 
         emit(result.summary())
         return result

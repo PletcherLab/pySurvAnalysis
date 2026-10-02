@@ -49,3 +49,24 @@ a figure now writes its spec *and* a style under the figure's own name;
 sharing a look is the explicit *Copy style from…*. `default_style` remains as
 the seed a figure's working style is copied from, and legacy specs naming a
 shared style still resolve through it.
+
+**Third amendment (2026-10-02): treatment decisions move to the Focus.** The
+first amendment's premise — that "treatment display names and order" are
+things a Project wants identical across members — did not survive ADR-0011.
+Factors are now discovered per data file, and a `treatment` label is the active
+**Focus**'s levels joined with `/`, so labels are Focus-scoped: the same
+individual is `Female/20x` under one Focus and `wCS` under another, and
+members rarely share factors at all. A Project-wide `treatments:` list, colour
+map and display-name map therefore matched almost nothing and degraded, with no
+error, to "every treatment, cycle colours".
+
+So the Spec is split along a new line. **Axis labels, limits, the reference
+line and the Style stay at the container** — they really are shared, and the
+first amendment's argument still holds for them. **Treatment order and
+inclusion leave the Spec entirely**: the Focus already decides both, upstream of
+every analysis, and a Spec ordering curves differently from the Cox baseline
+would put a legend beside a model it disagrees with. **Display names and
+colours move to the Focus**, keyed by its own labels. The Spec keeps one
+treatment power, **narrowing** a figure to a subset of its Focus's treatments in
+the Focus's order — the need the workbook's `DefinedPlots` sheet already
+expresses — so a Spec can make a figure smaller but never contradictory.

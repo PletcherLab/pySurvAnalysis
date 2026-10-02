@@ -9,6 +9,8 @@ import pytest
 from pysurvanalysis import project_report, report_builder as rb
 from pysurvanalysis.report_pkg import model as m
 
+from conftest import FACTORIAL
+
 
 @pytest.fixture
 def analysed(analysed_project):
@@ -36,8 +38,22 @@ def test_experiment_report_leads_with_the_headline_figure(result_a):
 def test_report_sections_follow_the_type(result_a):
     report = rb.build_experiment_report(result_a)
     titles = [b.title for b in _blocks_of(report, m.SectionDivider)]
-    assert "Factorial analysis" in titles          # interaction-only section
+    assert titles[0] == "Focus"                    # every report names its slice
+    assert "Factorial analysis" in titles          # a 2×2 Focus ran the battery
     assert titles.index("Experiment summary") < titles.index("Factorial analysis")
+
+
+def test_every_report_names_and_describes_its_focus(result_a):
+    report = rb.build_experiment_report(result_a)
+    cover = _blocks_of(report, m.Cover)[0]
+    stamped = dict(cover.metadata)
+    assert stamped["Focus"] == FACTORIAL
+    assert "reference wt" in stamped["Slice"]
+    assert FACTORIAL in cover.title
+    definition = next(t for t in _blocks_of(report, m.Table)
+                      if t.title == "Focus definition")
+    assert [row[0] for row in definition.rows] == ["Genotype", "Treatment"]
+    assert definition.rows[0][3] == "wt"           # the Reference Level column
 
 
 def test_cover_stamps_the_exclusion_group(project):
@@ -57,7 +73,7 @@ def test_cover_stamps_the_exclusion_group(project):
     assert "review_v2" in stamped["Exclusion group"]
 
     payload = json.loads(
-        (member.analysis_dir / "run_summary.json").read_text(encoding="utf-8"))
+        member.outputs(FACTORIAL).summary.read_text(encoding="utf-8"))
     assert payload["exclusion_group"] == "review_v2"
 
 
@@ -77,32 +93,79 @@ def test_both_backends_write_from_the_same_blocks(result_a, tmp_path):
     assert "![" in text                      # figures linked, not inlined
 
 
-def test_project_report_binds_one_section_per_member(analysed):
+def test_project_report_binds_one_section_per_focus(analysed):
     report = project_report.build_project_report(analysed)
     dividers = [b.title for b in _blocks_of(report, m.SectionDivider)]
     for member in analysed.members():
-        assert member.name in dividers
+        assert project_report.section_key(member.name, FACTORIAL) in dividers
 
 
-def test_project_report_carries_inventory_and_divergence(analysed):
+def test_project_report_carries_the_focus_inventory(analysed):
     report = project_report.build_project_report(analysed)
-    titles = [t.title for t in _blocks_of(report, m.Table)]
-    assert "Member inventory" in titles
-    assert "Divergence note" in titles
+    tables = {t.title: t for t in _blocks_of(report, m.Table)}
+    inventory = tables["Focus inventory"]
+    assert [row[:2] for row in inventory.rows] == [["rep_a", FACTORIAL],
+                                                  ["rep_b", FACTORIAL]]
+    ## The members' designs differ in level order — shown in the inventory,
+    ## and not a "divergence": that note is for data-source settings.
+    assert "reference wt" in inventory.rows[0][2]
+    assert "reference mut" in inventory.rows[1][2]
+    assert "Divergence note" not in tables
 
 
-def test_an_unanalysed_member_says_so_and_is_not_analysed(project):
+def test_differing_censoring_earns_the_divergence_note(project):
+    from pysurvanalysis.domain import Project, config as cfgmod
+
+    member = project.member("rep_b")
+    config = dict(member.raw_config)
+    config["global"] = {"assume_censored": False}
+    cfgmod.save_config(member.directory, config)
+    report = project_report.build_project_report(Project(project.directory))
+    tables = {t.title: t for t in _blocks_of(report, m.Table)}
+    assert [r[0] for r in tables["Divergence note"].rows] == ["censoring"]
+
+
+def test_an_unanalysed_focus_says_so_and_is_not_analysed(project):
     project.member("rep_a").run_analysis()
     report = project_report.build_project_report(project)
     paragraphs = " ".join(p.text for p in _blocks_of(report, m.Paragraph))
-    assert "rep_b has not been analysed" in paragraphs
-    assert not (project.member("rep_b").analysis_dir / "run_summary.json").is_file()
+    assert f"Focus {FACTORIAL} has not been analysed" in paragraphs
+    assert not project.member("rep_b").outputs(FACTORIAL).summary.is_file()
+
+
+def test_an_out_of_date_focus_shows_no_numbers(project):
+    from pysurvanalysis.domain import Project
+
+    member = project.member("rep_a")
+    member.run_analysis()
+    [focus] = member.focuses()
+    member.save_focuses([focus.copy(reference={"Treatment": "drug"})])
+    report = project_report.build_project_report(Project(project.directory))
+    paragraphs = " ".join(p.text for p in _blocks_of(report, m.Paragraph))
+    assert "results are out of date" in paragraphs
+    assert "Reference Level changed" in paragraphs
+    ## Neither member's figures are bound: rep_a is out of date, rep_b unrun.
+    assert not _blocks_of(report, m.Figure)
+
+
+def test_a_blocked_focus_is_reported_and_its_siblings_still_bind(project):
+    from pysurvanalysis.domain import Project
+    from pysurvanalysis.domain.focus import Focus
+
+    member = project.member("rep_a")
+    member.save_focuses(member.focuses() + [Focus("Stale", {"Genotype": ["wild"]})])
+    member.run_all()
+    report = project_report.build_project_report(Project(project.directory))
+    paragraphs = " ".join(p.text for p in _blocks_of(report, m.Paragraph))
+    assert "Focus Stale is blocked" in paragraphs
+    assert _blocks_of(report, m.Figure)            # the healthy Focus still binds
 
 
 def test_saved_analysis_rebuilds_sections_without_recomputing(analysed):
     member = analysed.member("rep_a")
-    saved = project_report.SavedAnalysis(member)
+    saved = project_report.SavedAnalysis(member, member.focus(FACTORIAL))
     assert saved.exists
+    assert saved.focus_record["name"] == FACTORIAL
     assert len(saved.summary) > 0
     assert saved.omnibus_lr.get("p_value") is not None
     assert len(saved.cox_analyses) == 2          # Cox + RMST companions

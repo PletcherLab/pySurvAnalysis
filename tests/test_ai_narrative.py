@@ -1,4 +1,4 @@
-"""The AI narrative: digests, the across-members rule, and soft failure."""
+"""The AI narrative: per-Focus digests, the across-Focuses rule, and soft failure."""
 
 from __future__ import annotations
 
@@ -6,6 +6,12 @@ import pytest
 
 from pysurvanalysis.ai import narrative
 from pysurvanalysis.ai.base import Provider, ProviderError
+from pysurvanalysis.project_report import section_key
+
+from conftest import FACTORIAL
+
+A = section_key("rep_a", FACTORIAL)
+B = section_key("rep_b", FACTORIAL)
 
 
 class FakeProvider(Provider):
@@ -35,12 +41,30 @@ def test_no_provider_configured_returns_nothing_and_says_why(analysed_project,
     assert any("No AI provider configured" in line for line in logged)
 
 
-def test_one_paragraph_per_member_plus_the_across_paragraph(analysed_project):
+def test_one_paragraph_per_focus_plus_the_across_paragraph(analysed_project):
     project, _results = analysed_project
     provider = FakeProvider()
     result = narrative.generate(project, provider=provider)
-    assert set(result) == {"rep_a", "rep_b", narrative.ACROSS_KEY}
+    assert set(result) == {A, B, narrative.ACROSS_KEY}
     assert len(provider.calls) == 3
+
+
+def test_every_focus_of_a_member_gets_its_own_paragraph(project):
+    from pysurvanalysis.domain.focus import Focus
+
+    member = project.member("rep_a")
+    member.save_focuses(member.focuses()
+                        + [Focus("Genotype", {"Genotype": ["wt", "mut"]})])
+    member.run_all()
+    result = narrative.generate(project, provider=FakeProvider())
+    assert set(result) == {A, section_key("rep_a", "Genotype"), narrative.ACROSS_KEY}
+
+
+def test_an_out_of_date_focus_is_not_summarized(project):
+    member = project.member("rep_a")
+    member.run_analysis()
+    member.save_focuses([member.focus(FACTORIAL).copy(reference={"Treatment": "drug"})])
+    assert narrative.generate(project, provider=FakeProvider()) == {}
 
 
 def test_the_across_prompt_forbids_pooling(analysed_project):
@@ -65,8 +89,10 @@ def test_the_digest_carries_only_saved_numbers(analysed_project):
     from pysurvanalysis.project_report import SavedAnalysis
 
     project, _results = analysed_project
-    digest = narrative.member_digest(SavedAnalysis(project.member("rep_a")))
-    assert "Interaction Experiment" in digest
+    member = project.member("rep_a")
+    digest = narrative.member_digest(SavedAnalysis(member, member.focus(FACTORIAL)))
+    assert f"Focus: {FACTORIAL}" in digest
+    assert "reference: Genotype=wt" in digest
     assert "Omnibus log-rank" in digest
     assert "Cox factorial model" in digest
 
@@ -88,7 +114,7 @@ def test_a_single_member_gets_no_across_paragraph(project):
 def test_unanalysed_members_are_skipped(project):
     project.member("rep_a").run_analysis()
     result = narrative.generate(project, provider=FakeProvider())
-    assert set(result) == {"rep_a"}
+    assert set(result) == {A}
 
 
 def test_an_unknown_provider_name_is_an_error():

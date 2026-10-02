@@ -30,8 +30,12 @@ def _add_run_args(p: argparse.ArgumentParser) -> None:
         help="Experiment Directory, a directory holding one .xlsx, or a data file.",
     )
     p.add_argument("--output-dir", "-o", default=None,
-                   help="Output dir (defaults to analysis/ for an Experiment "
-                        "Directory, else <stem>_results/).")
+                   help="Output dir for a bare data file (defaults to "
+                        "<stem>_results/Unfiltered/). An Experiment Directory "
+                        "always writes analysis/<focus>/.")
+    p.add_argument("--focus", action="append", default=None, metavar="NAME",
+                   help="Experiment Directory: analyse only this Focus "
+                        "(repeatable). Default: every declared Focus.")
     p.add_argument("--no-assume-censored", action="store_true",
                    help="Excel: don't assume unaccounted individuals are censored.")
     p.add_argument("--time-col", default="Age", help="CSV time column (default: Age).")
@@ -111,12 +115,31 @@ def _cmd_run(args: argparse.Namespace) -> int:
             for problem in problems:
                 print(f"  - {problem}")
             return 2
-        result = experiment.run_analysis(log=print, extra_excluded=extra_excluded)
+        ## Every Focus unless named: an unattended run that analysed one and
+        ## stayed quiet about the rest is the gap Focuses close (ADR-0011).
+        outcome = experiment.run_all(log=print, extra_excluded=extra_excluded,
+                                     only=args.focus)
         if args.figures:
             from pysurvanalysis import pubfigures
 
             pubfigures.render_all(experiment, log=print)
+        for name, result in outcome["results"].items():
+            print(f"\nFocus {name}: results in {result.output_dir}")
+            _print_summary(result)
+        for name, reasons in outcome["blocked"].items():
+            print(f"\nFocus {name}: BLOCKED — not analysed")
+            for reason in reasons:
+                print(f"  - {reason}")
+        for name, message in outcome["failed"].items():
+            print(f"\nFocus {name}: FAILED — {message}")
+        if outcome["unknown"]:
+            print(f"\nNo Focus named: {', '.join(outcome['unknown'])}")
+        return 1 if outcome["failed"] or outcome["unknown"] else 0
     else:
+        if args.focus:
+            print("--focus needs an Experiment Directory: a bare data file has "
+                  "no declared Focuses, and runs under Unfiltered.")
+            return 2
         col_mapping = None
         if args.col_mapping:
             import yaml
@@ -138,7 +161,14 @@ def _cmd_run(args: argparse.Namespace) -> int:
         )
 
     print(f"Analysis complete. Results in {result.output_dir}")
+    _print_summary(result)
+    return 0
+
+
+def _print_summary(result) -> None:
     es = result.experiment_summary or {}
+    for item in getattr(result, "not_applicable", None) or []:
+        print(f"  Not applicable — {item.get('action')}: {item.get('reason')}")
     if es:
         print("\nExperiment summary:")
         print(f"  Treatments:  {es.get('n_treatments', '?')}")
@@ -148,7 +178,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print(f"  Censored:    {es.get('n_censored', '?')} "
               f"({es.get('pct_censored', '?')}%)")
         print(f"  Time range:  {es.get('time_min', '?')} – {es.get('time_max', '?')}")
-    return 0
 
 
 def _cmd_project(args: argparse.Namespace) -> int:

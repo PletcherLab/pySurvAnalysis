@@ -665,57 +665,55 @@ def plot_chamber_overlay_km(
 # Cox interaction term is testing.
 # ---------------------------------------------------------------------------
 
-def _factor_levels(data: pd.DataFrame, factors: dict[str, list]) -> tuple[str, list,
-                                                                         str, list]:
-    """Resolve the two factor names and their declared level order.
-
-    Levels come from the config's declared order (first = Reference Level) so
-    panel order, colour assignment and legend order never depend on how the
-    levels happen to sort.
-    """
+def _require_crossing(factors: dict[str, list]) -> list[str]:
+    """The factor names, or an error: a figure that crosses factors needs two
+    or more varying ones."""
     names = list(factors)
-    if len(names) != 2:
+    if len(names) < 2:
         raise ValueError(
-            "An interaction figure needs exactly two declared factors; got "
-            f"{len(names)} ({', '.join(names) or 'none'})."
-        )
-    f1, f2 = names
-    l1 = [lv for lv in factors[f1]] or sorted(map(str, data[f1].dropna().unique()))
-    l2 = [lv for lv in factors[f2]] or sorted(map(str, data[f2].dropna().unique()))
-    return f1, l1, f2, l2
+            "A figure crossing factors needs two or more varying factors; got "
+            f"{len(names)} ({', '.join(names) or 'none'}).")
+    return names
+
+
+def _level_combos(factors: dict[str, list]) -> list[str]:
+    """Every combination of *factors*' levels, joined with ``/``, in display
+    order (first factor outermost) — the label a curve or line carries."""
+    import itertools
+
+    return ["/".join(map(str, combo))
+            for combo in itertools.product(*(list(v) for v in factors.values()))]
 
 
 def plot_km_faceted(
     lifetable: pd.DataFrame,
     factors: dict[str, list],
-    title: str = "Survival by treatment, faceted by genotype",
+    title: str | None = None,
     show_ci: bool = False,
     time_label: str = "Age",
 ) -> plt.Figure:
-    """One panel per level of factor 1; curves coloured by factor 2.
+    """One panel per level of the first varying factor; a curve for each level
+    (or combination of levels) of the others.
 
-    The Interaction Experiment's Headline Figure: a treatment effect that
-    differs between panels *is* the interaction, visible without reading a
-    coefficient.
+    The Headline Figure of a Focus that crosses factors: a treatment effect
+    that differs between panels *is* the interaction, visible without reading
+    a coefficient.
     """
+    names = _require_crossing(factors)
     lt = lifetable.copy()
     lt["treatment"] = lt["treatment"].astype(str)
     parts = lt["treatment"].str.split("/", n=1, expand=True)
     if parts.shape[1] < 2:
         raise ValueError(
-            "Faceted KM needs two-factor treatment labels of the form "
+            "Faceted KM needs treatment labels crossing factors, of the form "
             "'<level1>/<level2>'."
         )
     lt["_f1"], lt["_f2"] = parts[0], parts[1]
-    names = list(factors)
-    if len(names) != 2:
-        raise ValueError(
-            "A faceted KM needs exactly two declared factors; got "
-            f"{len(names)} ({', '.join(names) or 'none'})."
-        )
-    f1, f2 = names
+    f1, rest = names[0], names[1:]
+    l2 = _level_combos({f: factors[f] for f in rest})
+    f2 = " × ".join(rest)
+    title = title or f"Survival by treatment, faceted by {f1}"
     l1 = list(factors[f1]) or sorted(set(lt["_f1"]))
-    l2 = list(factors[f2]) or sorted(set(lt["_f2"]))
 
     present1 = [lv for lv in l1 if lv in set(lt["_f1"])]
     if not present1:
@@ -767,12 +765,19 @@ def plot_lifespan_interaction(
 ) -> plt.Figure:
     """Cell lifespan by factor level: non-parallel lines indicate interaction.
 
+    The last varying factor runs along the x axis and each combination of the
+    others is a line — for two factors, one line per level of the first.
+
     ``metric`` is ``"median"`` (Kaplan-Meier median, the default) or ``"mean"``.
     Error bars are bootstrap-free normal-approximation intervals on the cell
     statistic, which is what the eye needs here — the formal test is the Cox
     interaction term, not this figure.
     """
-    f1, l1, f2, l2 = _factor_levels(individual_data, factors)
+    names = _require_crossing(factors)
+    f2, line_factors = names[-1], names[:-1]
+    l1 = _level_combos({f: factors[f] for f in line_factors})
+    l2 = [str(lv) for lv in factors[f2]]
+    f1 = " × ".join(line_factors)
     metric = metric.lower()
     if metric not in {"median", "mean"}:
         raise ValueError("metric must be 'median' or 'mean'.")
@@ -782,11 +787,14 @@ def plot_lifespan_interaction(
     x_positions = {lv: i for i, lv in enumerate(l2)}
 
     for level1 in l1:
+        wanted = dict(zip(line_factors, level1.split("/")))
+        mask = pd.Series(True, index=individual_data.index)
+        for factor, level in wanted.items():
+            mask &= individual_data[factor].astype(str) == str(level)
         xs, ys, errs = [], [], []
         for level2 in l2:
             cell = individual_data[
-                (individual_data[f1].astype(str) == str(level1))
-                & (individual_data[f2].astype(str) == str(level2))
+                mask & (individual_data[f2].astype(str) == str(level2))
             ]
             if cell.empty:
                 continue

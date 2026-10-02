@@ -88,8 +88,10 @@ def load_defined_plots(path: Union[str, Path]) -> list[tuple[str, list[str]]]:
 
     Layout: **one column per plot**.
 
-    * Row 1 of the column supplies the **plot name** (used in UI dropdowns and
-      report headings).
+    * Row 1 of the column supplies the **plot name** — the figure's title, its
+      filename (``defined_<name>_<focus>.png``) and its report heading, and
+      the name a Focus gets when the Focus window's *Import from
+      DefinedPlots* promotes the plot into one.
     * Data rows start at Excel row 6.  Each cell names one treatment to include;
       only the text *before the first comma* is used.  An empty cell ends the
       list for that column.
@@ -273,8 +275,11 @@ def build_individual_data(
 
     df = pd.DataFrame(rows)
 
-    # Build treatment label from factor columns
-    df["treatment"] = df[factors].astype(str).agg("/".join, axis=1)
+    # Build treatment label from factor columns. Blanks join as empty text:
+    # under pandas 3 ``astype(str)`` keeps a missing value missing, and the
+    # join would fail on it. Such individuals belong to no Focus's treatment,
+    # and each run counts them rather than dropping them unsaid.
+    df["treatment"] = df[factors].fillna("").astype(str).agg("/".join, axis=1)
 
     # Order columns nicely
     col_order = ["time", "event", "chamber", "treatment"] + factors
@@ -363,7 +368,7 @@ def _individual_df_from_rows(
     df["event"] = df["event"].astype(int)
     if not set(df["event"].unique()).issubset({0, 1}):
         raise ValueError("Event column must contain only 0 and 1 values.")
-    df["treatment"] = df[factors].astype(str).agg("/".join, axis=1)
+    df["treatment"] = df[factors].fillna("").astype(str).agg("/".join, axis=1)
     col_order = ["time", "event", "chamber", "treatment"] + factors
     df = df[col_order].sort_values(["treatment", "time"]).reset_index(drop=True)
     return df

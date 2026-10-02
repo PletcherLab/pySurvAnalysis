@@ -2,8 +2,9 @@
 
 The config is the authority for everything that used to be UI state: the input
 format, the time/event columns, the censoring policy, the active **Exclusion
-Group**, the Experiment Type, and (for an Interaction Experiment) the declared
-factors and their ordered levels.
+Group**, the Experiment Type, and the declared **Focuses** — named slices of
+the factors and levels discovered in the data file (ADR-0011). Factors
+themselves are never declared.
 
 Unknown keys ride through a write untouched, so a config edited by a future
 version of the app — or by hand — is never silently truncated.
@@ -26,6 +27,12 @@ SPECS_FILENAME = "plot_specs.yaml"
 #: Sections merged key-by-key when a Member Experiment inherits Project
 #: Defaults. Anything else is replaced wholesale by the member's value.
 _DEEP_SECTIONS = ("global", "input", "exclusions")
+
+#: Sections a member never inherits. Members rarely share factors, so an
+#: inherited Focus would be a Blocked Focus in every member it does not fit,
+#: and editing one would put every member's results Out of Date at once.
+#: Sharing a design is the explicit *Copy Focuses from…* instead.
+NEVER_INHERITED = ("focuses",)
 
 DEFAULT_INPUT: dict[str, Any] = {
     "format": "auto",          # auto | excel | long | wide
@@ -108,7 +115,8 @@ def merge_defaults(member: dict, defaults: dict | None) -> dict:
     anything the member states wins, and the deep sections merge key-by-key so
     a member can override one setting without restating the section.
     """
-    resolved = copy.deepcopy(defaults or {})
+    resolved = {k: copy.deepcopy(v) for k, v in (defaults or {}).items()
+                if k not in NEVER_INHERITED}
     member = member or {}
     for key, value in member.items():
         if key in _DEEP_SECTIONS and isinstance(value, dict) \
@@ -176,5 +184,8 @@ def validate_config(config: dict) -> list[str]:
     if section is not None and not isinstance(section, dict):
         problems.append("`exclusions:` must be a mapping, e.g. `{group: default}`.")
 
+    from .focus import validate_focus_block
+
+    problems.extend(validate_focus_block(config))
     problems.extend(exp_type.validate_config(config))
     return problems

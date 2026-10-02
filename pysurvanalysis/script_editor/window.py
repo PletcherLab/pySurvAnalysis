@@ -109,8 +109,11 @@ class ScriptEditorWindow(QMainWindow):
             self._experiment = SurvivalExperiment(
                 d, defaults=parent.defaults if parent else {}, project=parent)
             if not self._factors:
-                self._factors = list(
-                    (self._experiment.config.get("factors") or {}))
+                ## Discovered from the data file — factors are never declared
+                ## (ADR-0011). An unreadable file leaves the pickers empty
+                ## rather than failing to open the editor.
+                design = self._experiment.try_design()
+                self._factors = list(design.factors) if design is not None else []
 
     def _available_levels(self) -> list[str]:
         levels = []

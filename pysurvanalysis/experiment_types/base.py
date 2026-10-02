@@ -1,10 +1,13 @@
-"""Experiment Types — the top-level thing a scientist chooses.
+"""Experiment Types — a description of the **data source**.
 
-An Experiment Type constrains everything below it: the expected input shape,
-the time unit and axis label, the censoring policy, the default quality
-criteria, the analyses that run, the **Plot Set**, the report sections, and
-the **Type Actions** it contributes to the Hub and the script registry
-(ADR-0002).
+An Experiment Type says what kind of file an experiment reads and how: the
+expected input shape, the time unit and axis label, the censoring policy, the
+default quality criteria and the report sections, plus the actions it
+contributes to the Hub and the script registry (ADR-0002). It deliberately
+says nothing about the experimental *design*: one data file may hold several
+designs, so which analyses and figures apply is decided by the active
+**Focus Shape** (ADR-0011). The 2×2 figures, for instance, are not a type's
+Plot Set — they are added to any run whose Focus is a populated 2×2.
 
 A type declares its Plot Set as plain ids; :mod:`pysurvanalysis.plot_registry`
 maps those ids to builders, so this module stays free of matplotlib and can be
@@ -19,11 +22,18 @@ from typing import Any
 
 @dataclass(frozen=True)
 class PlotDef:
-    """One entry in a Plot Set: a registry id plus how to present it."""
+    """One entry in a Plot Set: a registry id plus how to present it.
+
+    ``requires`` names the Requirement the figure needs from its Focus
+    (``"comparison"``, ``"factorial_plot"``): a figure whose requirement is
+    not *relevant* to the Focus is not part of its Plot Set at all; one that
+    is relevant but not computable from the data is Not Applicable.
+    """
 
     id: str
     label: str
     caption: str = ""
+    requires: str | None = None
 
 
 @dataclass(frozen=True)
@@ -35,19 +45,11 @@ class ReportSection:
 
 
 class ExperimentType:
-    """Base class and the Custom Experiment.
+    """Base class for an Experiment Type (a data source)."""
 
-    The *absence* of an ``experiment_type`` key in ``survival_config.yaml`` IS
-    a Custom Experiment: every discovered factor gets the full battery, and no
-    action is withheld.
-    """
-
-    key: str = "custom"
-    label: str = "Custom Experiment"
-    description: str = (
-        "No type chosen — all discovered factors get the full analysis "
-        "battery and every action is available."
-    )
+    key: str = "base"
+    label: str = "Experiment"
+    description: str = ""
 
     #: Default ``global:`` values a scaffolded config starts from.
     default_global: dict[str, Any] = {
@@ -56,22 +58,18 @@ class ExperimentType:
         "assume_censored": True,
     }
 
-    #: Plot Set. Custom offers everything the registry knows.
+    #: The base Plot Set — what every Focus gets. Shape-gated figures are
+    #: added by :meth:`plot_set_for`.
     plot_set: tuple[PlotDef, ...] = ()
 
-    #: The one figure that states the primary result; leads the report and is
-    #: the Plot Editor's default. ``None`` means "no distinguished figure".
+    #: The one figure that states a Focus's primary result when its shape
+    #: names no other; leads the report and is the Plot Editor's default.
     headline_plot_id: str | None = None
 
-    #: Keys of pooled/core actions this type re-exports into its registry.
-    #: ``None`` means "every action in the pool" (Custom's behaviour).
-    action_keys: tuple[str, ...] | None = None
+    #: Keys of pooled actions this type re-exports into its registry.
+    action_keys: tuple[str, ...] = ()
 
     # ── identity ───────────────────────────────────────────────────────────
-
-    @property
-    def is_custom(self) -> bool:
-        return self.key == "custom"
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<ExperimentType {self.key}>"
@@ -87,9 +85,7 @@ class ExperimentType:
         Project stop reaching it.
         """
         cfg: dict[str, Any] = {} if minimal else {"global": dict(self.default_global)}
-        if not self.is_custom:
-            cfg = {"experiment_type": self.key, **cfg}
-        return cfg
+        return {"experiment_type": self.key, **cfg}
 
     def owned_keys(self) -> set[str]:
         """``global:`` keys this type defines defaults for."""
@@ -109,10 +105,6 @@ class ExperimentType:
             problems.append("`global.assume_censored` must be true or false.")
         return problems
 
-    def validate_data(self, individual_data, config: dict) -> list[str]:
-        """Problems visible only once the data is loaded (empty = ok)."""
-        return []
-
     # ── presentation ───────────────────────────────────────────────────────
 
     def resolve_time_label(self, config: dict) -> str:
@@ -131,8 +123,32 @@ class ExperimentType:
         return bool(value)
 
     def plot_ids(self) -> tuple[str, ...]:
-        """The Plot Set's ids, in order. Empty tuple = "everything"."""
+        """The base Plot Set's ids, in order."""
         return tuple(p.id for p in self.plot_set)
+
+    def plot_set_for(self, shape=None) -> tuple[PlotDef, ...]:
+        """The Plot Set a run under a Focus of *shape* produces: the base set
+        plus every shape-gated figure the shape admits.
+
+        The Plot Set is a property of the run — type plus Focus — not of the
+        directory.
+        """
+        if shape is None:
+            return tuple(self.plot_set)
+        out = [p for p in self.plot_set if shape.relevant(p.requires)[0]]
+        for plot in SHAPE_GATED_PLOT_DEFS:
+            if plot not in out and plot not in self.plot_set \
+                    and shape.relevant(plot.requires)[0]:
+                out.append(plot)
+        return tuple(out)
+
+    def headline_for(self, shape=None) -> str | None:
+        """The Headline Figure for a Focus of *shape*: the faceted KM when the
+        Focus crosses factors and the data can draw it, the type's own
+        headline otherwise."""
+        if shape is not None and shape.admits("factorial_plot")[0]:
+            return "km_faceted"
+        return self.headline_plot_id
 
     def report_title(self, experiment_name: str) -> str:
         return f"{experiment_name} — Survival Analysis"
@@ -143,8 +159,10 @@ class ExperimentType:
     def report_sections(self) -> tuple[ReportSection, ...]:
         """Ordered sections the report builder walks for this type."""
         return (
+            ReportSection("focus", "Focus"),
             ReportSection("summary", "Experiment summary"),
             ReportSection("figures", "Figures"),
+            ReportSection("interaction", "Factorial analysis"),
             ReportSection("lifespan", "Lifespan statistics"),
             ReportSection("tests", "Statistical tests"),
         )
@@ -164,26 +182,9 @@ class ExperimentType:
         """Type Actions defined by this type (beyond the shared pool)."""
         return ()
 
-    # ── analyses ───────────────────────────────────────────────────────────
 
-    def run_extra_analyses(self, result, config: dict) -> list[dict]:
-        """Type-specific analyses run as part of the standard battery.
-
-        Returns model dicts shaped like
-        :func:`pysurvanalysis.statistics.cox_interaction_analysis`'s output, so
-        one report renderer handles them all.
-        """
-        return []
-
-    # ── data preparation ───────────────────────────────────────────────────
-
-    def prepare_data(self, individual_data, config: dict):
-        """Hook to normalise the loaded frame (level ordering, labels…)."""
-        return individual_data
-
-
-#: Every plot id the general battery knows, in report order. Types name a
-#: subset; Custom uses all of them.
+#: Every plot id the general battery knows, in report order. A type's base
+#: Plot Set names a subset; the shape-gated ones are added per Focus.
 ALL_PLOT_DEFS: tuple[PlotDef, ...] = (
     PlotDef("km_curves", "Kaplan-Meier curves", "Survivorship by treatment."),
     PlotDef("km_risk_table", "KM curves with at-risk table",
@@ -191,7 +192,8 @@ ALL_PLOT_DEFS: tuple[PlotDef, ...] = (
     PlotDef("nelson_aalen", "Nelson-Aalen cumulative hazard",
             "Cumulative hazard by treatment."),
     PlotDef("log_log", "Log-log diagnostic",
-            "Parallel lines support the proportional-hazards assumption."),
+            "Parallel lines support the proportional-hazards assumption.",
+            requires="comparison"),
     PlotDef("cumulative_events", "Cumulative deaths", "Cumulative event counts."),
     PlotDef("hazard", "Hazard rate", "Interval hazard rate."),
     PlotDef("smoothed_hazard", "Smoothed hazard", "Kernel-smoothed hazard rate."),
@@ -200,9 +202,18 @@ ALL_PLOT_DEFS: tuple[PlotDef, ...] = (
     PlotDef("survival_distribution", "Lifespan distribution",
             "Distribution of individual lifespans by treatment."),
     PlotDef("hazard_ratio_forest", "Hazard-ratio forest",
-            "Pairwise hazard ratios with 95% confidence intervals."),
+            "Pairwise hazard ratios with 95% confidence intervals.",
+            requires="comparison"),
     PlotDef("km_faceted", "Faceted Kaplan-Meier",
-            "One panel per level of the first factor, curves coloured by the second."),
+            "One panel per level of the first varying factor, curves coloured "
+            "by the others.",
+            requires="factorial_plot"),
     PlotDef("interaction_lifespan", "Lifespan interaction plot",
-            "Median lifespan by factor level; non-parallel lines indicate interaction."),
+            "Median lifespan by factor level; non-parallel lines indicate interaction.",
+            requires="factorial_plot"),
 )
+
+#: The figures a Focus earns by crossing factors — never in a type's base
+#: Plot Set, added to a run's when the Focus makes them relevant.
+SHAPE_GATED_PLOT_DEFS: tuple[PlotDef, ...] = tuple(
+    p for p in ALL_PLOT_DEFS if p.requires == "factorial_plot")

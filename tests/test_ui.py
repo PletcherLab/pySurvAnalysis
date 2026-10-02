@@ -43,6 +43,22 @@ def _load_first_member(hub):
     hub._on_member_double_clicked(index)
 
 
+@pytest.fixture
+def own_hub(qapp, tmp_path):
+    """A Hub over a Project of its own, for tests that change a member's
+    Focuses — the session's analysed project is shared and must stay put."""
+    from pysurvanalysis.apps.hub import HubWindow
+    from pysurvanalysis.domain import Project
+    from tests.conftest import make_experiment_dir
+
+    root = tmp_path / "own"
+    Project.create(root, name="Own")
+    make_experiment_dir(root / "rep_a", minimal=True, n_per_cell=12)
+    window = HubWindow(str(root))
+    yield window
+    window.close()
+
+
 def test_the_strip_is_two_tiers(hub):
     """Five ribbon tiles, with the four experiment-level surfaces one level
     down behind the Experiment tile — they all wait on the same loaded
@@ -140,12 +156,61 @@ def test_the_members_table_is_the_way_to_load(hub):
     assert hub._selection == hub._project.directory
 
 
-def test_analyze_buttons_come_from_the_type(hub):
+def test_analyze_buttons_come_from_the_registry(hub):
     _load_first_member(hub)
     labels = _button_labels(hub._analyze_card)
-    assert "Cox factorial model" in labels        # contributed by Interaction
+    assert "Cox factorial model" in labels        # the Factorial Battery
     assert "Run analysis" in labels               # core
-    assert "Parametric AFT models" not in labels  # not in this type's registry
+    assert "Parametric AFT models" in labels      # the general case withholds nothing
+    assert "Run in focuses" not in labels         # structural: a script step only
+
+
+def test_buttons_irrelevant_to_the_focus_are_not_shown(own_hub):
+    ## A one-factor Focus asks no interaction question: no button at all, and
+    ## one quiet line saying what is not offered and why.
+    from pysurvanalysis.domain.focus import Focus
+
+    hub = own_hub
+    _load_first_member(hub)
+    member = hub._experiment
+    member.save_focuses(member.focuses() + [Focus("Geno", {"Genotype": ["wt", "mut"]})])
+    member.active_focus = "Geno"
+    hub._refresh_all()
+    analyze = _button_labels(hub._analyze_card)
+    plots = _button_labels(hub._plot_actions_card)
+    for title in ("Cox factorial model", "RMST factorial model"):
+        assert title not in analyze
+    for title in ("Faceted KM", "Lifespan interaction plot"):
+        assert title not in plots
+    assert "Log-rank pairwise" in analyze                 # still two treatments
+    note = next(t for t in analyze if t.startswith("Not offered"))
+    assert "Cox factorial model" in note
+    ## And the duplicate general-purpose Cox/RMST stay script tools.
+    assert "Cox PH (interactions)" not in analyze
+
+
+def test_a_relevant_but_uncomputable_button_is_greyed_with_the_reason(qapp, tmp_path):
+    import pandas as pd
+
+    from pysurvanalysis.apps.hub import HubWindow
+    from tests.conftest import make_experiment_dir
+
+    directory = make_experiment_dir(tmp_path / "hole", n_per_cell=10)
+    path = directory / "data" / "cohort.csv"
+    frame = pd.read_csv(path)
+    frame[~((frame.Genotype == "mut") & (frame.Treatment == "drug"))].to_csv(
+        path, index=False)
+    hub = HubWindow(str(directory))
+    try:
+        button = next(b for b in _buttons(hub._analyze_card)
+                      if b.text().strip() == "Cox factorial model")
+        assert not button.isEnabled()
+        assert "Genotype=mut × Treatment=drug" in button.toolTip()
+        faceted = next(b for b in _buttons(hub._plot_actions_card)
+                       if b.text().strip() == "Faceted KM")
+        assert faceted.isEnabled()                       # a missing curve is fine
+    finally:
+        hub.close()
 
 
 def test_plot_actions_land_on_the_plots_card_not_analyze(hub):
@@ -182,6 +247,12 @@ def _button_labels(card) -> list[str]:
     return [layout.itemAt(i).widget().text()
             for i in range(layout.count())
             if hasattr(layout.itemAt(i).widget(), "text")]
+
+
+def _buttons(card) -> list:
+    layout = card.body_layout()
+    return [layout.itemAt(i).widget() for i in range(layout.count())
+            if hasattr(layout.itemAt(i).widget(), "isEnabled")]
 
 
 def test_only_one_panel_is_open_at_a_time(hub):
@@ -311,11 +382,48 @@ def test_a_resize_keeps_the_open_panel_anchored(hub):
     assert panel.x() == max(8, min(tile_x, hub._central.width() - panel.width() - 8))
 
 
-def test_the_status_readout_names_project_and_experiment(hub):
+def test_the_status_readout_names_project_experiment_and_focus(hub):
     assert "none loaded" in hub._status_panel.status_text()
     _load_first_member(hub)
     text = hub._status_panel.status_text()
-    assert "rep_a" in text and "Interaction Experiment" in text
+    assert "rep_a" in text and "Standard Lifespan" in text
+    ## "Which experiment" without "which Focus" is half an answer.
+    assert "Focus" in text and "Factorial" in text
+
+
+def test_the_focus_selector_sits_above_the_sub_tiles_and_switches(own_hub):
+    from pysurvanalysis.domain.focus import Focus
+
+    hub = own_hub
+    _load_first_member(hub)
+    member = hub._experiment
+    member.save_focuses(member.focuses() + [Focus("Geno", {"Genotype": ["wt", "mut"]})])
+    hub._refresh_all()
+    combo = hub._focus_combo
+    assert [combo.itemData(i) for i in range(combo.count())] == ["Factorial", "Geno"]
+    assert all("not analysed" in combo.itemText(i) for i in range(2))
+    combo.setCurrentIndex(1)
+    ## UI state: nothing on disk changes, the Hub just looks at another slice.
+    assert hub._experiment.active_focus == "Geno"
+    assert "Geno" in hub._status_panel.status_text()
+    assert "pooled over Treatment" in hub._focus_shape.text()
+
+
+def test_orphaned_results_are_listed_in_the_focus_card(own_hub):
+    from pysurvanalysis.domain import config as cfgmod
+
+    hub = own_hub
+    _load_first_member(hub)
+    member = hub._experiment
+    (member.analysis_dir / "Factorial").mkdir(parents=True)
+    config = cfgmod.load_config(member.directory)
+    config["focuses"] = {"Renamed": config["focuses"]["Factorial"]}
+    cfgmod.save_config(member.directory, config)
+    hub._project.members(reload=True)
+    hub._experiment = hub._project.member("rep_a")
+    hub._refresh_all()
+    assert not hub._orphan_row.isHidden()
+    assert "Factorial" in hub._orphan_label.text()
 
 
 def test_a_standalone_experiment_selects_and_loads_itself(qapp, tmp_path):
@@ -683,13 +791,19 @@ def test_a_member_analysed_under_another_exclusion_group_reads_stale(analysed_pr
 
     project, _results = analysed_project
     member = project.member("rep_a")
-    assert not member.status().stale
+    assert not member.status().out_of_date
     config = cfgmod.load_config(member.directory)
     config["exclusions"] = {"group": "review_v2"}
     cfgmod.save_config(member.directory, config)
     ## reload=True: members() caches, which is why _refresh_all re-reads.
     project.members(reload=True)
-    assert project.member("rep_a").status().stale
+    st = project.member("rep_a").status()
+    assert st.out_of_date
+    assert "review_v2" in st.focuses[0].out_of_date_reasons[0]
+    ## Put back: the session's analysed project is shared.
+    config.pop("exclusions")
+    cfgmod.save_config(member.directory, config)
+    project.members(reload=True)
 
 
 def test_the_members_table_notices_a_config_written_under_it(hub):
@@ -860,7 +974,7 @@ def test_the_fourth_project_button_only_ever_edits(fresh_hub, tmp_path):
 
 def test_the_summary_line_describes_what_is_loaded(fresh_hub):
     text = fresh_hub._project_summary.text()
-    assert "States" in text and "Interaction Experiment" in text
+    assert "States" in text and "Standard Lifespan" in text
     assert "1 member(s)" in text
     assert "rep_b_bare" in text                     # the unconfigured folder
 
@@ -868,8 +982,6 @@ def test_the_summary_line_describes_what_is_loaded(fresh_hub):
 # ── the project.yaml editor the three ways in share ────────────────────────
 
 def test_project_info_dialog_creates_the_directory_it_is_given(qapp, tmp_path):
-    from PyQt6.QtWidgets import QTableWidgetItem
-
     from pysurvanalysis.apps.project_dialogs import ProjectInfoDialog
     from pysurvanalysis.domain import Project
 
@@ -877,18 +989,16 @@ def test_project_info_dialog_creates_the_directory_it_is_given(qapp, tmp_path):
     dialog = ProjectInfoDialog(None, start_dir=str(target))
     dialog.name_edit.setText("Brand new")
     dialog.question_edit.setText("Does it help?")
-    dialog.type_combo.setCurrentIndex(dialog.type_combo.findData("interaction"))
-    dialog.factors_table.insertRow(0)
-    dialog.factors_table.setItem(0, 0, QTableWidgetItem("Genotype"))
-    dialog.factors_table.setItem(0, 1, QTableWidgetItem("wt, mut"))
+    ## No factors editor: factors are discovered per member (ADR-0011).
+    assert not hasattr(dialog, "factors_table")
     dialog.accept()
 
     assert dialog.saved_dir == str(target.resolve())
     project = Project(target)
     assert project.name == "Brand new"
     assert project.question == "Does it help?"
-    assert project.type_key == "interaction"
-    assert project.defaults["factors"] == {"Genotype": ["wt", "mut"]}
+    assert project.type_key == "standard_lifespan"
+    assert "factors" not in project.defaults
     ## Every Project ships a batch script, however it was made.
     assert [s["name"] for s in project.scripts()] == ["batch"]
 
@@ -900,18 +1010,22 @@ def test_editing_a_project_carries_through_what_the_form_does_not_own(qapp, proj
     from pysurvanalysis.domain import Project
 
     project.config["defaults"]["something_new"] = {"kept": True}
+    ## A pre-Focus factors block is carried, not edited: members may still be
+    ## inheriting it until they migrate it into their own Focus.
+    project.config["defaults"]["factors"] = {"Genotype": ["wt", "mut"]}
     project.save()
 
     dialog = ProjectInfoDialog(None, start_dir=str(project.directory))
     assert dialog.name_edit.text() == "Test project"
-    assert dialog.type_combo.currentData() == "interaction"
+    assert dialog.type_combo.currentData() == "standard_lifespan"
     dialog.question_edit.setText("A sharper question")
     dialog.accept()
 
     reloaded = Project(project.directory)
     assert reloaded.question == "A sharper question"
-    assert reloaded.type_key == "interaction"
+    assert reloaded.type_key == "standard_lifespan"
     assert reloaded.defaults["something_new"] == {"kept": True}
+    assert reloaded.defaults["factors"] == {"Genotype": ["wt", "mut"]}
     assert [s["name"] for s in reloaded.scripts()] == ["batch"]
 
 
@@ -1105,7 +1219,7 @@ def editor(qapp, tmp_path):
     from pysurvanalysis.domain import SurvivalExperiment
     from tests.conftest import make_experiment_dir
 
-    directory = make_experiment_dir(tmp_path / "curated", type_key="interaction")
+    directory = make_experiment_dir(tmp_path / "curated")
     window = PlotEditorWindow(SurvivalExperiment(directory))
     window.resize(1300, 900)
     ## The curves are not known until the lifetables are read, which happens
@@ -1173,23 +1287,34 @@ def test_every_mapped_control_round_trips(editor):
 
 
 def test_a_swatch_left_on_its_cycle_colour_is_not_pinned(editor):
-    """``palette`` means "explicitly assigned".
+    """A per-curve colour means "explicitly assigned" — and belongs to the
+    Focus now, not the figure's Style (ADR-0005, third amendment).
 
-    Without this, merely opening the editor and touching anything would write
-    every curve's colour into the shared Style, and the fallback cycle would
-    stop meaning anything for every other member using that Style.
+    Without this, merely opening the editor and touching anything would pin
+    every curve's colour, and the fallback cycle would stop meaning anything.
     """
     assert set(editor._series_swatches) == {"ctrl", "drug"}
     _spec, style = editor._harvest()
-    assert style.palette == {}
+    assert style.palette == {} and editor._focus_colours == {}
 
     editor._series_swatches["drug"].set_color("#aa3355")
     _spec, style = editor._harvest()
-    assert style.palette == {"drug": "#aa3355"}
+    assert editor._focus_colours == {"drug": "#aa3355"}
+    assert style.palette == {}                    # one source, the Focus
 
     editor._reset_series_colours()
     _spec, style = editor._harvest()
-    assert style.palette == {}
+    assert style.palette == {} and editor._focus_colours == {}
+
+
+def test_saving_a_figure_writes_its_curve_colours_into_the_focus(editor):
+    from pysurvanalysis.domain import config as cfgmod
+
+    editor._series_swatches["drug"].set_color("#aa3355")
+    editor._save_spec()
+    written = cfgmod.load_config(editor.experiment.directory)
+    assert written["focuses"]["Factorial"]["colours"] == {"drug": "#aa3355"}
+    assert "Curve colours saved to Focus Factorial" in editor._status.currentMessage()
 
 
 def test_the_at_risk_times_field_ignores_a_half_typed_list(editor):
@@ -1287,7 +1412,7 @@ def test_export_writes_to_project_figures_without_asking(editor, monkeypatch):
     figures = editor._specs_root / "figures"
     current = editor._current_id
     assert sorted(p.name for p in figures.iterdir()) == [
-        f"{current}.svg", f"{current}_1.svg"]
+        f"{current}_Factorial.svg", f"{current}_Factorial_1.svg"]
     assert str(figures) in editor._status.currentMessage()
 
 
@@ -1380,3 +1505,142 @@ def test_validate_yamls_checks_a_standalone_experiment(qapp, standalone):
         assert "config is valid" in window._log.toPlainText()
     finally:
         window.close()
+
+
+# ── the Focus window ───────────────────────────────────────────────────────
+
+@pytest.fixture
+def focus_member(tmp_path):
+    from pysurvanalysis.domain import Project
+    from tests.conftest import make_experiment_dir
+
+    root = tmp_path / "fw"
+    Project.create(root, name="FW")
+    make_experiment_dir(root / "rep_a", minimal=True, n_per_cell=10, seed=1)
+    make_experiment_dir(root / "rep_b", minimal=True, n_per_cell=10, seed=2,
+                        focus="Theirs")
+    return Project(root).member("rep_a")
+
+
+def test_the_focus_window_authors_a_focus(qapp, focus_member):
+    from pysurvanalysis.apps.focus_window import FocusWindow
+    from pysurvanalysis.domain import config as cfgmod
+
+    window = FocusWindow(None, focus_member, new=True)
+    try:
+        window._name.setText("Drug, by genotype")
+        window._on_edit()
+        ## Keep only the drug level of Treatment: a filter, not a label.
+        box = window._boxes["Treatment"]
+        box.levels.item(0).setCheckState(Qt.CheckState.Unchecked)   # ctrl
+        ## Reverse Genotype's display order, but baseline on wt explicitly.
+        geno = window._boxes["Genotype"]
+        geno.levels.setCurrentRow(1)
+        geno._move(-1)
+        geno.reference.setCurrentIndex(geno.reference.findData("wt"))
+        window._on_edit()
+        assert "only Treatment = drug" in window._preview.text()
+        assert "offers a comparison between treatments" in window._preview.text()
+        assert "Factorial Battery" not in window._preview.text()
+        window.accept()
+    finally:
+        window.close()
+    written = cfgmod.load_config(focus_member.directory)["focuses"]["Drug, by genotype"]
+    assert written["factors"] == {"Genotype": ["mut", "wt"], "Treatment": ["drug"]}
+    assert written["reference"] == {"Genotype": "wt"}
+
+
+def test_renaming_in_the_focus_window_moves_the_results(qapp, focus_member):
+    from pysurvanalysis.apps.focus_window import FocusWindow
+
+    focus_member.run_analysis()
+    window = FocusWindow(None, focus_member, select="Factorial")
+    try:
+        window._name.setText("Main")
+        window._on_edit()
+        window.accept()
+    finally:
+        window.close()
+    assert focus_member.outputs("Main").summary.is_file()
+    assert not (focus_member.analysis_dir / "Factorial").exists()
+    assert focus_member.status().focuses[0].state == "analysed"
+
+
+def test_deleting_in_the_focus_window_orphans_the_results(qapp, focus_member):
+    from pysurvanalysis.apps.focus_window import FocusWindow
+    from pysurvanalysis.domain.focus import Focus
+
+    focus_member.save_focuses(focus_member.focuses()
+                              + [Focus("Other", {"Genotype": ["wt", "mut"]})])
+    (focus_member.analysis_dir / "Factorial").mkdir(parents=True)
+    window = FocusWindow(None, focus_member, select="Factorial")
+    try:
+        window._delete()
+        window.accept()
+    finally:
+        window.close()
+    assert [f.name for f in focus_member.focuses()] == ["Other"]
+    assert focus_member.orphaned_results() == ["Factorial"]
+
+
+def test_copy_focuses_from_checks_them_against_this_member(qapp, focus_member,
+                                                           monkeypatch):
+    import PyQt6.QtWidgets as qtw
+
+    from pysurvanalysis.apps.focus_window import FocusWindow
+
+    monkeypatch.setattr(qtw.QInputDialog, "getItem",
+                        staticmethod(lambda *a, **k: ("rep_b", True)))
+    window = FocusWindow(None, focus_member)
+    try:
+        window._copy_from()
+        assert [f.name for f in window._focuses] == ["Factorial", "Theirs"]
+    finally:
+        window.close()
+
+
+def test_import_from_defined_plots_offers_only_rectangular_plots(qapp, tmp_path):
+    from pysurvanalysis.apps.focus_window import FocusWindow
+    from pysurvanalysis.domain import SurvivalExperiment, config as cfgmod
+    from tests.conftest import write_dlife_workbook
+
+    directory = tmp_path / "dp"
+    write_dlife_workbook(directory / "data" / "dp.xlsx", defined_plots={
+        "Bs": ["b/a", "b/b"], "Diagonal": ["b/a", "a/b"]})
+    cfgmod.save_config(directory, {"input": {"format": "excel"}})
+    window = FocusWindow(None, SurvivalExperiment(directory))
+    offered: list = []
+
+    def _pick(_title, rows):
+        offered.extend(rows)
+        return [label for label, _tip, ok in rows if ok]
+
+    window._pick_many = _pick
+    try:
+        window._import_defined()
+        assert {(label, ok) for label, _tip, ok in offered} == {
+            ("Bs", True), ("Diagonal", False)}
+        assert [f.name for f in window._focuses] == ["Unfiltered", "Bs"]
+        assert window._focuses[1].factors == {"Genotype": ["b"],
+                                              "Treatment": ["a", "b"]}
+    finally:
+        window.close()
+
+
+def test_the_qc_viewer_shows_only_the_active_focus(qapp, tmp_path):
+    from pysurvanalysis.apps.qc_viewer import QcViewerWindow
+    from pysurvanalysis.domain import SurvivalExperiment, config as cfgmod
+    from pysurvanalysis.domain.focus import Focus
+    from tests.conftest import write_dlife_workbook
+
+    directory = tmp_path / "qc"
+    write_dlife_workbook(directory / "data" / "qc.xlsx")
+    cfgmod.save_config(directory, {"input": {"format": "excel"}})
+    focus = Focus("Bs", {"Genotype": ["b"], "Treatment": ["a", "b"]})
+    viewer = QcViewerWindow(str(directory), focus=focus)
+    try:
+        assert sorted(viewer._panels) == ["a", "b"]       # Focus labels
+        viewer._focus_box.setChecked(False)             # every chamber
+        assert sorted(viewer._panels) == ["a/a", "a/b", "b/a", "b/b"]
+    finally:
+        viewer.close()

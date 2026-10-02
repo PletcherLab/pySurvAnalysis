@@ -132,12 +132,57 @@ def test_render_all_writes_only_the_curated_figures(project, tmp_path):
     spec.facet_by = "Genotype"
     pf.save_specs(project.directory, {"km_faceted": spec})
     written = pf.render_all(member, fmt="svg")
-    assert [path.name for path in written] == ["km_faceted.svg"]
+    ## Per Focus, and carrying its name — a figure that leaves the directory
+    ## still says which slice it shows.
+    assert [path.name for path in written] == ["km_faceted_Factorial.svg"]
     for path in written:
-        assert path.parent == member.figures_dir
+        assert path.parent == member.figures_dir / "Factorial"
         text = path.read_text(encoding="utf-8")
         # Editable text, not outlined paths — the point of a publication figure.
         assert "<text" in text
+
+
+def test_render_all_skips_a_focus_whose_results_are_out_of_date(project):
+    member = project.member("rep_a")
+    member.run_analysis()
+    pf.save_specs(project.directory, {"km_curves": pf.default_spec("km_curves")})
+    [focus] = member.focuses()
+    member.save_focuses([focus.copy(reference={"Genotype": "mut"})])
+    logs: list[str] = []
+    assert pf.render_all(member, fmt="svg", log=logs.append) == []
+    assert any("out of date" in line for line in logs)
+
+
+def test_curves_follow_the_focus_and_the_spec_only_narrows(project):
+    member = project.member("rep_a")
+    member.run_analysis()
+    [focus] = member.focuses()
+    spec = pf.default_spec("km_curves")
+    ## Listed in the "wrong" order: a Spec cannot reorder, only narrow.
+    spec.treatments = ["mut/drug", "wt/ctrl"]
+    frame = pf.data_for(member, spec, focus=focus)
+    assert list(dict.fromkeys(frame["treatment"])) == ["wt/ctrl", "mut/drug"]
+    ## A narrowing written for another Focus matches nothing here and is
+    ## ignored rather than emptying the figure.
+    spec.treatments = ["F/20x"]
+    frame = pf.data_for(member, spec, focus=focus)
+    assert list(dict.fromkeys(frame["treatment"])) == focus.implied_labels()
+
+
+def test_display_names_and_colours_come_from_the_focus(project):
+    member = project.member("rep_a")
+    member.run_analysis()
+    [focus] = member.focuses()
+    dressed = focus.copy(display_names={"wt/ctrl": "Control"},
+                         colours={"wt/ctrl": "#123456"})
+    spec = pf.default_spec("km_curves")
+    spec.display_names = {"wt/ctrl": "legacy name", "wt/drug": "legacy drug"}
+    frame = pf.data_for(member, spec, focus=dressed)
+    labels = dict(zip(frame["treatment"], frame["label"]))
+    assert labels["wt/ctrl"] == "Control"          # the Focus wins
+    assert labels["wt/drug"] == "legacy drug"      # the Spec fills a gap
+    style = pf.effective_style(pf.PlotStyle(), dressed, spec)
+    assert style.colour_for(["Control"])["Control"] == "#123456"
 
 
 def test_empty_data_is_a_clear_error():
@@ -183,23 +228,22 @@ def test_step_expand_keeps_curves_apart(lifetables):
     assert out.groupby("treatment").size().to_dict() == {"a": 3, "b": 3}
 
 
-@pytest.mark.parametrize("type_key", ["standard_lifespan", "interaction"])
-def test_every_plot_in_the_set_renders_with_the_band_on(project, type_key):
+def test_every_plot_in_the_set_renders_with_the_band_on(project):
     """Ticking CI bands used to raise "Parameters {'step'} are not understood
     by either the geom, stat or layer" — and once that was fixed, a
     ``color=None`` default crashed every *faceted* plot, which the
     single-panel plots never exercised.
 
-    So: every plot the type can draw, both band states.
+    So: every plot a 2×2 Focus is offered — the base set and the faceted
+    ones — both band states.
     """
-    from pysurvanalysis.experiment_types import get_type
-
     member = project.member("rep_a")
     member.run_analysis()
-    data, _factors = member.load()
+    [focus] = member.focuses()
+    data, _factors = member.load(focus=focus)
     tables = lifetable.compute_lifetables(data)
 
-    for plot_id in get_type(type_key).plot_ids():
+    for plot_id in pf._offered_plot_ids(member, focus):
         plot_id = pf._SPEC_ALIASES.get(plot_id, plot_id)
         spec = pf.default_spec(plot_id)
         if pf.PLOT_KINDS[plot_id].faceted:

@@ -4,11 +4,15 @@ A directory with ``project.yaml`` at its root whose immediate subdirectories
 holding a ``survival_config.yaml`` are its Member Experiments. A Project never
 pools: there is no combined analysis, no pooled statistic, no mixed model. Its
 products are a shared **Plot Style** library, two script levels, and a Project
-Report that binds one independent section per member.
+Report that binds one independent section per **Focus** (ADR-0011).
 
-``defaults:`` is a seed and template, not an authority. Exactly one thing is
-validated across members: they all share the Project's **Experiment Type**,
-because the type selects the analyses, the Plot Set and the report sections.
+``defaults:`` is a seed and template for the data-source settings, not an
+authority, and it never carries design: factors are discovered, and
+``focuses:`` is never inherited. Exactly one thing is validated across
+members: they all share the Project's **Experiment Type** — today there is one,
+so the check cannot fail, but it guards the thing that would still be
+incoherent: members whose input shape and time unit differ, bound into one
+report.
 """
 
 from __future__ import annotations
@@ -189,13 +193,24 @@ class Project:
         """The one hard cross-member rule, plus each member's own problems.
 
         Differing factors, levels, treatments and chamber counts are *not*
-        errors — they are reported as Divergence instead.
+        errors — members' designs differ by default, and the Focus Inventory
+        shows each one.
         """
         problems: list[str] = []
         try:
             expected = self.type
         except ValueError as exc:
             return [f"{cfgmod.PROJECT_FILENAME}: {exc}"]
+        if "focuses" in self.defaults:
+            problems.append(
+                f"{cfgmod.PROJECT_FILENAME}: `defaults: focuses:` is ignored — a "
+                f"member never inherits Focuses. Copy them into the members "
+                f"that share the design (the Focus window's Copy Focuses from…).")
+        if "factors" in self.defaults:
+            problems.append(
+                f"{cfgmod.PROJECT_FILENAME}: `defaults: factors:` predates "
+                f"Focuses. Members that inherit it become an `Interaction` Focus "
+                f"on their next analysis; remove it once each has been analysed.")
 
         for member in self.members():
             try:
@@ -207,8 +222,8 @@ class Project:
                 problems.append(
                     f"{member.name} is a {actual.label} but the Project's type is "
                     f"{expected.label}. Every Member Experiment must share the "
-                    f"Project's Experiment Type — it selects the analyses, the "
-                    f"Plot Set and the report sections."
+                    f"Project's Experiment Type — it describes the data source: "
+                    f"the input shape, time unit, censoring and report sections."
                 )
             problems.extend(f"{member.name}: {p}" for p in member.validate())
         return problems
@@ -226,7 +241,8 @@ class Project:
         Nor are ordinary config problems: an unusable ``input.format`` makes a
         member fail, but it does not stop the *Project* loading, so it is
         something to report after the write rather than grounds to refuse one.
-        This answers "can this be a member", and nothing else.
+        This answers "can this be a member", and nothing else. Factors and
+        Focuses are not checked: members' designs differ by default.
 
         Used before a config is copied over a scaffold, so a file that would
         make the Project refuse to load is never written in the first place.
@@ -244,56 +260,38 @@ class Project:
         if actual.key != expected.key:
             return [f"{label} is a {actual.label} but the Project's type is "
                     f"{expected.label}. Every Member Experiment must share it "
-                    f"— the type selects the analyses, the Plot Set and the "
-                    f"report sections."]
+                    f"— the type describes the data source: the input shape, "
+                    f"time unit, censoring and report sections."]
         return []
 
     def divergences(self) -> list[Divergence]:
-        """Where members differ — declared on the Project Report, never fatal."""
+        """Where members' **data-source** settings differ — censoring policy,
+        active Exclusion Group, time unit. Declared on the Project Report,
+        never fatal.
+
+        Design divergence is not here: members rarely share factors, so a note
+        saying so on every Project would teach readers to skip it. The Focus
+        Inventory shows every design side by side instead.
+        """
         members = self.members()
         if len(members) < 2:
             return []
 
         out: list[Divergence] = []
-        factor_sets: dict[str, tuple[str, ...]] = {}
         censoring: dict[str, bool] = {}
         groups: dict[str, str | None] = {}
+        units: dict[str, str] = {}
         for m in members:
-            declared = (m.config.get("factors") or {})
-            names = tuple(str(k) for k in declared) if isinstance(declared, dict) else ()
-            if not names:
-                st = m.status()
-                names = st.factors
-            factor_sets[m.name] = names
             censoring[m.name] = m.type.resolve_assume_censored(m.config)
             groups[m.name] = m.exclusion_group
+            units[m.name] = str((m.config.get("global") or {}).get("time_unit")
+                                or m.type.default_global.get("time_unit", ""))
 
-        distinct = {v for v in factor_sets.values() if v}
-        if len(distinct) > 1:
+        if len(set(units.values())) > 1:
             out.append(Divergence(
-                "factors",
-                "; ".join(f"{n}: {', '.join(v) or 'unknown'}"
-                          for n, v in factor_sets.items()),
+                "time unit",
+                "; ".join(f"{n}: {u}" for n, u in units.items()),
             ))
-
-        level_sets: dict[str, dict[str, tuple[str, ...]]] = {}
-        for m in members:
-            declared = m.config.get("factors") or {}
-            if isinstance(declared, dict):
-                level_sets[m.name] = {
-                    str(k): tuple(str(x) for x in (v or []))
-                    for k, v in declared.items()
-                }
-        all_factor_names = {f for lv in level_sets.values() for f in lv}
-        for factor in sorted(all_factor_names):
-            seen = {n: lv.get(factor) for n, lv in level_sets.items() if factor in lv}
-            if len({v for v in seen.values() if v}) > 1:
-                out.append(Divergence(
-                    "levels",
-                    f"{factor} — " + "; ".join(
-                        f"{n}: {', '.join(v)}" for n, v in seen.items() if v),
-                ))
-
         if len(set(censoring.values())) > 1:
             out.append(Divergence(
                 "censoring",
@@ -343,10 +341,10 @@ class Project:
             raise ProjectError(f"{path} already exists.")
 
         exp_type = get_type(type_key)
-        seed = dict(defaults or {})
+        seed = {k: v for k, v in dict(defaults or {}).items()
+                if k not in cfgmod.NEVER_INHERITED and k != "factors"}
         seed.setdefault("global", dict(exp_type.default_global))
-        if not exp_type.is_custom:
-            seed = {"experiment_type": exp_type.key, **seed}
+        seed = {"experiment_type": exp_type.key, **seed}
         body = {
             "name": name or d.name,
             "question": question,
@@ -499,10 +497,6 @@ class Project:
                 # already supplies is inherited, so editing the Project keeps
                 # reaching this member.
                 body = self.type.scaffold_config(minimal=True)
-                missing = [k for k in ("factors",)
-                           if k in self.type.scaffold_config() and k not in self.defaults]
-                for key in missing:
-                    body[key] = self.type.scaffold_config()[key]
             cfgmod.save_config(d, body)
         (d / "data").mkdir(exist_ok=True)
         self._members = None

@@ -32,6 +32,46 @@ def _require_data(ctx: RunContext, action: str) -> None:
         )
 
 
+def focus_into(ctx: RunContext, focus) -> None:
+    """Point *ctx* at *focus*: cut its slice from the loaded frame.
+
+    Downstream state computed for another slice (lifetables, a result) is
+    dropped, so nothing from one Focus can leak into the next.
+    """
+    from ..domain.focus import apply_focus
+
+    ctx.focus = focus
+    ctx.lifetables = None
+    ctx.result = None
+    if ctx.raw_data is not None:
+        ctx.data = apply_focus(ctx.raw_data, focus)
+        ctx.factors = list(focus.varying_factors)
+    else:
+        ## Whatever is in `data` was cut for another Focus (a run_analysis
+        ## leaves its own slice there); keeping it would judge this Focus by
+        ## the last one's treatments.
+        ctx.data = None
+
+
+def _model_inputs(params: dict, ctx: RunContext) -> tuple:
+    """``(frame, factors, selected)`` for a general Cox/RMST step.
+
+    Under a Focus the default factors are its varying ones — a factor the
+    Focus pools over must not quietly re-enter the model — and the frame puts
+    each Reference Level first.
+    """
+    selected = _parse_list(params.get("factors"))
+    data = ctx.data
+    if ctx.focus is not None:
+        from ..domain.focus import model_frame
+
+        data = model_frame(ctx.data, ctx.focus)
+        selected = selected or list(ctx.focus.varying_factors)
+    selected = selected or (ctx.factors or [])
+    factors = ctx.factors or selected
+    return data, list(dict.fromkeys(list(factors) + list(selected))), selected
+
+
 # ---------------------------------------------------------------------------
 # Action implementations
 # ---------------------------------------------------------------------------
@@ -41,15 +81,21 @@ def _exec_load_data(params: dict, ctx: RunContext) -> None:
 
     # An Experiment Directory is self-describing: its config names the format,
     # the columns, the censoring policy and the Exclusion Group, so nothing has
-    # to be guessed from the run context.
+    # to be guessed from the run context. Factors are discovered from the data,
+    # and the step's Focus — when it runs under one — selects the slice.
     if ctx.experiment is not None:
-        data, factors = ctx.experiment.load(extra_excluded=ctx.excluded_chambers)
-        ctx.data, ctx.factors = data, factors
+        raw, factors = ctx.experiment.load(extra_excluded=ctx.excluded_chambers)
+        ctx.raw_data, ctx.factors = raw, factors
         ctx.exclusion_group = ctx.experiment.exclusion_group
         group = f" · exclusion group '{ctx.exclusion_group}'" if ctx.exclusion_group else ""
+        if ctx.focus is None:
+            ctx.data = raw
+            ctx.log(f"Loaded {len(raw)} individuals · factors={factors}{group}")
+            return
+        focus_into(ctx, ctx.focus)
         ctx.log(
-            f"Loaded {len(data)} individuals · {data['treatment'].nunique()} "
-            f"treatments · factors={factors}{group}"
+            f"Loaded {len(ctx.data)} individuals under Focus {ctx.focus.name!r} · "
+            f"{ctx.data['treatment'].nunique()} treatment(s){group}"
         )
         return
 
@@ -224,11 +270,10 @@ def _exec_cox(params: dict, ctx: RunContext) -> None:
     from .. import statistics
 
     _require_data(ctx, "cox_ph")
-    selected = _parse_list(params.get("factors")) or (ctx.factors or [])
-    factors = ctx.factors or selected
+    data, factors, selected = _model_inputs(params, ctx)
     include_inter = bool(params.get("include_interactions", True))
     res = statistics.cox_interaction_analysis(
-        ctx.data, factors=factors, selected_factors=selected,
+        data, factors=factors, selected_factors=selected,
     )
     if "error" in res:
         ctx.log(f"cox_ph: {res['error']}")
@@ -251,15 +296,14 @@ def _exec_rmst(params: dict, ctx: RunContext) -> None:
     from .. import statistics
 
     _require_data(ctx, "rmst")
-    selected = _parse_list(params.get("factors")) or (ctx.factors or [])
-    factors = ctx.factors or selected
+    data, factors, selected = _model_inputs(params, ctx)
     tau = params.get("tau")
     try:
         tau_val = float(tau) if tau not in (None, "", 0, 0.0) else None
     except (TypeError, ValueError):
         tau_val = None
     res = statistics.rmst_interaction_analysis(
-        ctx.data, factors=factors, selected_factors=selected, tau=tau_val,
+        data, factors=factors, selected_factors=selected, tau=tau_val,
     )
     if "error" in res:
         ctx.log(f"rmst: {res['error']}")
@@ -306,20 +350,30 @@ def _exec_chamber_qc(params: dict, ctx: RunContext) -> None:
 
 
 def _exec_run_analysis(params: dict, ctx: RunContext) -> None:
-    """Run the Experiment Type's whole battery and write ``analysis/``."""
+    """Run the whole battery under the step's Focus, into ``analysis/<focus>/``.
+
+    With no Focus in force — a step before ``run_in_focuses`` in an unattended
+    run, where there is no Active Focus to take — it analyses **every** Focus,
+    because an unattended run that analysed one and stayed quiet about the
+    rest would be the silent gap the Focus exists to close.
+    """
     if ctx.experiment is None:
         raise RuntimeError(
             "run_analysis: no experiment loaded — this action needs an "
             "Experiment Directory."
         )
-    result = ctx.experiment.run_analysis(
-        log=ctx.log, extra_excluded=ctx.excluded_chambers,
-    )
-    ctx.result = result
-    ctx.data = result.individual_data
-    ctx.factors = result.factors
-    ctx.lifetables = result.lifetables
-    ctx.log(f"Analysis written to {result.output_dir}")
+    if ctx.focus is not None:
+        result = ctx.experiment.run_analysis(
+            focus=ctx.focus, log=ctx.log, extra_excluded=ctx.excluded_chambers,
+        )
+        ctx.log(f"Focus {ctx.focus.name!r}: analysis written to {result.output_dir}")
+        ctx.result = result
+        ctx.data = result.individual_data
+        ctx.lifetables = result.lifetables
+        return
+    outcome = ctx.experiment.run_all(log=ctx.log, extra_excluded=ctx.excluded_chambers)
+    if outcome["failed"]:
+        raise RuntimeError("; ".join(f"{n}: {m}" for n, m in outcome["failed"].items()))
 
 
 def _exec_render_publication_figures(params: dict, ctx: RunContext) -> None:
@@ -330,7 +384,8 @@ def _exec_render_publication_figures(params: dict, ctx: RunContext) -> None:
             "render_publication_figures: no experiment loaded."
         )
     fmt = str(params.get("format") or "svg")
-    written = pubfigures.render_all(ctx.experiment, fmt=fmt, log=ctx.log)
+    written = pubfigures.render_all(ctx.experiment, fmt=fmt, log=ctx.log,
+                                    focus=ctx.focus)
     ctx.log(f"{len(written)} publication figure(s) in {ctx.experiment.figures_dir}")
 
 
@@ -341,12 +396,17 @@ def _exec_report(params: dict, ctx: RunContext) -> None:
     if ctx.experiment is not None:
         result = ctx.result
         if result is None:
-            result = ctx.experiment.run_analysis(
-                log=ctx.log, extra_excluded=ctx.excluded_chambers)
-            ctx.result = result
+            targets = ([ctx.focus] if ctx.focus is not None
+                       else ctx.experiment.focuses())
+            for focus in targets:
+                result = ctx.experiment.run_analysis(
+                    focus=focus, log=ctx.log, extra_excluded=ctx.excluded_chambers)
+                ctx.log(f"Report: {result.output_dir}")
+            if ctx.focus is not None:
+                ctx.result = result
         else:
             report_builder.write_experiment_report(result, result.output_dir)
-        ctx.log(f"Report: {result.output_dir}")
+            ctx.log(f"Report: {result.output_dir}")
         return
 
     if ctx.project_dir is None:
@@ -358,7 +418,7 @@ def _exec_report(params: dict, ctx: RunContext) -> None:
         assume_censored=ctx.assume_censored,
         extra_excluded_chambers=ctx.excluded_chambers or set(),
     )
-    ctx.log(f"Saved: {result.output_dir / 'report.md'}")
+    ctx.log(f"Saved: {result.outputs.report(result.input_file.stem, '.md')}")
 
 
 # ---------------------------------------------------------------------------
@@ -452,6 +512,7 @@ POOL: dict[str, Action] = {
         icon_name="forest",
         params=(),
         execute_fn=_exec_forest,
+        requires="comparison",
     ),
     "log_rank_pairwise": Action(
         key="log_rank_pairwise",
@@ -461,6 +522,7 @@ POOL: dict[str, Action] = {
         icon_name="logrank",
         params=(),
         execute_fn=_exec_logrank_pairwise,
+        requires="comparison",
     ),
     "log_rank_omnibus": Action(
         key="log_rank_omnibus",
@@ -470,6 +532,7 @@ POOL: dict[str, Action] = {
         icon_name="logrank",
         params=(),
         execute_fn=_exec_logrank_omnibus,
+        requires="comparison",
     ),
     "gehan_wilcoxon": Action(
         key="gehan_wilcoxon",
@@ -479,6 +542,7 @@ POOL: dict[str, Action] = {
         icon_name="logrank",
         params=(),
         execute_fn=_exec_gehan_wilcoxon,
+        requires="comparison",
     ),
     "cox_ph": Action(
         key="cox_ph",
@@ -541,12 +605,38 @@ POOL: dict[str, Action] = {
     ),
 }
 
+def _exec_run_in_focuses(_params: dict, ctx: RunContext) -> None:
+    # Structural: the runner splits the script at this step and runs the rest
+    # once per Focus. Reaching here means something executed it as a plain
+    # step, which would silently analyse one Focus only.
+    raise RuntimeError(
+        "run_in_focuses can only run inside an Experiment Script — it repeats "
+        "the steps after it once per Focus.")
+
+
+POOL["run_in_focuses"] = Action(
+    key="run_in_focuses",
+    title="Run in focuses",
+    description=(
+        "Run the rest of the script once per Focus, continue-on-error — every "
+        "Focus when 'only' is blank, or just those named. The experiment-level "
+        "twin of the Project's run_in_experiments."
+    ),
+    category=Category.SCRIPTS,
+    icon_name="script",
+    params=(
+        ParamSpec("only", "list", "Only these Focuses (blank = all)"),
+    ),
+    execute_fn=_exec_run_in_focuses,
+)
+
 POOL["run_analysis"] = Action(
     key="run_analysis",
     title="Run analysis",
     description=(
-        "Run the Experiment Type's whole battery — its analyses and its Plot "
-        "Set — and write everything under analysis/."
+        "Run the whole battery — the analyses and the Plot Set, the Factorial "
+        "Battery when the Focus is a 2×2 — and write it under "
+        "analysis/<focus>/. Unattended with no Focus, it runs every Focus."
     ),
     category=Category.ANALYZE,
     icon_name="analyze",
@@ -567,6 +657,15 @@ POOL["render_publication_figures"] = Action(
 )
 
 
+def _factorial_actions() -> dict[str, Action]:
+    from ..experiment_types.factorial import FACTORIAL_ACTIONS
+
+    return FACTORIAL_ACTIONS
+
+
+POOL.update(_factorial_actions())
+
+
 # ---------------------------------------------------------------------------
 # core ∪ type (ADR-0002)
 #
@@ -579,6 +678,7 @@ CORE_KEYS: tuple[str, ...] = (
     "load_data",
     "apply_exclusions",
     "filter",
+    "run_in_focuses",
     "run_analysis",
     "chamber_overlay_qc",
     "render_publication_figures",
@@ -589,15 +689,16 @@ CORE_KEYS: tuple[str, ...] = (
 def registry_for(exp_type=None) -> dict[str, Action]:
     """The actions available to *exp_type*: core ∪ type.
 
-    A Custom Experiment (or no type at all) gets everything in the pool — the
-    absence of a type is the absence of a constraint.
+    Shape-gated actions are in the registry whatever the Focus: their name is
+    real, so a script naming one is valid. Whether they *apply* is decided per
+    Focus at run time (``Action.requires``) and a mismatch is Not Applicable,
+    not an error (ADR-0011 amending ADR-0002).
     """
-    core = {k: POOL[k] for k in CORE_KEYS if k in POOL}
-    if exp_type is None or getattr(exp_type, "is_custom", False):
-        merged = dict(POOL)
-        merged.update(core)
-        return merged
+    if exp_type is None:
+        from ..experiment_types import STANDARD
 
+        exp_type = STANDARD
+    core = {k: POOL[k] for k in CORE_KEYS if k in POOL}
     registry = dict(core)
     for key in (exp_type.action_keys or ()):
         if key in POOL:
@@ -614,8 +715,9 @@ def validate_steps(steps, exp_type=None) -> list[str]:
     analysis step produces a report that looks complete and is not.
     """
     registry = registry_for(exp_type)
-    label = getattr(exp_type, "label", "Custom Experiment")
+    label = getattr(exp_type, "label", "Standard Lifespan")
     problems: list[str] = []
+    bridges = 0
     for i, step in enumerate(steps or [], 1):
         key = (step or {}).get("action")
         if not key:
@@ -625,6 +727,12 @@ def validate_steps(steps, exp_type=None) -> list[str]:
                 f"Step {i} uses action {key!r}, which a {label} does not provide. "
                 f"Available: {', '.join(sorted(registry))}."
             )
+        elif key == "run_in_focuses":
+            bridges += 1
+    if bridges > 1:
+        problems.append(
+            "run_in_focuses appears more than once; it repeats everything "
+            "after it once per Focus, so a second one has nothing to split.")
     return problems
 
 

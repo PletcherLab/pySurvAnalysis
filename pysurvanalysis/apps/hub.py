@@ -406,7 +406,7 @@ class HubWindow(QMainWindow):
                             subtitle="Double-click a member to load it.")
         self._project_members_card = members_card
         self._members_table = self._make_table(
-            ["Member", "Config", "Type", "N", "Analysed", "Exclusions"])
+            ["Member", "Config", "Focuses", "N", "Analysed", "Exclusions"])
         self._members_table.doubleClicked.connect(self._on_member_double_clicked)
         members_card.add_body(self._members_table)
         hint = QLabel("A row marked Config: missing is a folder with no "
@@ -589,10 +589,63 @@ class HubWindow(QMainWindow):
         self._panels["analyze"].add_card(self._analyze_card)
 
     def _build_experiment_panel(self) -> None:
-        """The Experiment tile's panel: a grid of the four experiment-level
-        sub-tiles. Each is a full :class:`StatusTile` — same live summaries,
-        same dimming — and clicking one opens the panel it always had,
-        anchored under the Experiment tile."""
+        """The Experiment tile's panel: the **Active Focus** selector, then the
+        five experiment-level sub-tiles.
+
+        The Focus sits above the sub-tiles, not among them: it is the scope
+        Analyze, Plots and AI act on, not a sixth place to go (ADR-0011). Its
+        shape line says, before anything runs, whether the Factorial Battery
+        will be offered. Each sub-tile is a full :class:`StatusTile` — same
+        live summaries, same dimming — and clicking one opens the panel it
+        always had, anchored under the Experiment tile."""
+        focus_card = Card(
+            "Focus", Category.QC, icon_name="filter",
+            subtitle="The slice of this experiment's data that Analyze, Plots "
+                     "and AI act on. Each Focus's results live under its own "
+                     "name, so switching changes nothing on disk.")
+        row = QHBoxLayout()
+        self._focus_combo = QComboBox()
+        self._focus_combo.setToolTip(
+            "The Active Focus — which declared Focus the experiment-level "
+            "surfaces act on. UI state, deliberately: every Focus's outputs "
+            "coexist, so this is navigation, not configuration.")
+        self._focus_combo.currentIndexChanged.connect(self._on_focus_changed)
+        row.addWidget(self._focus_combo, 1)
+        new_btn = QPushButton(icon("new"), " New…")
+        new_btn.setToolTip("Create a Focus — name a slice of the discovered "
+                           "factors and levels.")
+        new_btn.clicked.connect(lambda: self._action_edit_focuses(new=True))
+        edit_btn = QPushButton(icon("config"), " Edit…")
+        edit_btn.setToolTip("Edit, rename, import or copy this experiment's "
+                            "Focuses in the Focus window.")
+        edit_btn.clicked.connect(lambda: self._action_edit_focuses(new=False))
+        row.addWidget(new_btn)
+        row.addWidget(edit_btn)
+        focus_card.add_body(row)
+        self._focus_shape = QLabel("")
+        self._focus_shape.setWordWrap(True)
+        self._focus_shape.setStyleSheet("color: palette(mid);")
+        focus_card.add_body(self._focus_shape)
+        ## Results no declared Focus names — listed, never bound into a report.
+        self._orphan_row = QWidget()
+        orow = QHBoxLayout(self._orphan_row)
+        orow.setContentsMargins(0, 0, 0, 0)
+        self._orphan_label = QLabel("")
+        self._orphan_label.setWordWrap(True)
+        orow.addWidget(self._orphan_label, 1)
+        adopt = QPushButton("Adopt…")
+        adopt.setToolTip("Make orphaned results a declared Focus's results — "
+                         "judged against that Focus like any other result.")
+        adopt.clicked.connect(self._action_adopt_orphan)
+        drop = QPushButton("Delete…")
+        drop.setToolTip("Delete orphaned or pre-Focus results.")
+        drop.clicked.connect(self._action_delete_results)
+        orow.addWidget(adopt)
+        orow.addWidget(drop)
+        self._orphan_row.setVisible(False)
+        focus_card.add_body(self._orphan_row)
+        self._panels["experiment"].add_card(focus_card)
+
         host = QWidget()
         row = QHBoxLayout(host)
         row.setContentsMargins(2, 2, 2, 2)
@@ -961,6 +1014,7 @@ class HubWindow(QMainWindow):
         if self._project is not None:
             self._project.members(reload=True)
         self._refresh_tables()
+        self._refresh_focuses()
         self._refresh_action_panels()
         self._refresh_scripts()
         self._refresh_exclusion_groups()
@@ -1062,9 +1116,13 @@ class HubWindow(QMainWindow):
         self._tiles["experiment"].set_dimmed(not has_exp)
         if has_exp:
             status = self._experiment.status()
+            active = self._experiment.active()
+            fstatus = next((f for f in status.focuses
+                            if active is not None and f.name == active.name), None)
             self._tiles["experiment"].set_summary(
                 [f"loaded: {self._experiment.name}",
-                 self._experiment.type.label])
+                 f"focus: {active.name}" if active is not None
+                 else self._experiment.type.label])
         else:
             self._tiles["experiment"].set_summary(
                 ["no experiment loaded", "double-click a member"])
@@ -1072,14 +1130,16 @@ class HubWindow(QMainWindow):
             self._subtiles[key].set_dimmed(not has_exp)
         if has_exp:
             self._subtiles["analyze"].set_summary(
-                [self._experiment.type.label,
-                 f"{status.n_total or '—'} individuals"
-                 if status.analyzed else "not analysed yet"])
+                [f"focus: {fstatus.name}" if fstatus else self._experiment.type.label,
+                 (f"{fstatus.n_total or '—'} individuals · {fstatus.state}"
+                  if fstatus and fstatus.analyzed
+                  else (fstatus.state if fstatus else "not analysed yet"))])
             self._subtiles["qc"].set_summary(
                 [f"group: {self._experiment.exclusion_group or 'none'}",
                  f"{status.n_excluded} chamber(s) excluded"])
             self._subtiles["plots"].set_summary(
-                [f"{len(self._experiment.type.plot_ids())} figure(s) in the set",
+                [f"focus shape: {fstatus.shape or '—'}" if fstatus
+                 else f"{len(self._experiment.type.plot_ids())} figure(s) in the set",
                  f"headline: {self._experiment.type.headline_plot_id or '—'}"])
             self._subtiles["scripts"].set_summary(
                 [f"{len(self._experiment.scripts())} experiment script(s)",
@@ -1118,6 +1178,11 @@ class HubWindow(QMainWindow):
         if self._experiment is not None:
             rows.append(("Experiment", f"{self._experiment.name} · "
                                        f"{self._experiment.type.label}"))
+            ## "Which experiment" without "which Focus" is half an answer:
+            ## every figure and p-value depends on the slice.
+            active = self._experiment.active()
+            rows.append(("Focus", f"{active.name} — {active.describe()}"
+                         if active is not None else "none resolved"))
         else:
             rows.append(("Experiment", "none loaded"))
         self._status_panel.set_rows(rows)
@@ -1252,28 +1317,41 @@ class HubWindow(QMainWindow):
         if self._project is not None:
             for member in self._project.members():
                 st = member.status()
-                ## "re-run needed" beats a bare date: the saved results are
-                ## real, they are just of a different analysis population
-                ## than the config now asks for.
-                analysed = "no"
-                if st.analyzed:
-                    analysed = "re-run needed" if st.stale else (st.analyzed_at or "yes")
+                focuses = st.focuses
+                ## Per Focus, because the Focus is the unit of analysis: "2/3"
+                ## says one slice still needs running, and "re-run needed"
+                ## beats a bare date — the saved results are real, they just
+                ## describe a slice or a population the config no longer asks
+                ## for.
+                current = st.n_analyzed
+                if st.blocked:
+                    analysed = f"{current}/{len(focuses)} · {len(st.blocked)} blocked"
+                elif st.out_of_date:
+                    analysed = "re-run needed"
+                elif focuses:
+                    analysed = (f"{current}/{len(focuses)}" if current < len(focuses)
+                                else (st.analyzed_at or "yes"))
+                else:
+                    analysed = "no"
+                names = ", ".join(f.name for f in focuses[:3]) + \
+                    (" …" if len(focuses) > 3 else "")
                 self._append_row(self._members_table, [
                     member.name,
                     "yes",
-                    member.type.label,
+                    f"{len(focuses)}: {names}" if focuses else "—",
                     str(st.n_total or "—"),
                     analysed,
                     st.exclusion_group or "none",
                 ])
-                if st.stale:
+                trouble = [f for f in focuses
+                           if f.blocked or (f.analyzed and f.out_of_date)]
+                if trouble:
                     row = self._members_table.rowCount() - 1
                     brush = QBrush(blocked_color())
-                    detail = (f"Analysed under exclusion group "
-                              f"{st.analysed_group or 'none'!r}, but the "
-                              f"config now asks for "
-                              f"{st.exclusion_group or 'none'!r}. Re-run the "
-                              f"analysis so the saved results match.")
+                    detail = "\n".join(
+                        f"{f.name}: blocked — {'; '.join(f.blocked)}" if f.blocked
+                        else f"{f.name}: out of date — {'; '.join(f.out_of_date_reasons)}"
+                        for f in trouble)
                     for column in range(self._members_table.columnCount()):
                         cell = self._members_table.item(row, column)
                         if cell is not None:
@@ -1351,17 +1429,64 @@ class HubWindow(QMainWindow):
         registry = {k: a for k, a in registry.items()
                     if k not in ("render_publication_figures",
                                  "apply_exclusions",
-                                 "chamber_overlay_qc")}
+                                 "chamber_overlay_qc",
+                                 ## Structural: it splits a script, so as a
+                                 ## button it has nothing to split.
+                                 "run_in_focuses",
+                                 ## Script tools: their value is the explicit
+                                 ## `factors:` subset a step can name. As a
+                                 ## button, under a Focus, each fits exactly
+                                 ## what the Cox / RMST factorial model fits —
+                                 ## two buttons, one analysis.
+                                 "cox_ph", "rmst")}
         order = [k for k in action_mod.CORE_KEYS if k in registry]
         order += [k for k in sorted(registry) if k not in order]
+        from ..domain.focus import requirement
+
+        active = self._experiment.active()
+        shape = self._experiment.estimated_shape(active) if active is not None else None
+        hidden: list[str] = []
+        why: dict[int, tuple[list[str], set[str]]] = {}
         for key in order:
             action = registry[key]
+            req = requirement(action.requires)
+            ## Not relevant to the Active Focus's definition — a one-factor
+            ## Focus asks no interaction question — so no button at all.
+            if req is not None and active is not None and not req.relevant(active)[0]:
+                hidden.append(action.title)
+                target = plots if action.category is Category.PLOTS else analyze
+                titles, reasons = why.setdefault(id(target), ([], set()))
+                titles.append(action.title)
+                reasons.add(req.relevant(active)[1])
+                continue
             btn = ActionButton(action.title, action.category,
                                icon_name=action.icon_name)
-            btn.setToolTip(action.description)
+            tip = action.description
+            if req is not None and shape is not None:
+                ok, reason = req.computable(shape)
+                if not ok:
+                    ## Relevant but not computable: the question is asked and
+                    ## the data cannot answer it — greyed, with the reason,
+                    ## where it would be clicked.
+                    tip += f"\n\nNot applicable to Focus {active.name}: {reason}."
+                    btn.setEnabled(False)
+            btn.setToolTip(tip)
             btn.clicked.connect(lambda _c, k=key: self._run_action(k))
             target = plots if action.category is Category.PLOTS else analyze
             target.addWidget(btn)
+        self._hidden_actions = hidden
+        ## One quiet line per card, so a missing button reads as a property of
+        ## the Focus rather than a fault: what is not offered, and why.
+        for target in (analyze, plots):
+            titles, reasons = why.get(id(target), ([], set()))
+            if not titles:
+                continue
+            note = QLabel(f"Not offered for Focus {active.name}: "
+                          + ", ".join(titles) + ".")
+            note.setWordWrap(True)
+            note.setToolTip("\n".join(sorted(reasons)))
+            note.setStyleSheet("color: palette(mid); font-style: italic;")
+            target.addWidget(note)
 
     def _refresh_scripts(self) -> None:
         self._scripts_combo.clear()
@@ -1485,10 +1610,13 @@ class HubWindow(QMainWindow):
         from ..script_editor import actions as action_mod
         from ..script_editor.spec import RunContext
 
+        from ..domain.focus import NotApplicable
+
         experiment = self._experiment
         if experiment is None:
             return
         action = action_mod.registry_for(experiment.type)[key]
+        focus = experiment.active()
         figures: list = []
 
         def _job():
@@ -1500,15 +1628,160 @@ class HubWindow(QMainWindow):
                 assume_censored=experiment.type.resolve_assume_censored(
                     experiment.config),
                 exclusion_group=experiment.exclusion_group,
+                focus=focus,
             )
             if key not in {"load_data", "run_analysis"}:
                 # Every other action needs data; loading it here keeps a
                 # single button click self-contained.
                 action_mod.POOL["load_data"].execute({}, ctx)
-            action.execute({}, ctx)
+            try:
+                action.execute({}, ctx)
+            except NotApplicable as exc:
+                ## Not an error: a real action this slice does not admit.
+                return (f"{action.title}: not applicable to Focus "
+                        f"{focus.name if focus else '—'} — {exc.reason}")
             return figures or f"{action.title} complete."
 
-        self._spawn(action.title, _job)
+        label = f"{action.title} — {focus.name}" if focus is not None else action.title
+        self._spawn(label, _job)
+
+    # ── Focuses ────────────────────────────────────────────────────────────
+
+    def _refresh_focuses(self) -> None:
+        """The Active Focus selector, its shape line and the results that no
+        Focus names."""
+        combo = self._focus_combo
+        blocked = combo.blockSignals(True)
+        combo.clear()
+        experiment = self._experiment
+        if experiment is None:
+            combo.blockSignals(blocked)
+            self._focus_shape.setText("Load an experiment to choose a Focus.")
+            self._orphan_row.setVisible(False)
+            return
+        status = experiment.status()
+        by_name = {f.name: f for f in status.focuses}
+        for focus in experiment.focuses():
+            fs = by_name.get(focus.name)
+            combo.addItem(f"{focus.name} — {fs.state if fs else '?'}", focus.name)
+        active = experiment.active()
+        if active is not None:
+            index = combo.findData(active.name)
+            combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.blockSignals(blocked)
+
+        fs = by_name.get(active.name) if active is not None else None
+        if active is None:
+            self._focus_shape.setText("No Focus could be resolved — is the data "
+                                      "file readable?")
+        else:
+            from ..domain.focus import describe_offer
+
+            parts = [active.describe(experiment.try_design())]
+            shape = experiment.estimated_shape(active)
+            if shape is not None:
+                parts.append(f"shape {shape.describe()}")
+            parts.append(describe_offer(active, shape))
+            if fs is not None and fs.not_applicable:
+                parts.append("not applicable last run: "
+                             + "; ".join(a for a, _ in fs.not_applicable))
+            if fs is not None and fs.blocked:
+                parts.append("BLOCKED — " + "; ".join(fs.blocked))
+            elif fs is not None and fs.out_of_date:
+                parts.append("out of date — " + "; ".join(fs.out_of_date_reasons))
+            self._focus_shape.setText(" · ".join(parts))
+
+        notes = []
+        if status.orphaned:
+            notes.append("Orphaned results (no Focus names them): "
+                         + ", ".join(status.orphaned))
+        if status.legacy_results:
+            notes.append("Pre-Focus results in analysis/ — never adopted; "
+                         "re-run to replace them.")
+        self._orphan_label.setText(" · ".join(notes))
+        self._orphan_row.setVisible(bool(notes))
+
+    def _on_focus_changed(self, _index: int) -> None:
+        if self._experiment is None:
+            return
+        name = self._focus_combo.currentData()
+        if name and name != self._experiment.active_focus:
+            self._experiment.active_focus = name
+            self._log.append_line(f"Active Focus: {name}")
+            self._refresh_all()
+
+    def _action_edit_focuses(self, new: bool = False) -> None:
+        if self._experiment is None:
+            self._warn("Load an experiment first.")
+            return
+        from .focus_window import FocusWindow
+
+        active = self._experiment.active()
+        try:
+            dialog = FocusWindow(self, self._experiment,
+                                 select=active.name if active else None,
+                                 new=new, log=self._log.append_line)
+        except Exception as exc:  # noqa: BLE001 - an unreadable file says why
+            self._warn(f"The Focus window could not read this experiment's "
+                       f"data:\n{exc}")
+            return
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            if dialog.selected_name:
+                self._experiment.active_focus = dialog.selected_name
+            self._refresh_all()
+
+    def _action_adopt_orphan(self) -> None:
+        experiment = self._experiment
+        if experiment is None:
+            return
+        orphans = experiment.orphaned_results()
+        if not orphans:
+            self._warn("There are no orphaned results to adopt — pre-Focus "
+                       "results record no Focus, so they are never adopted.")
+            return
+        source = self._prompt_choice("Adopt results", "Orphaned results:", orphans)
+        if not source:
+            return
+        free = [f.name for f in experiment.focuses()
+                if not experiment.focus_dir(f).exists()]
+        if not free:
+            self._warn("Every Focus already has results — create or rename one "
+                       "first.")
+            return
+        target = self._prompt_choice("Adopt results", f"Make analysis/{source}/ "
+                                     f"the results of:", free)
+        if not target:
+            return
+        try:
+            experiment.adopt_orphan(source, target)
+        except Exception as exc:  # noqa: BLE001
+            self._warn(str(exc))
+            return
+        self._log.append_line(f"Adopted analysis/{source}/ as Focus {target}'s "
+                              f"results.")
+        self._refresh_all()
+
+    def _action_delete_results(self) -> None:
+        experiment = self._experiment
+        if experiment is None:
+            return
+        choices = list(experiment.orphaned_results())
+        legacy = "pre-Focus results"
+        if experiment.legacy_results():
+            choices.append(legacy)
+        if not choices:
+            return
+        choice = self._prompt_choice("Delete results", "Delete:", choices)
+        if not choice:
+            return
+        resp = QMessageBox.question(self, "Delete results",
+                                    f"Delete {choice} from analysis/? This "
+                                    f"cannot be undone.")
+        if resp != QMessageBox.StandardButton.Yes:
+            return
+        experiment.delete_results(None if choice == legacy else choice)
+        self._log.append_line(f"Deleted {choice}.")
+        self._refresh_all()
 
     # ── actions ────────────────────────────────────────────────────────────
 
@@ -1710,16 +1983,22 @@ class HubWindow(QMainWindow):
             f"problem(s), {len(blocked)} blocked member(s).")
 
     def _member_report_paths(self, project) -> list[Path]:
-        """Every per-member report that exists on disk, in table order.
+        """Every per-Focus report that exists on disk, in table order.
 
-        A member's report is named for its DIRECTORY, not the data file inside
-        it, which is the same rule the pipeline writes it under.
+        A report is named for its member's DIRECTORY and its Focus — the same
+        rule the pipeline writes it under — and lives in that Focus's own
+        ``analysis/<focus>/``.
         """
         found = []
-        for directory in project.member_dirs():
-            candidate = directory / "analysis" / f"{directory.name}_report.pdf"
-            if candidate.is_file():
-                found.append(candidate)
+        for member in project.members():
+            try:
+                focuses = member.focuses()
+            except Exception:  # noqa: BLE001 - a broken member lists nothing
+                continue
+            for focus in focuses:
+                candidate = member.outputs(focus).report(member.name, ".pdf")
+                if candidate.is_file():
+                    found.append(candidate)
         return found
 
     def _action_view_reports(self) -> None:
@@ -2152,10 +2431,12 @@ class HubWindow(QMainWindow):
         else:
             config.pop("exclusions", None)
         cfgmod.save_config(self._experiment.directory, config)
+        active = self._experiment.active_focus
         self._experiment = SurvivalExperiment(
             self._experiment.directory,
             defaults=self._project.defaults if self._project else {},
             project=self._project)
+        self._experiment.active_focus = active
         self._log.append_line(
             f"Active exclusion group for {self._experiment.name}: "
             f"{group or 'none'} — written to {cfgmod.CONFIG_FILENAME} and "
@@ -2168,7 +2449,8 @@ class HubWindow(QMainWindow):
             return
         from .qc_viewer import QcViewerWindow
 
-        viewer = QcViewerWindow(str(self._experiment.directory))
+        viewer = QcViewerWindow(str(self._experiment.directory),
+                                focus=self._experiment.active())
         viewer.show()
         self._qc_window = viewer
 
@@ -2275,11 +2557,14 @@ class HubWindow(QMainWindow):
             return
 
         figures: list = []
+        focus = experiment.active()
 
         def _job():
+            ## Under the Active Focus — unless the script has a
+            ## run_in_focuses step, which repeats the rest per Focus itself.
             project_actions.run_experiment_script(
                 experiment, steps, log=print,
-                figure=lambda t, f: figures.append((t, f)))
+                figure=lambda t, f: figures.append((t, f)), focus=focus)
             return figures or f"Script {name!r} complete."
 
         self._spawn(f"Experiment script: {name}", _job)

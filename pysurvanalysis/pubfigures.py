@@ -119,7 +119,9 @@ class PlotStyle:
     risk_font_size: float = 7.0
 
     # ── colour ─────────────────────────────────────────────────────────────
-    #: treatment (or curve label) → hex colour; unlisted labels take the cycle.
+    #: Legacy: curve label → hex colour. Per-curve colours belong to the Focus
+    #: now (its ``colours:``); these are honoured only where it names none.
+    #: Unlisted labels take the cycle.
     palette: dict[str, str] = field(default_factory=dict)
     #: The cycle unlisted labels take, in order. Editable, so a style can
     #: carry a journal's palette without naming every treatment in advance.
@@ -169,9 +171,13 @@ class PlotSpec:
     title: str = ""
     x_label: str = "Age"
     y_label: str = "Survival probability"
-    #: Curves to include, in order. Empty = every treatment in the data.
+    #: A **narrowing**: show only these of the Focus's treatments. Never an
+    #: order — curves always follow the Focus's order, so a legend cannot
+    #: disagree with the model printed beside it (ADR-0005, third amendment).
+    #: Empty = every treatment of the Focus.
     treatments: list[str] = field(default_factory=list)
-    #: treatment → display name shown in the legend.
+    #: Legacy: treatment → display name. Display names belong to the Focus
+    #: now; these are honoured only where the Focus names none.
     display_names: dict[str, str] = field(default_factory=dict)
     #: Legend title for the curves. Faceting splits by factor 1, so the
     #: curves are factor 2 — naming it "Treatment" would be wrong.
@@ -366,6 +372,58 @@ def migrate_specs(specs: dict[str, PlotSpec]) -> dict[str, PlotSpec]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# The Focus a figure shows
+# ---------------------------------------------------------------------------
+
+def focus_of(experiment, focus=None):
+    """The Focus a figure is drawn under: the one given, else the Active."""
+    if focus is not None:
+        return focus
+    active = getattr(experiment, "active", None)
+    return active() if callable(active) else None
+
+
+def effective_spec(spec: PlotSpec, focus, available: list[str] | None = None) -> PlotSpec:
+    """*spec* as it applies under *focus*.
+
+    Curves follow the Focus's order; the Spec's ``treatments`` only **narrow**
+    them. A narrowing naming nothing in this Focus — written for another one —
+    is ignored here rather than emptying the figure. Display names come from
+    the Focus, the Spec's legacy ones filling only gaps.
+    """
+    if focus is None:
+        return spec
+    order = list(focus.implied_labels())
+    if available is not None:
+        have = set(available)
+        order = [t for t in order if t in have]
+    narrowed = [t for t in order if t in set(spec.treatments or [])]
+    out = PlotSpec.from_dict(spec.plot_id, spec.to_dict())
+    out.treatments = narrowed or order
+    out.display_names = {**(spec.display_names or {}), **(focus.display_names or {})}
+    return out
+
+
+def effective_style(style: PlotStyle, focus, spec: PlotSpec | None = None) -> PlotStyle:
+    """*style* with the Focus's per-curve colours laid over its legacy palette.
+
+    The palette is keyed by the label a curve shows, so a Focus colour keyed by
+    treatment is moved onto that treatment's display name.
+    """
+    if focus is None or not focus.colours:
+        return style
+    names = dict(getattr(spec, "display_names", {}) or {})
+    names.update(focus.display_names or {})
+    palette = dict(style.palette or {})
+    for key, colour in focus.colours.items():
+        palette[key] = colour
+        palette[names.get(key, key)] = colour
+    out = PlotStyle.from_dict(style.name, style.to_dict())
+    out.palette = palette
+    return out
+
+
 def resolve_style(name: str, experiment) -> PlotStyle:
     """Resolve a style name at the container, then the built-in.
 
@@ -378,20 +436,45 @@ def resolve_style(name: str, experiment) -> PlotStyle:
     return specs.styles.get(specs.default_style, BUILTIN_STYLE)
 
 
-def specs_for(experiment) -> dict[str, PlotSpec]:
+def specs_for(experiment, focus=None) -> dict[str, PlotSpec]:
     """The Specs to offer for an experiment: the container's, plus defaults
-    for every plot in its Experiment Type's Plot Set that has none yet."""
+    for every plot the Focus's Plot Set holds that has none yet."""
     specs = adopt_legacy_member_specs(experiment)
-    return fill_default_specs(specs.plots, experiment)
+    return fill_default_specs(specs.plots, experiment, focus)
 
 
-def fill_default_specs(saved: dict[str, PlotSpec], experiment) -> dict[str, PlotSpec]:
-    """*saved*, plus a default Spec for every renderable plot in the type's
+def _offered_plot_ids(experiment, focus) -> list[str]:
+    """The figures a Focus's definition makes relevant: the type's base Plot
+    Set less any that need what the Focus lacks (a forest needs two
+    treatments), plus the crossing figures when it varies two or more factors.
+
+    Judged by the definition, not populated cells: this decides what the
+    editor *offers*, and a preview of a figure the data cannot support says
+    why."""
+    from .domain.focus import requirement
+    from .experiment_types.base import ALL_PLOT_DEFS, SHAPE_GATED_PLOT_DEFS
+
+    needs = {p.id: p.requires for p in ALL_PLOT_DEFS}
+
+    def _relevant(plot_id: str) -> bool:
+        req = requirement(needs.get(plot_id))
+        return focus is None or req is None or req.relevant(focus)[0]
+
+    ids = [p for p in (experiment.type.plot_ids() or ("km_curves",)) if _relevant(p)]
+    ids += [p.id for p in SHAPE_GATED_PLOT_DEFS
+            if p.id not in ids and focus is not None and _relevant(p.id)]
+    return ids
+
+
+def fill_default_specs(saved: dict[str, PlotSpec], experiment,
+                       focus=None) -> dict[str, PlotSpec]:
+    """*saved*, plus a default Spec for every renderable plot in the Focus's
     Plot Set that has none."""
+    focus = focus_of(experiment, focus)
     time_label = experiment.type.resolve_time_label(experiment.config)
-    factors = list((experiment.config.get("factors") or {}))
+    factors = list(focus.varying_factors) if focus is not None else []
     out = dict(saved)
-    for plot_id in (experiment.type.plot_ids() or ("km_curves",)):
+    for plot_id in _offered_plot_ids(experiment, focus):
         plot_id = _SPEC_ALIASES.get(plot_id, plot_id)
         if plot_id not in PLOT_TYPES or plot_id in out:
             continue
@@ -526,30 +609,32 @@ def _derived(grp: pd.DataFrame, kind: PlotKind, smoothing: float = 3.0) -> pd.Da
     return grp
 
 
-def _facet_split(spec: PlotSpec, factors: tuple[str, ...]) -> tuple[int, int]:
-    """Which half of a composite ``a/b`` treatment label is the facet.
+def _facet_index(spec: PlotSpec, factors: tuple[str, ...]) -> int:
+    """Which part of a composite ``a/b/…`` treatment label is the facet.
 
-    ``facet_by`` names a FACTOR, and the composite label is factor 1's level
-    ``/`` factor 2's level — so naming factor 2 puts part 1 in the panels and
-    part 0 on the curves. The name used to be ignored entirely (any non-empty
-    string faceted by factor 1), which made the editor's field a decoy.
-    An unknown name keeps the factor-1 default rather than failing a render.
+    ``facet_by`` names a FACTOR, and the composite label is the varying
+    factors' levels in order — so naming the k-th factor puts part k in the
+    panels and the rest, joined, on the curves. The name used to be ignored
+    entirely (any non-empty string faceted by factor 1), which made the
+    editor's field a decoy. An unknown name keeps the first factor rather
+    than failing a render.
     """
-    if len(factors) > 1 and spec.facet_by == str(factors[1]):
-        return 1, 0
-    return 0, 1
+    names = [str(f) for f in factors]
+    return names.index(spec.facet_by) if spec.facet_by in names else 0
 
 
 def _apply_facet(data: pd.DataFrame, spec: PlotSpec,
                  factors: tuple[str, ...]) -> pd.DataFrame:
-    """Split composite treatment labels into panel and series columns."""
-    parts = data["treatment"].str.split("/", n=1, expand=True)
-    if parts.shape[1] == 2:
-        facet_part, series_part = _facet_split(spec, factors)
-        data["_facet"] = parts[facet_part]
-        data["_series"] = parts[series_part]
-        data["label"] = data["_series"].map(
-            lambda s: spec.display_names.get(s, s))
+    """Split composite treatment labels into panel and series columns: the
+    facet factor's level, and the other factors' levels joined."""
+    parts = data["treatment"].astype(str).str.split("/")
+    if not len(parts) or parts.map(len).min() < 2:
+        return data
+    i = _facet_index(spec, factors)
+    data["_facet"] = parts.map(lambda p: p[i] if i < len(p) else "")
+    data["_series"] = parts.map(
+        lambda p: "/".join(x for k, x in enumerate(p) if k != i))
+    data["label"] = data["_series"].map(lambda s: spec.display_names.get(s, s))
     return data
 
 
@@ -567,7 +652,7 @@ def series_data(lifetables: pd.DataFrame, spec: PlotSpec,
     lt = lifetables.copy()
     lt["treatment"] = lt["treatment"].astype(str)
     wanted = [t for t in (spec.treatments or [])
-              if t in set(lt["treatment"])] or sorted(set(lt["treatment"]))
+              if t in set(lt["treatment"])] or list(dict.fromkeys(lt["treatment"]))
 
     frames: list[pd.DataFrame] = []
     for treatment in wanted:
@@ -1165,7 +1250,7 @@ def distribution_data(individual_data: pd.DataFrame, spec: PlotSpec,
     df = df[df["event"] == 1] if "event" in df.columns else df
     treatments = df["treatment"].astype(str)
     wanted = [t for t in (spec.treatments or [])
-              if t in set(treatments)] or sorted(set(treatments))
+              if t in set(treatments)] or list(dict.fromkeys(treatments))
     df = df[treatments.isin(wanted)]
     out = pd.DataFrame({
         "value": df["time"].astype(float),
@@ -1216,60 +1301,79 @@ def interaction_data(individual_data: pd.DataFrame,
 
 
 def data_for(experiment, spec: PlotSpec,
-             lifetables: pd.DataFrame | None = None) -> pd.DataFrame:
-    """The prepared frame for one Spec, whatever its kind needs.
+             lifetables: pd.DataFrame | None = None, focus=None) -> pd.DataFrame:
+    """The prepared frame for one Spec under one Focus, whatever its kind needs.
 
     The three sources match the report's own builders (``plot_registry``):
     lifetables for the series plots, the individual data for distributions
-    and interactions, the saved hazard ratios for the forest.
+    and interactions, the saved hazard ratios for the forest — each from the
+    Focus's own ``analysis/<focus>/``. Curves follow the Focus's order and the
+    Spec only narrows them (:func:`effective_spec`).
     """
+    focus = focus_of(experiment, focus)
     kind = kind_for(spec)
-    factors = tuple(experiment.config.get("factors") or {})
+    factors = tuple(focus.varying_factors) if focus is not None else ()
     if kind.source == "lifetables":
-        lt = lifetables if lifetables is not None else _load_lifetables(experiment)
-        return series_data(lt, spec, kind, factors=factors)
+        lt = lifetables if lifetables is not None else _load_lifetables(experiment, focus)
+        available = list(dict.fromkeys(lt["treatment"].astype(str))) if len(lt) else []
+        return series_data(lt, effective_spec(spec, focus, available), kind,
+                           factors=factors)
     if kind.source == "hazard_ratios":
-        return forest_data(_load_hazard_ratios(experiment), spec)
-    individual = _load_individual_data(experiment)
+        return forest_data(_load_hazard_ratios(experiment, focus), spec)
+    individual = _load_individual_data(experiment, focus)
+    available = (list(dict.fromkeys(individual["treatment"].astype(str)))
+                 if len(individual) and "treatment" in individual.columns else [])
+    spec = effective_spec(spec, focus, available)
     if kind.geom == "interaction":
         return interaction_data(individual, spec)
     return distribution_data(individual, spec, factors=factors)
 
 
-def _load_individual_data(experiment) -> pd.DataFrame:
-    """The saved individual-level frame; fall back to loading the input."""
-    path = experiment.analysis_dir / "data_output" / "individual_data.csv"
-    if path.is_file():
-        return pd.read_csv(path)
-    data, _ = experiment.load()
+def _saved(experiment, focus, kind: str, stem: str) -> pd.DataFrame | None:
+    """A CSV from the Focus's saved analysis, or ``None`` when absent."""
+    if focus is None:
+        return None
+    outs = experiment.outputs(focus)
+    path = outs.data(stem) if kind == "data" else outs.stats(stem)
+    return pd.read_csv(path) if path.is_file() else None
+
+
+def _load_individual_data(experiment, focus=None) -> pd.DataFrame:
+    """The Focus's saved individual-level frame; fall back to loading it."""
+    focus = focus_of(experiment, focus)
+    saved = _saved(experiment, focus, "data", "individual_data")
+    if saved is not None:
+        return saved
+    data, _ = experiment.load(focus=focus)
     return data
 
 
-def _load_hazard_ratios(experiment) -> pd.DataFrame:
-    """The saved pairwise hazard ratios. Never recomputed here — a Cox fit is
-    analysis, and the Plot Editor must not silently run one."""
-    path = experiment.analysis_dir / "statistics" / "hazard_ratios.csv"
-    if path.is_file():
-        return pd.read_csv(path)
-    return pd.DataFrame()
+def _load_hazard_ratios(experiment, focus=None) -> pd.DataFrame:
+    """The Focus's saved pairwise hazard ratios. Never recomputed here — a Cox
+    fit is analysis, and the Plot Editor must not silently run one."""
+    saved = _saved(experiment, focus_of(experiment, focus), "stats", "hazard_ratios")
+    return saved if saved is not None else pd.DataFrame()
 
 
 def figure_for(experiment, plot_id: str, spec: PlotSpec | None = None,
-               style: PlotStyle | None = None, lifetables: pd.DataFrame | None = None):
+               style: PlotStyle | None = None, lifetables: pd.DataFrame | None = None,
+               focus=None):
     """Build the ggplot for one of an experiment's Publication Figures."""
-    spec = spec or specs_for(experiment).get(plot_id) or default_spec(plot_id)
-    style = style or resolve_style(spec.style, experiment)
-    return build_ggplot(data_for(experiment, spec, lifetables), spec, style)
+    focus = focus_of(experiment, focus)
+    spec = spec or specs_for(experiment, focus).get(plot_id) or default_spec(plot_id)
+    style = effective_style(style or resolve_style(spec.style, experiment), focus, spec)
+    return build_ggplot(data_for(experiment, spec, lifetables, focus), spec, style)
 
 
-def _load_lifetables(experiment) -> pd.DataFrame:
-    """Read the saved lifetables; fall back to computing them."""
-    path = experiment.analysis_dir / "data_output" / "lifetables.csv"
-    if path.is_file():
-        return pd.read_csv(path)
+def _load_lifetables(experiment, focus=None) -> pd.DataFrame:
+    """Read the Focus's saved lifetables; fall back to computing them."""
+    focus = focus_of(experiment, focus)
+    saved = _saved(experiment, focus, "data", "lifetables")
+    if saved is not None:
+        return saved
     from . import lifetable
 
-    data, _ = experiment.load()
+    data, _ = experiment.load(focus=focus)
     return lifetable.compute_lifetables(data)
 
 
@@ -1301,14 +1405,32 @@ def render_png_bytes(g, style: PlotStyle, dpi: int = 110) -> bytes:
     return buf.getvalue()
 
 
-def render_all(experiment, fmt: str = "svg", log=None) -> list[Path]:
-    """Render every Publication Figure for one Experiment Directory.
+def render_all(experiment, fmt: str = "svg", log=None, focus=None) -> list[Path]:
+    """Render every curated Publication Figure for one Experiment Directory —
+    under one Focus, or (``None``) under each of its Focuses in turn.
 
-    Figures land in ``<experiment>/figures/`` — per member, because a Project
-    never pools and so has no pooled figure to render.
+    Figures land in ``<experiment>/figures/<focus>/``, each file carrying the
+    Focus's name — per member and per Focus, because a Project never pools and
+    so has no pooled figure to render. Only Focuses whose saved results are
+    current are drawn: an Out of Date or Blocked Focus is named and skipped,
+    since a figure of it would describe a slice its config no longer declares.
     """
     emit = log or (lambda _m: None)
-    written: list[Path] = []
+    if focus is None:
+        written: list[Path] = []
+        statuses = {fs.name: fs for fs in experiment.status(check_blocked=False).focuses}
+        for each in experiment.focuses():
+            fs = statuses.get(each.name)
+            if fs is None or not fs.analyzed:
+                emit(f"  Focus {each.name!r}: not analysed — no figures rendered.")
+                continue
+            if fs.out_of_date:
+                emit(f"  Focus {each.name!r}: results out of date "
+                     f"({'; '.join(fs.out_of_date_reasons)}) — re-run first.")
+                continue
+            written += render_all(experiment, fmt=fmt, log=log, focus=each)
+        return written
+    written = []
     ## Only the plots the container's plot_specs.yaml actually defines — the
     ## sister app's rule. specs_for() fills defaults for the whole Plot Set
     ## so the EDITOR can offer every figure; rendering those defaults headless
@@ -1326,17 +1448,18 @@ def render_all(experiment, fmt: str = "svg", log=None) -> list[Path]:
             continue
         try:
             if kind_for(spec).source == "lifetables" and lifetables is None:
-                lifetables = _load_lifetables(experiment)
-            style = resolve_style(spec.style, experiment)
-            data = data_for(experiment, spec, lifetables)
+                lifetables = _load_lifetables(experiment, focus)
+            style = effective_style(resolve_style(spec.style, experiment), focus, spec)
+            data = data_for(experiment, spec, lifetables, focus)
             if data.empty:
                 ## A forest with no saved Cox fit, an interaction with no
                 ## factorial cells: named and skipped, not an error — the
                 ## other figures still render.
-                emit(f"  {plot_id}: no data for this experiment — skipped.")
+                emit(f"  {plot_id}: no data under Focus {focus.name!r} — skipped.")
                 continue
             g = build_ggplot(data, spec, style)
-            target = experiment.figures_dir / f"{plot_id}.{fmt}"
+            target = (experiment.figures_dir / focus.slug
+                      / f"{plot_id}_{focus.slug}.{fmt}")
             save_figure(g, target, style)
             written.append(target)
             emit(f"  wrote {target.name}")

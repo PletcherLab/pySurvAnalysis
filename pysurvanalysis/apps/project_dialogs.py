@@ -57,17 +57,10 @@ from ..ui import ActionButton, Category, icon
 #: ``defaults:`` keys this dialog owns. Anything else in the section rides
 #: through an edit untouched — the same promise ``config.py`` makes about
 #: unknown keys, and the reason a hand-written project.yaml is safe to open.
-_MANAGED_DEFAULT_KEYS = ("experiment_type", "global", "factors")
-
-
-def _levels_text(levels) -> str:
-    if isinstance(levels, (list, tuple)):
-        return ", ".join(str(x) for x in levels)
-    return "" if levels is None else str(levels)
-
-
-def _split_levels(text: str) -> list[str]:
-    return [part.strip() for part in str(text).split(",") if part.strip()]
+#: That includes a pre-Focus ``factors:``: Project Defaults no longer carry
+#: design (ADR-0011), but members that inherit one migrate it into their own
+#: ``Interaction`` Focus on their next analysis, so it is kept, not edited.
+_MANAGED_DEFAULT_KEYS = ("experiment_type", "global")
 
 
 class ProjectInfoDialog(QDialog):
@@ -158,30 +151,17 @@ class ProjectInfoDialog(QDialog):
             self.type_combo.addItem(exp_type.label, exp_type.key)
         self.type_combo.setToolTip(
             "The one thing enforced across members: every Member Experiment "
-            "must share it, because the type selects the analyses, the Plot "
-            "Set and the report sections.")
+            "must share it, because it describes the data source — input "
+            "shape, time unit, censoring and report sections.")
         self.type_combo.currentIndexChanged.connect(self._on_type_changed)
         dform.addRow("Experiment type:", self.type_combo)
-
-        self.factors_table = QTableWidget(0, 2)
-        self.factors_table.setHorizontalHeaderLabels(
-            ["Factor", "Levels (comma-separated, reference first)"])
-        self.factors_table.horizontalHeader().setStretchLastSection(True)
-        self.factors_table.verticalHeader().setVisible(False)
-        self.factors_table.setMaximumHeight(110)
-        dform.addRow("Factors:", self.factors_table)
-        frow = QHBoxLayout()
-        add_f = QPushButton("Add factor")
-        add_f.clicked.connect(
-            lambda: self.factors_table.insertRow(self.factors_table.rowCount()))
-        rm_f = QPushButton("Remove selected")
-        rm_f.clicked.connect(self._remove_factor_row)
-        frow.addWidget(add_f)
-        frow.addWidget(rm_f)
-        frow.addStretch(1)
-        fholder = QWidget()
-        fholder.setLayout(frow)
-        dform.addRow("", fholder)
+        design_note = QLabel(
+            "No factors here: they are discovered from each member's data "
+            "file, and each member names its own Focuses — members rarely "
+            "share a design, so a Focus is never inherited.")
+        design_note.setWordWrap(True)
+        design_note.setStyleSheet("color: palette(mid); font-style: italic;")
+        dform.addRow("", design_note)
 
         ## Built from the selected type's own `default_global`, so a type that
         ## grows a setting grows a field here without this dialog knowing its
@@ -260,7 +240,6 @@ class ProjectInfoDialog(QDialog):
         section = defaults.get("global")
         self._global_values = dict(section) if isinstance(section, dict) else {}
         self._rebuild_global_form()
-        self._set_factors(defaults.get("factors"))
 
     def _infer_type_from_members(self, directory: Path) -> None:
         """Adopt the type of the first subdirectory that already has a config.
@@ -283,10 +262,9 @@ class ProjectInfoDialog(QDialog):
             except (OSError, ValueError):
                 continue
             self._set_type(config.get("experiment_type"))
-            self._set_factors(config.get("factors"))
             return
 
-    # ── the type, its globals, its factors ─────────────────────────────────
+    # ── the type and its globals ───────────────────────────────────────────
 
     def _set_type(self, key) -> None:
         try:
@@ -345,34 +323,6 @@ class ProjectInfoDialog(QDialog):
             out[key] = _coerce(text, seed.get(key, self._global_values.get(key)))
         return out
 
-    def _set_factors(self, factors) -> None:
-        self.factors_table.setRowCount(0)
-        if not isinstance(factors, dict):
-            return
-        for name, levels in factors.items():
-            row = self.factors_table.rowCount()
-            self.factors_table.insertRow(row)
-            self.factors_table.setItem(row, 0, QTableWidgetItem(str(name)))
-            self.factors_table.setItem(row, 1,
-                                       QTableWidgetItem(_levels_text(levels)))
-
-    def _read_factors(self) -> dict:
-        out: dict = {}
-        for row in range(self.factors_table.rowCount()):
-            name_item = self.factors_table.item(row, 0)
-            name = (name_item.text().strip() if name_item else "")
-            if not name:
-                continue
-            level_item = self.factors_table.item(row, 1)
-            out[name] = _split_levels(level_item.text() if level_item else "")
-        return out
-
-    def _remove_factor_row(self) -> None:
-        rows = sorted({i.row() for i in self.factors_table.selectedIndexes()},
-                      reverse=True)
-        for row in rows:
-            self.factors_table.removeRow(row)
-
     # ── saving ─────────────────────────────────────────────────────────────
 
     def _resolved_target(self) -> Path | None:
@@ -424,11 +374,6 @@ class ProjectInfoDialog(QDialog):
         globals_ = self._read_global_form()
         if globals_:
             defaults["global"] = globals_
-        factors = self._read_factors()
-        if factors:
-            defaults["factors"] = factors
-        elif "factors" in defaults:
-            defaults.pop("factors")
         name = self.name_edit.text().strip() or target.name
         question = self.question_edit.text().strip()
 
@@ -440,17 +385,14 @@ class ProjectInfoDialog(QDialog):
                 project = Project(target)
                 project.config["name"] = name
                 project.config["question"] = question
-                seed = dict(defaults)
-                if not exp_type.is_custom:
-                    seed = {"experiment_type": exp_type.key, **seed}
+                seed = {"experiment_type": exp_type.key, **dict(defaults)}
                 project.config["defaults"] = seed
                 project.save()
             else:
                 target.mkdir(parents=True, exist_ok=True)
                 project = Project.create(
                     target, name=name, question=question,
-                    type_key=None if exp_type.is_custom else exp_type.key,
-                    defaults=defaults)
+                    type_key=exp_type.key, defaults=defaults)
         except (ProjectError, OSError, ValueError) as exc:
             QMessageBox.warning(self, self.windowTitle(),
                                 f"Could not write project.yaml:\n{exc}")

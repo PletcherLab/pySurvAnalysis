@@ -206,7 +206,16 @@ class PlotEditorWindow(QMainWindow):
     def __init__(self, experiment: SurvivalExperiment) -> None:
         super().__init__()
         self.experiment = experiment
-        self.setWindowTitle(f"Plot Editor — {experiment.name}")
+        ## The preview draws one Focus — the Hub's Active Focus. The curation
+        ## (Specs and Styles) is the Project's; the curves, their order, their
+        ## display names and colours are the Focus's (ADR-0005, third
+        ## amendment).
+        self.focus = experiment.active()
+        #: Working copy of the Focus's per-curve colours, saved with the spec.
+        self._focus_colours: dict[str, str] = (dict(self.focus.colours)
+                                                if self.focus is not None else {})
+        focus_note = f" · Focus {self.focus.name}" if self.focus is not None else ""
+        self.setWindowTitle(f"Plot Editor — {experiment.name}{focus_note}")
         self.resize(1200, 820)
 
         ## Everything edited here lives in ONE plot_specs.yaml at the
@@ -217,7 +226,7 @@ class PlotEditorWindow(QMainWindow):
         self._specs_root = pf.specs_root(experiment)
         self._project_specs = pf.adopt_legacy_member_specs(experiment)
         self._specs = pf.fill_default_specs(self._project_specs.plots,
-                                            experiment)
+                                            experiment, self.focus)
         ## EVERY figure gets its own working style, deep-copied from whatever
         ## its spec references (else the container's default). One shared
         ## style object meant editing the mortality plot's line width silently
@@ -235,8 +244,9 @@ class PlotEditorWindow(QMainWindow):
             style.name = plot_id
             self._plot_styles[plot_id] = style
         self._lifetables = None
-        self._current_id = (experiment.type.headline_plot_id
-                            if experiment.type.headline_plot_id in self._specs
+        headline = ("km_faceted" if "km_faceted" in self._specs
+                    else experiment.type.headline_plot_id)
+        self._current_id = (headline if headline in self._specs
                             else next(iter(self._specs), None))
 
         self._status = self.statusBar()
@@ -258,7 +268,8 @@ class PlotEditorWindow(QMainWindow):
         outer.setContentsMargins(10, 8, 10, 10)
         outer.setSpacing(8)
 
-        bar = TopBar(f"Plot Editor — {self.experiment.name}")
+        bar = TopBar(f"Plot Editor — {self.experiment.name}"
+                     + (f" · Focus {self.focus.name}" if self.focus is not None else ""))
         save_spec = QPushButton(icon("save"), " Save Project default")
         save_spec.setToolTip(
             "Write THIS figure's spec and its own style into the container's "
@@ -339,12 +350,12 @@ class PlotEditorWindow(QMainWindow):
         ## ignored — the field looked live and did nothing.
         self._facet_by = _combo([])
         self._facet_by.addItem("(none)", "")
-        for factor in (self.experiment.config.get("factors") or {}):
+        for factor in (self.focus.varying_factors if self.focus is not None else []):
             self._facet_by.addItem(str(factor), str(factor))
         self._facet_by.setToolTip(
-            "Which factor becomes the panels; the other stays on the curves. "
-            "Needs a factorial design — with no declared factors there is "
-            "nothing to facet by.")
+            "Which of the Focus's varying factors becomes the panels; the "
+            "others make the curves. Needs a Focus varying two or more "
+            "factors — with one there is nothing to facet by.")
         self._facet_by.currentIndexChanged.connect(self._refresh_preview)
         form.addRow("Facet by:", self._facet_by)
 
@@ -604,26 +615,38 @@ class PlotEditorWindow(QMainWindow):
 
     # ── colours ────────────────────────────────────────────────────────────
 
-    def _series_labels(self) -> list[str]:
-        """The curve labels the current figure will draw, in plot order."""
+    def _curves(self) -> list[tuple[str, str]]:
+        """``(key, shown label)`` for each curve the figure will draw, in plot
+        order. The key is what a Focus colour is stored under: the treatment,
+        or for a faceted figure the level that names the curve."""
         spec = self.spec
         if spec is None:
             return []
         try:
-            data = pf.data_for(self.experiment, spec, self._lifetables)
+            data = pf.data_for(self.experiment, spec, self._lifetables, self.focus)
         except Exception:  # noqa: BLE001 - the preview reports it; not here
             return []
         if data.empty:
             return []
-        col = "_series" if "_series" in data.columns else "label"
-        return list(dict.fromkeys(data[col]))
+        if "_series" in data.columns:
+            return [(str(v), str(v)) for v in dict.fromkeys(data["_series"])]
+        if "treatment" in data.columns and "label" in data.columns:
+            pairs = dict(zip(data["treatment"].astype(str), data["label"].astype(str)))
+            return list(pairs.items())
+        return [(str(v), str(v)) for v in dict.fromkeys(data["label"])]
+
+    def _series_labels(self) -> list[str]:
+        """The curve keys the current figure will draw, in plot order."""
+        return [key for key, _label in self._curves()]
 
     def _rebuild_colour_controls(self) -> None:
         while self._series_form.rowCount():
             self._series_form.removeRow(0)
         self._series_swatches = {}
         style = self.style
-        labels = self._series_labels()
+        curves = self._curves()
+        labels = [key for key, _shown in curves]
+        shown = dict(curves)
         cycle = list(style.palette_cycle or pf.DEFAULT_PALETTE)
         for i, label in enumerate(labels):
             ## What this curve would be WITHOUT an explicit assignment. Kept
@@ -633,11 +656,16 @@ class PlotEditorWindow(QMainWindow):
             ## into the shared Style and the cycle would stop meaning
             ## anything.
             auto = cycle[i % len(cycle)] if cycle else pf.DEFAULT_PALETTE[0]
-            swatch = ColorButton(style.palette.get(label) or auto)
+            ## The Focus's colour first; a legacy Style assignment (by the
+            ## shown label) only where the Focus has none.
+            current = (self._focus_colours.get(label)
+                       or style.palette.get(shown.get(label, label))
+                       or style.palette.get(label) or auto)
+            swatch = ColorButton(current)
             swatch.setProperty("auto_colour", auto)
             swatch.changed.connect(self._refresh_preview)
             self._series_swatches[label] = swatch
-            self._series_form.addRow(f"{label}:", swatch)
+            self._series_form.addRow(f"{shown.get(label, label)}:", swatch)
         if not labels:
             self._series_form.addRow(
                 "", QLabel("No curves yet — check the figure's settings."))
@@ -658,6 +686,8 @@ class PlotEditorWindow(QMainWindow):
 
     def _reset_series_colours(self) -> None:
         self.style.palette = {}
+        for key in self._series_labels():
+            self._focus_colours.pop(key, None)
         self._rebuild_colour_controls()
         self._refresh_preview()
 
@@ -822,17 +852,20 @@ class PlotEditorWindow(QMainWindow):
             setattr(style, field_name, getattr(self, attr).color())
         style.font_family = self._font_combo.currentFont().family()
         style.risk_table_times = _parse_numbers(self._risk_times.text())
-        ## Only the curves actually on screen are written back, so opening a
-        ## member with fewer treatments never drops another member's colours
-        ## from a shared Style. And only the ones that deviate: `palette` means
-        ## "explicitly assigned", so a swatch still showing its cycle colour is
+        ## Per-curve colours belong to the FOCUS now: written into its working
+        ## colours, and moved out of the figure's legacy palette so there is
+        ## one source. Only the curves on screen, and only the ones that
+        ## deviate from the cycle — a swatch still showing its cycle colour is
         ## removed rather than pinned.
-        for label, swatch in self._series_swatches.items():
+        shown = dict(self._curves()) if self._series_swatches else {}
+        for key, swatch in self._series_swatches.items():
             colour = swatch.color()
+            style.palette.pop(key, None)
+            style.palette.pop(shown.get(key, key), None)
             if colour and colour != swatch.property("auto_colour"):
-                style.palette[label] = colour
+                self._focus_colours[key] = colour
             else:
-                style.palette.pop(label, None)
+                self._focus_colours.pop(key, None)
         if self._cycle_swatches:
             style.palette_cycle = [s.color() for s in self._cycle_swatches]
         return spec, style
@@ -936,7 +969,7 @@ class PlotEditorWindow(QMainWindow):
         try:
             if self._lifetables is None \
                     and pf.kind_for(spec).source == "lifetables":
-                self._lifetables = pf._load_lifetables(self.experiment)
+                self._lifetables = pf._load_lifetables(self.experiment, self.focus)
             ## The curves are a property of the DATA and the Spec, so they are
             ## not known until the lifetables are read — which happens here,
             ## after the form was first built. Rebuild when the set changes
@@ -944,14 +977,14 @@ class PlotEditorWindow(QMainWindow):
             if set(self._series_swatches) != set(self._series_labels()):
                 self._rebuild_colour_controls()
                 spec, style = self._harvest()
-            frame = pf.data_for(self.experiment, spec, self._lifetables)
+            frame = pf.data_for(self.experiment, spec, self._lifetables, self.focus)
             if frame.empty:
                 self._preview.setText(
-                    f"No data for {spec.plot_id} in this experiment.\n"
+                    f"No data for {spec.plot_id} under this Focus.\n"
                     "A forest needs a saved Cox fit; an interaction plot "
-                    "needs a factorial design.")
+                    "needs a 2×2 Focus.")
                 return
-            g = pf.build_ggplot(frame, spec, style)
+            g = pf.build_ggplot(frame, spec, self._with_focus_colours(style, spec))
             data = pf.render_png_bytes(g, style, dpi=self._preview_dpi(style))
         except Exception as exc:  # noqa: BLE001 - a bad spec shows, never crashes
             ## Said once, in the place you are already looking. The log used
@@ -1021,7 +1054,31 @@ class PlotEditorWindow(QMainWindow):
         ## form cannot mutate what the file was told.
         self._project_specs.styles[spec.plot_id] = _copy.deepcopy(style)
         path = pf.save_project_specs(self._specs_root, self._project_specs)
-        self._say(f"Saved {spec.plot_id} (spec + its style) to {path}.")
+        note = self._save_focus_colours()
+        self._say(f"Saved {spec.plot_id} (spec + its style) to {path}.{note}")
+
+    def _with_focus_colours(self, style: pf.PlotStyle, spec: pf.PlotSpec) -> pf.PlotStyle:
+        """*style* with the working Focus colours laid over it."""
+        if self.focus is None:
+            return style
+        return pf.effective_style(style, self.focus.copy(colours=self._focus_colours),
+                                  spec)
+
+    def _save_focus_colours(self) -> str:
+        """Write changed per-curve colours into the Focus's config — the
+        colours are the Focus's, so every figure of it agrees."""
+        if self.focus is None or self._focus_colours == dict(self.focus.colours):
+            return ""
+        try:
+            self.experiment.materialize_focuses()
+            focuses = self.experiment.focuses()
+            updated = [f.copy(colours=dict(self._focus_colours))
+                       if f.name == self.focus.name else f for f in focuses]
+            self.experiment.save_focuses(updated)
+            self.focus = self.experiment.focus(self.focus.name)
+        except Exception as exc:  # noqa: BLE001 - the spec is saved either way
+            return f" Curve colours NOT saved to Focus {self.focus.name}: {exc}"
+        return f" Curve colours saved to Focus {self.focus.name}."
 
     def _export(self) -> None:
         """Write the current figure to the container's ``figures/`` — no
@@ -1037,11 +1094,12 @@ class PlotEditorWindow(QMainWindow):
         spec, style = self._harvest()
         if spec is None:
             return
-        target = _free_path(self._specs_root / "figures", spec.plot_id, "svg")
+        stem = spec.plot_id + (f"_{self.focus.slug}" if self.focus is not None else "")
+        target = _free_path(self._specs_root / "figures", stem, "svg")
         try:
             g = pf.build_ggplot(
-                pf.data_for(self.experiment, spec, self._lifetables),
-                spec, style)
+                pf.data_for(self.experiment, spec, self._lifetables, self.focus),
+                spec, self._with_focus_colours(style, spec))
             written = pf.save_figure(g, target, style)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "Plot Editor", f"Export failed: {exc}")

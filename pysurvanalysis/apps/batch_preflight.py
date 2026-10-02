@@ -6,9 +6,11 @@ one of them. This dialog is the one surface that states the target list, and
 the last point at which it can be changed.
 
 It shows, per Project, its relative-path key, how many Member Experiments the
-run can actually use, and every **Blocked Member** with its reason and the
-action that clears it — scaffolding a missing ``survival_config.yaml``, or
-naming which of several data files is the experiment.
+run can actually use, every **Blocked Member** with its reason and the action
+that clears it — scaffolding a missing ``survival_config.yaml``, or naming which
+of several data files is the experiment — and every **Blocked Focus**: a Focus
+naming levels its data file no longer has (fixable here when each has a close
+match), or one whose cells the active Exclusion Group empties.
 
 Nothing here is a gate. A Project with blocked members still runs its healthy
 ones, and the run is never refused — a stale folder must not stop ten Projects
@@ -41,9 +43,11 @@ from ..domain import Project, ProjectError, config as cfgmod, layout as layout_m
 from ..domain.batch import discover
 from ..ui import Category, icon
 
-#: Roles on a tree row: which Project key, and which member directory.
+#: Roles on a tree row: which Project key, which member directory, and (for a
+#: Blocked Focus row) which Focus.
 _KEY_ROLE = Qt.ItemDataRole.UserRole
 _DIR_ROLE = Qt.ItemDataRole.UserRole + 1
+_FOCUS_ROLE = Qt.ItemDataRole.UserRole + 2
 
 # Keys are relative paths in a recursive Batch. Keep the first column bounded
 # so a deeply-nested Project cannot force the Batch surfaces wider than their
@@ -186,17 +190,24 @@ class BatchPreflightDialog(QDialog):
 
         self._loading = True
         self._tree.clear()
+        self._blocked_focuses = {}
         for entry in self._projects:
+            stuck = entry.blocked_focuses()
+            self._blocked_focuses[entry.key] = stuck
+            status = []
+            if entry.blocked:
+                status.append(f"{len(entry.blocked)} blocked")
+            if stuck:
+                status.append(f"{len(stuck)} focus(es) blocked")
             item = QTreeWidgetItem([entry.key, f"{len(entry.usable)}/"
                                                f"{len(entry.members)}",
-                                    f"{len(entry.blocked)} blocked"
-                                    if entry.blocked else "ok"])
+                                    ", ".join(status) or "ok"])
             item.setData(0, _KEY_ROLE, entry.key)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(0, Qt.CheckState.Checked
                                if self._wanted(entry) else Qt.CheckState.Unchecked)
             item.setToolTip(0, str(entry.directory))
-            if entry.blocked:
+            if entry.blocked or stuck:
                 brush = QBrush(blocked_color())
                 for column in range(3):
                     item.setForeground(column, brush)
@@ -208,8 +219,19 @@ class BatchPreflightDialog(QDialog):
                 child.setToolTip(2, member.detail or member.status)
                 child.setForeground(2, QBrush(blocked_color()))
                 item.addChild(child)
+            for member_name, focus_name, reasons in stuck:
+                child = QTreeWidgetItem([f"{member_name} · {focus_name}", "",
+                                         "focus blocked"])
+                child.setData(0, _KEY_ROLE, entry.key)
+                child.setData(0, _DIR_ROLE, str(entry.directory / member_name))
+                child.setData(0, _FOCUS_ROLE, focus_name)
+                detail = "\n".join(reasons)
+                child.setToolTip(0, detail)
+                child.setToolTip(2, detail)
+                child.setForeground(2, QBrush(blocked_color()))
+                item.addChild(child)
             self._tree.addTopLevelItem(item)
-            if entry.blocked:
+            if entry.blocked or stuck:
                 item.setExpanded(True)
         self._loading = False
         self._seeded = True
@@ -247,10 +269,12 @@ class BatchPreflightDialog(QDialog):
     def _refresh_heading(self) -> None:
         chosen = len(self.selected_keys)
         blocked = sum(len(p.blocked) for p in self._projects)
+        stuck = sum(len(v) for v in getattr(self, "_blocked_focuses", {}).values())
         self._heading.setText(
             f"{self._root} — {len(self._projects)} project(s) found, "
             f"{chosen} checked to run"
-            + (f", {blocked} blocked member(s)" if blocked else ""))
+            + (f", {blocked} blocked member(s)" if blocked else "")
+            + (f", {stuck} blocked focus(es)" if stuck else ""))
         notes = []
         if self._skipped:
             notes.append(f"{len(self._skipped)} directory(ies) skipped — see "
@@ -267,17 +291,51 @@ class BatchPreflightDialog(QDialog):
     # ── repairs ────────────────────────────────────────────────────────────
 
     def _selected_member(self):
-        """``(project_key, MemberLayout)`` for the selected child row."""
+        """``(project_key, MemberLayout)`` for the selected member row."""
         items = self._tree.selectedItems()
         if not items:
             return None, None
         item = items[0]
         directory = item.data(0, _DIR_ROLE)
-        if not directory:
+        if not directory or item.data(0, _FOCUS_ROLE):
             return None, None
         return str(item.data(0, _KEY_ROLE)), layout_mod.classify(directory)
 
+    def _selected_focus(self):
+        """``(project_key, member directory, focus name)`` for a selected
+        Blocked Focus row."""
+        items = self._tree.selectedItems()
+        if not items or not items[0].data(0, _FOCUS_ROLE):
+            return None
+        item = items[0]
+        return (str(item.data(0, _KEY_ROLE)), Path(item.data(0, _DIR_ROLE)),
+                str(item.data(0, _FOCUS_ROLE)))
+
+    def _focus_repair(self, key: str, directory: Path, focus_name: str):
+        """The repaired Focus a stale row would get, or ``None``."""
+        from ..domain import focus as focusmod
+        from ..domain.experiment import SurvivalExperiment
+
+        try:
+            project = Project(self._root / key if key else self._root)
+            exp = SurvivalExperiment(directory, defaults=project.defaults,
+                                     project=project)
+            focus = exp.focus(focus_name)
+            return exp, focusmod.repair_stale(focus, exp.design())
+        except Exception:  # noqa: BLE001 - no repair is the honest answer
+            return None, None
+
     def _sync_fix_button(self) -> None:
+        picked = self._selected_focus()
+        if picked is not None:
+            _exp, repaired = self._focus_repair(*picked)
+            self._btn_fix.setEnabled(repaired is not None)
+            self._btn_fix.setToolTip(
+                "Rename the Focus's stale levels to their close matches in the "
+                "data file." if repaired is not None else
+                f"{picked[2]}: no one-click fix — edit the Focus, or change the "
+                "Exclusion Group that empties its cells.")
+            return
         _key, member = self._selected_member()
         self._btn_fix.setEnabled(member is not None and member.fix is not None)
         if member is not None and member.fix is None and member.blocked:
@@ -286,6 +344,22 @@ class BatchPreflightDialog(QDialog):
                 "one-click fix for this one.")
 
     def _fix_selected(self) -> None:
+        picked = self._selected_focus()
+        if picked is not None:
+            exp, repaired = self._focus_repair(*picked)
+            if exp is None or repaired is None:
+                return
+            resp = QMessageBox.question(
+                self, "Repair Focus",
+                f"Rewrite Focus {picked[2]!r} in {picked[1].name} as:\n\n"
+                f"{repaired.describe()}\n\nIts saved results will then be "
+                f"out of date until it is re-run.")
+            if resp == QMessageBox.StandardButton.Yes:
+                exp.repair_focus(picked[2])
+                self._log(f"[preflight] {picked[1].name}: Focus {picked[2]!r} "
+                          f"repaired — {repaired.describe()}")
+            self.reload()
+            return
         key, member = self._selected_member()
         if member is None or member.fix is None:
             return

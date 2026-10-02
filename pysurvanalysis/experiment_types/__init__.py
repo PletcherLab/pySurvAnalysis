@@ -1,47 +1,58 @@
 """Experiment Type registry.
 
-``experiment_type`` in ``survival_config.yaml`` names one of these by key; the
-absence of the key IS the Custom Experiment.
+``experiment_type`` in ``survival_config.yaml`` names one of these by key. There
+is one: **Standard Lifespan**, the general case. A config with no key is a
+Standard Lifespan, and so is one naming a retired type — ``interaction`` (whose
+2×2 analyses are now the Factorial Battery, gated by Focus Shape) or ``custom``
+(the absence of a type, which no longer exists as a separate thing). Both
+retirements are ADR-0011's.
 """
 
 from __future__ import annotations
 
-from .base import ALL_PLOT_DEFS, ExperimentType, PlotDef, ReportSection
-from .interaction import InteractionExperimentType
+from .base import (ALL_PLOT_DEFS, SHAPE_GATED_PLOT_DEFS, ExperimentType, PlotDef,
+                   ReportSection)
 from .standard import StandardLifespanType
 
-CUSTOM = ExperimentType()
+STANDARD = StandardLifespanType()
 
 _TYPES: dict[str, ExperimentType] = {
-    StandardLifespanType.key: StandardLifespanType(),
-    InteractionExperimentType.key: InteractionExperimentType(),
+    StandardLifespanType.key: STANDARD,
 }
+
+#: Keys a config may still carry from before ADR-0011. They resolve to the
+#: general case; the config is rewritten the next time it is saved.
+RETIRED_KEYS: frozenset[str] = frozenset({"interaction", "custom"})
 
 
 def available_types() -> list[ExperimentType]:
-    """Selectable types, Custom last."""
-    return [_TYPES[k] for k in sorted(_TYPES)] + [CUSTOM]
+    """Selectable types."""
+    return [_TYPES[k] for k in sorted(_TYPES)]
 
 
 def type_keys() -> list[str]:
     return sorted(_TYPES)
 
 
-def get_type(key: str | None) -> ExperimentType:
-    """Resolve a type key. ``None``/empty/``"custom"`` → the Custom Experiment.
+def is_retired(key) -> bool:
+    return key is not None and str(key).strip().lower() in RETIRED_KEYS
 
-    An unknown key is an error rather than a silent fallback: a config naming a
-    type this build doesn't have must not be analysed as though it were
-    freeform.
+
+def get_type(key: str | None) -> ExperimentType:
+    """Resolve a type key. ``None``/empty, or a retired key → Standard Lifespan.
+
+    An unknown key is an error rather than a silent fallback: a config naming
+    a type this build doesn't have must not be analysed as though it were
+    something else.
     """
-    if key is None or str(key).strip() == "" or str(key).strip().lower() == "custom":
-        return CUSTOM
+    if key is None or str(key).strip() == "" or is_retired(key):
+        return STANDARD
     try:
         return _TYPES[str(key).strip().lower()]
     except KeyError:
         raise ValueError(
             f"Unknown experiment_type {key!r}. Known types: "
-            f"{', '.join(sorted(_TYPES))}, or omit the key for a Custom Experiment."
+            f"{', '.join(sorted(_TYPES))}, or omit the key."
         ) from None
 
 
@@ -52,14 +63,16 @@ def type_for_config(config: dict) -> ExperimentType:
 
 __all__ = [
     "ALL_PLOT_DEFS",
-    "CUSTOM",
     "ExperimentType",
-    "InteractionExperimentType",
     "PlotDef",
+    "RETIRED_KEYS",
     "ReportSection",
+    "SHAPE_GATED_PLOT_DEFS",
+    "STANDARD",
     "StandardLifespanType",
     "available_types",
     "get_type",
+    "is_retired",
     "type_for_config",
     "type_keys",
 ]

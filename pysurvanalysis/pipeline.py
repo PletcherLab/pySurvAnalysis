@@ -1,14 +1,20 @@
-"""Orchestrate the full survival analysis pipeline.
+"""Orchestrate the full survival analysis pipeline — one Focus per run.
 
-This module ties together data loading, lifetable computation, statistical
-tests, plotting, and report generation into a single ``run_analysis`` call.
+This module ties together data loading, Focus slicing, lifetable computation,
+statistical tests, plotting, and report generation into a single
+``run_analysis`` call.
+
+Every run is under a **Focus** (ADR-0011): a named slice of the factors and
+levels discovered in the data file. There is no unfocused analysis. Outputs
+land in the Focus's own directory with its name on every file, so analysing a
+second Focus never overwrites the first.
 
 Supports two invocation modes:
-  * **Project directory mode** — pass a directory path; the single ``.xlsx``
-    file inside is auto-discovered.  Outputs are written to organised
-    subdirectories (``plots/``, ``statistics/``, ``data_output/``).
+  * **Experiment mode** — pass ``experiment`` (and optionally ``focus``); the
+    config supplies everything, and outputs go to ``analysis/<focus>/``.
   * **Direct file mode** — pass a path to an ``.xlsx``, ``.csv``, or ``.tsv``
-    file directly (original behaviour; backwards-compatible).
+    file directly. The run is under the **Unfiltered** Focus unless one is
+    given, and outputs go to ``<stem>_results/<focus>/``.
 """
 
 from __future__ import annotations
@@ -66,12 +72,29 @@ class AnalysisResult:
         self.cox_analyses: list[dict] = []
         #: The Experiment Directory this run belongs to, when there is one.
         self.experiment: Any = None
-        #: The Experiment Type that chose the battery and the Plot Set.
+        #: The Experiment Type that chose the base battery and Plot Set.
         self.experiment_type: Any = None
         #: The active Exclusion Group's name, stamped on every output.
         self.exclusion_group: str | None = None
         #: plot id → saved figure path, in the Plot Set's order.
         self.figure_paths: dict[str, Path] = {}
+        #: Defined Plot name → saved figure path.
+        self.defined_plot_paths: dict[str, Path] = {}
+        #: The Focus this run is under, its Shape, and the data file's design.
+        self.focus: Any = None
+        self.focus_shape: Any = None
+        self.design: Any = None
+        #: Where this run's files live (a FocusOutputs).
+        self.outputs: Any = None
+        #: The Headline Figure for this Focus's shape.
+        self.headline_plot_id: str | None = None
+        #: ``{"action", "reason"}`` for every real action this Focus does not
+        #: admit — recorded, never fatal, never silent.
+        self.not_applicable: list[dict] = []
+        #: Individuals with no recorded level for a factor the Focus names —
+        #: in no treatment, so outside the slice, and said so rather than
+        #: silently dropped.
+        self.unassigned: int = 0
         # New analysis results
         self.pairwise_gw: pd.DataFrame = pairwise_gw if pairwise_gw is not None else pd.DataFrame()
         self.parametric_models: dict = parametric_models or {}
@@ -92,6 +115,27 @@ class AnalysisResult:
     def n_excluded_applied(self) -> int:
         """How many excluded chambers this input could actually have."""
         return len(self.excluded_chambers or set()) if self.has_chambers() else 0
+
+    @property
+    def focus_record(self) -> dict:
+        """The Focus as the Run Summary records it and every report describes
+        it — the same dict whether the report is built live or from disk."""
+        focus, shape, design = self.focus, self.focus_shape, self.design
+        if focus is None:
+            return {}
+        return {
+            "name": focus.name,
+            "slug": focus.slug,
+            "definition": focus.analytic_definition(),
+            "description": focus.describe(design),
+            "filters": focus.filter_factors,
+            "pooled_over": focus.pooled_over(design),
+            "shape": shape.describe() if shape is not None else None,
+            "treatments": list(shape.populated) if shape is not None else [],
+            "absent_cells": list(shape.absent) if shape is not None else [],
+            "headline": self.headline_plot_id,
+            "unassigned": int(self.unassigned or 0),
+        }
 
 
 def _discover_xlsx(project_dir: Path) -> Path:
@@ -132,29 +176,39 @@ def run_analysis(
     factor_levels: dict[str, list] | None = None,
     # Extra chamber ids to exclude on top of any Excel ChamberFlags sheet.
     extra_excluded_chambers: set | None = None,
-    # New: an Experiment Directory drives everything from its config.
+    # An Experiment Directory drives everything from its config.
     experiment: "Any" = None,
+    # The Focus this run is under; default the experiment's Active Focus, or
+    # Unfiltered in direct mode.
+    focus: "Any" = None,
     log=None,
 ) -> AnalysisResult:
-    """Run the complete survival analysis pipeline.
+    """Run the complete survival analysis pipeline under one Focus.
 
     Two ways in:
 
     * **Experiment mode** — pass ``experiment`` (a
       :class:`~pysurvanalysis.domain.experiment.SurvivalExperiment`). Its
       ``survival_config.yaml`` supplies the input format, the censoring policy,
-      the active Exclusion Group and the **Experiment Type**, which in turn
-      decides the Plot Set and the extra analyses. Outputs go to ``analysis/``.
+      the active Exclusion Group, the **Experiment Type** and the Focuses.
+      Outputs go to ``analysis/<focus>/``.
     * **Direct mode** — pass a file (or a directory holding one ``.xlsx``) and
-      the explicit keyword arguments. The experiment is treated as a Custom
-      Experiment: every factor, the full battery, every figure.
+      the explicit keyword arguments. The run is under **Unfiltered** unless a
+      Focus is given; outputs go to ``<stem>_results/<focus>/``.
+
+    A Focus that names factors or levels the file lacks, or whose cells the
+    exclusions emptied, raises
+    :class:`~pysurvanalysis.domain.experiment.BlockedFocusError` before
+    anything is written.
 
     Returns an :class:`AnalysisResult` with everything computed.
     """
-    from .experiment_types import CUSTOM
+    from .domain import focus as fm
+    from .domain.experiment import BlockedFocusError
+    from .experiment_types import STANDARD
 
     emit = log or (lambda _m: None)
-    exp_type = experiment.type if experiment is not None else CUSTOM
+    exp_type = experiment.type if experiment is not None else STANDARD
     config = dict(experiment.config) if experiment is not None else {}
 
     # ── Resolve the input file ─────────────────────────────────────────────
@@ -165,19 +219,6 @@ def run_analysis(
         if input_path.is_dir():
             input_path = _discover_xlsx(input_path)
     input_path = Path(input_path)
-
-    # ── Output directory ───────────────────────────────────────────────────
-    # An Experiment Directory always writes to analysis/; direct mode keeps the
-    # legacy <stem>_results/ convention so old command lines behave the same.
-    if output_dir is None:
-        output_dir = (experiment.analysis_dir if experiment is not None
-                      else input_path.parent / f"{input_path.stem}_results")
-    output_dir = Path(output_dir)
-    plots_dir = output_dir / "plots"
-    data_dir = output_dir / "data_output"
-    stats_dir = output_dir / "statistics"
-    for d in (output_dir, plots_dir, data_dir, stats_dir):
-        d.mkdir(parents=True, exist_ok=True)
 
     # ── Exclusions ─────────────────────────────────────────────────────────
     excluded_chambers: set = set()
@@ -209,7 +250,7 @@ def run_analysis(
         csv_format = "auto" if fmt in {"auto", "excel"} else fmt
 
     emit(f"Loading {input_path.name}…")
-    individual_data, factors = data_loader.load_experiment(
+    raw_data, discovered_factors = data_loader.load_experiment(
         input_path,
         assume_censored=assume_censored,
         excluded_chambers=excluded_chambers,
@@ -222,14 +263,58 @@ def run_analysis(
         factor_levels=factor_levels,
     )
 
-    # The type may reorder levels so the Reference Level leads every grouping.
-    individual_data = exp_type.prepare_data(individual_data, config)
-    data_problems = exp_type.validate_data(individual_data, config)
-    if data_problems:
-        raise ValueError(
-            f"{input_path.name} does not match its {exp_type.label} declaration:\n  - "
-            + "\n  - ".join(data_problems)
-        )
+    # ── The Focus ──────────────────────────────────────────────────────────
+    # The design comes from the file before any exclusion — the Design sheet
+    # for a workbook — so an emptied cell can be told from one that was never
+    # there.
+    if experiment is not None:
+        design = experiment.design()
+    else:
+        design = fm.discover_design(input_path, {
+            "format": csv_format, "time_col": time_col, "event_col": event_col,
+            "factor_cols": factor_cols, "col_mapping": col_mapping,
+            "factor_names": factor_names,
+        })
+    if focus is None:
+        focus = (experiment.active() if experiment is not None else None) \
+            or fm.unfiltered(design)
+
+    stale = fm.stale_reasons(focus, design)
+    if stale:
+        raise BlockedFocusError(focus, stale)
+    individual_data = fm.apply_focus(raw_data, focus)
+    named = [f for f in focus.factors if f in raw_data.columns]
+    unassigned = int(raw_data[named].isna().any(axis=1).sum()) if named else 0
+    if unassigned:
+        emit(f"  {unassigned} individual(s) have no recorded level of "
+             f"{', '.join(named)} and belong to no treatment — outside this Focus.")
+    populated = fm.populated_labels(individual_data)
+    empty = fm.empty_reasons(focus, design, populated)
+    if empty:
+        raise BlockedFocusError(focus, empty)
+    if not len(individual_data):
+        raise BlockedFocusError(focus, [fm.BlockReason(
+            fm.EMPTY, f"Focus {focus.name!r} selects no individuals", "edit the Focus")])
+    shape = fm.focus_shape(focus, individual_data)
+    factors = list(focus.varying_factors)
+    emit(f"Focus {focus.name!r}: {focus.describe(design)} — "
+         f"{len(individual_data)} individuals, {len(populated)} treatment(s), "
+         f"shape {shape.describe()}")
+
+    # ── Output directory ───────────────────────────────────────────────────
+    # Every run writes into its Focus's own directory, every file carrying the
+    # Focus's name; direct mode keeps the legacy <stem>_results/ parent.
+    if output_dir is None:
+        output_dir = (experiment.focus_dir(focus) if experiment is not None
+                      else input_path.parent / f"{input_path.stem}_results" / focus.slug)
+    outs = fm.FocusOutputs.at(output_dir, focus).ensure()
+    output_dir = outs.root
+
+    not_applicable: list[dict] = []
+
+    def _not_applicable(action: str, reason: str) -> None:
+        not_applicable.append({"action": action, "reason": reason})
+        emit(f"  Not applicable — {action}: {reason}")
 
     # ── Compute ────────────────────────────────────────────────────────────
     emit("Computing lifetables and summary statistics…")
@@ -238,13 +323,26 @@ def run_analysis(
     median_surv = lifetable.median_survival(lifetables)
     mean_surv = lifetable.mean_survival(individual_data)
 
-    emit("Running survival comparisons…")
-    pairwise_lr = statistics.pairwise_logrank(individual_data)
-    omnibus_lr = statistics.logrank_multi(individual_data)
-    pairwise_gw = statistics.pairwise_gehan_wilcoxon(individual_data)
-    hazard_ratios = statistics.pairwise_hazard_ratios(individual_data)
+    ## Comparisons need two treatments. A single-treatment Focus is not asked
+    ## them at all; one whose second treatment the data never populated is
+    ## asked, and told why there is no answer.
+    comparable, why = shape.admits(fm.COMPARISON)
+    if comparable:
+        emit("Running survival comparisons…")
+        pairwise_lr = statistics.pairwise_logrank(individual_data)
+        omnibus_lr = statistics.logrank_multi(individual_data)
+        pairwise_gw = statistics.pairwise_gehan_wilcoxon(individual_data)
+        hazard_ratios = statistics.pairwise_hazard_ratios(individual_data)
+    else:
+        pairwise_lr = pairwise_gw = hazard_ratios = pd.DataFrame()
+        omnibus_lr = {}
+        if shape.relevant(fm.COMPARISON)[0]:
+            _not_applicable("Survival comparisons", why)
+    ## Pooled per-factor-level statistics only mean something when two or more
+    ## factors vary; with one they repeat the per-treatment table.
     lifespan_stats = lifetable.lifespan_statistics(
-        individual_data, factors, assume_censored=assume_censored,
+        individual_data, factors if len(factors) >= 2 else [],
+        assume_censored=assume_censored,
     )
     surv_quantiles = lifetable.survival_quantiles(lifetables)
     try:
@@ -278,61 +376,92 @@ def run_analysis(
     result.experiment_type = exp_type
     result.exclusion_group = exclusion_group
     result.figure_paths = {}
+    result.focus = focus
+    result.focus_shape = shape
+    result.design = design
+    result.outputs = outs
+    result.headline_plot_id = exp_type.headline_for(shape)
+    result.not_applicable = not_applicable
+    result.unassigned = unassigned
 
-    # ── Type-specific analyses ─────────────────────────────────────────────
-    extra = exp_type.run_extra_analyses(result, config)
-    if extra:
-        emit(f"Running the {exp_type.label} battery…")
-        result.cox_analyses.extend(extra)
+    # ── The Factorial Battery, by Focus Shape ──────────────────────────────
+    from .experiment_types.factorial import BATTERY, run_factorial_battery
+
+    ## Offered only when the Focus varies two or more factors; then run, or
+    ## recorded as Not Applicable when the crossing has an empty cell.
+    if fm.FACTORIAL_MODEL.relevant(focus)[0]:
+        try:
+            models = run_factorial_battery(individual_data, focus, shape)
+            emit("Running the Factorial Battery…")
+            result.cox_analyses.extend(models)
+        except fm.NotApplicable as exc:
+            _not_applicable(BATTERY, exc.reason)
 
     # ── Save tabular outputs ───────────────────────────────────────────────
-    lifetables.to_csv(data_dir / "lifetables.csv", index=False)
-    individual_data.to_csv(data_dir / "individual_data.csv", index=False)
-    summary.to_csv(data_dir / "summary.csv", index=False)
-    median_surv.to_csv(data_dir / "median_survival.csv", index=False)
-    mean_surv.to_csv(data_dir / "mean_survival.csv", index=False)
+    lifetables.to_csv(outs.data("lifetables"), index=False)
+    individual_data.to_csv(outs.data("individual_data"), index=False)
+    summary.to_csv(outs.data("summary"), index=False)
+    median_surv.to_csv(outs.data("median_survival"), index=False)
+    mean_surv.to_csv(outs.data("mean_survival"), index=False)
     for key, frame in (lifespan_stats or {}).items():
         if hasattr(frame, "to_csv") and len(frame):
-            frame.to_csv(stats_dir / f"lifespan_{key}.csv", index=False)
+            frame.to_csv(outs.stats(f"lifespan_{key}"), index=False)
     for i, model in enumerate(result.cox_analyses, 1):
         coefs = model.get("coefficients")
         if coefs is not None and hasattr(coefs, "to_csv") and len(coefs):
-            coefs.to_csv(stats_dir / f"factorial_{i:02d}_coefficients.csv", index=False)
+            coefs.to_csv(outs.stats(f"factorial_{i:02d}_coefficients"), index=False)
         ph = model.get("ph_test")
         if ph is not None and hasattr(ph, "to_csv") and len(ph):
-            ph.to_csv(stats_dir / f"factorial_{i:02d}_ph_test.csv", index=False)
-    surv_quantiles.to_csv(stats_dir / "survival_quantiles.csv", index=False)
+            ph.to_csv(outs.stats(f"factorial_{i:02d}_ph_test"), index=False)
+    surv_quantiles.to_csv(outs.stats("survival_quantiles"), index=False)
     if len(pairwise_lr) > 0:
-        pairwise_lr.to_csv(stats_dir / "logrank_pairwise.csv", index=False)
+        pairwise_lr.to_csv(outs.stats("logrank_pairwise"), index=False)
     if len(pairwise_gw) > 0:
-        pairwise_gw.to_csv(stats_dir / "gehan_wilcoxon_pairwise.csv", index=False)
+        pairwise_gw.to_csv(outs.stats("gehan_wilcoxon_pairwise"), index=False)
     if len(hazard_ratios) > 0:
-        hazard_ratios.to_csv(stats_dir / "hazard_ratios.csv", index=False)
+        hazard_ratios.to_csv(outs.stats("hazard_ratios"), index=False)
 
-    # ── Figures: the type's Plot Set, in its order ─────────────────────────
+    # ── Figures: the Plot Set this Focus earns, in order ──────────────────
     from . import plot_registry
 
-    plot_ids = list(exp_type.plot_ids()) or plot_registry.available()
-    emit(f"Rendering {len(plot_ids)} figure(s)…")
-    for plot_id in plot_ids:
+    plot_defs = exp_type.plot_set_for(shape)
+    emit(f"Rendering {len(plot_defs)} figure(s)…")
+    for plot_def in plot_defs:
+        ## The Plot Set holds only figures relevant to this Focus; a relevant
+        ## one the populated cells cannot support is said, not skipped.
+        ok, reason = shape.admits(plot_def.requires)
+        if not ok:
+            _not_applicable(plot_def.label, reason)
+            continue
         try:
-            fig = plot_registry.build(plot_id, result)
+            fig = plot_registry.build(plot_def.id, result)
+        except fm.NotApplicable as exc:
+            _not_applicable(plot_def.label, exc.reason)
+            continue
         except Exception as exc:  # noqa: BLE001 - one bad figure never kills a run
-            emit(f"  {plot_id}: skipped ({exc})")
+            _not_applicable(plot_def.label, f"could not be drawn ({exc})")
             continue
         if fig is None:
+            _not_applicable(plot_def.label, "the data cannot support it")
             continue
-        path = plots_dir / plot_registry.get(plot_id).filename
+        path = outs.plot(plot_registry.get(plot_def.id).filename)
         _plot_and_save(fig, path)
-        result.figure_paths[plot_id] = path
+        result.figure_paths[plot_def.id] = path
 
-    for i, (plot_name, treatment_list) in enumerate(defined_plots, 1):
-        valid = [t for t in treatment_list
-                 if t in set(lifetables["treatment"].astype(str))]
-        if not valid:
+    # ── Defined Plots: all of a plot's curves, or none and a reason ────────
+    for plot_name, treatment_list in defined_plots:
+        label = f"Defined Plot {plot_name!r}"
+        if not fm.defined_plot_relevant(focus, design, list(treatment_list)):
+            continue                    # about another slice of the file
+        matched, why = fm.defined_plot_match(focus, design, list(treatment_list),
+                                             populated)
+        if why:
+            _not_applicable(label, why)
             continue
-        fig_dp = plotting.plot_km_curves(lifetables, treatments=valid, title=plot_name)
-        _plot_and_save(fig_dp, plots_dir / f"defined_plot_{i:02d}.png")
+        fig_dp = plotting.plot_km_curves(lifetables, treatments=matched, title=plot_name)
+        path = outs.plot(f"defined_{fm.slugify(plot_name)}.png")
+        _plot_and_save(fig_dp, path)
+        result.defined_plot_paths[plot_name] = path
 
     # ── Report and run summary ─────────────────────────────────────────────
     from . import report_builder
@@ -368,17 +497,23 @@ def _write_run_summary(result: AnalysisResult, output_dir: Path) -> None:
     """A small JSON the Hub and the Project Report read instead of re-analysing.
 
     The Exclusion Group and the number of chambers it removed are stamped here
-    and on every report, so a saved result always says what was excluded.
+    and on every report, so a saved result always says what was excluded. So is
+    the Focus's **analytic definition** — factors, ordered levels, Reference
+    Levels — which is what lets a later reader notice the Focus has changed
+    since and call these results **Out of Date** rather than present them.
     """
     import json
     from datetime import datetime
 
     es = result.experiment_summary or {}
+    design = result.design
     payload = {
         "analyzed_at": datetime.now().isoformat(timespec="seconds"),
         "input_file": result.input_file.name,
-        "experiment_type": getattr(result.experiment_type, "key", "custom"),
+        "experiment_type": getattr(result.experiment_type, "key", "standard_lifespan"),
+        "focus": result.focus_record,
         "factors": list(result.factors),
+        "discovered_factors": list(getattr(design, "factors", ()) or ()),
         "n_total": es.get("n_total"),
         "n_deaths": es.get("n_deaths"),
         "n_censored": es.get("n_censored"),
@@ -392,6 +527,9 @@ def _write_run_summary(result: AnalysisResult, output_dir: Path) -> None:
         "n_excluded_listed": len(result.excluded_chambers or set()),
         "figures": {k: str(v.name) for k, v in
                     getattr(result, "figure_paths", {}).items()},
+        "defined_plots": {k: str(v.name) for k, v in
+                          getattr(result, "defined_plot_paths", {}).items()},
+        "not_applicable": list(result.not_applicable or []),
         "omnibus_lr": _jsonable(result.omnibus_lr),
         # Enough of each factorial model to rebuild its report section from
         # disk; the coefficient tables sit beside it as CSVs.
@@ -405,14 +543,15 @@ def _write_run_summary(result: AnalysisResult, output_dir: Path) -> None:
                 "n_events": mdl.get("n_events"),
                 "concordance": mdl.get("concordance"),
                 "AIC": mdl.get("AIC"),
+                "reference": mdl.get("reference"),
                 "lr_interaction": _jsonable(mdl.get("lr_interaction")),
             }
             for mdl in (result.cox_analyses or [])
         ],
     }
-    (Path(output_dir) / "run_summary.json").write_text(
-        json.dumps(payload, indent=2, default=str), encoding="utf-8"
-    )
+    target = result.outputs.summary if result.outputs is not None \
+        else Path(output_dir) / "run_summary.json"
+    target.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
 
 
 def _plot_and_save(fig, path: Path, dpi: int = 150) -> None:

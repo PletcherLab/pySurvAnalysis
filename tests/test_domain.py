@@ -45,21 +45,89 @@ def test_defaults_are_inherited_and_overridable(project):
     assert overridden.config["global"]["assume_censored"] is False
 
 
-def test_type_mismatch_is_the_only_hard_cross_member_error(project):
+def test_an_unknown_type_is_the_only_hard_cross_member_error(project):
     member = project.member("rep_b")
     config = dict(member.raw_config)
-    config["experiment_type"] = "standard_lifespan"
+    config["experiment_type"] = "fecundity"
     cfgmod.save_config(member.directory, config)
 
     problems = Project(project.directory).validate()
-    assert any("must share the Project's Experiment Type" in p for p in problems)
+    assert any("Unknown experiment_type" in p for p in problems)
 
 
-def test_diverging_levels_are_reported_not_fatal(project):
+def test_a_retired_type_key_still_validates(project):
+    ## `interaction` and `custom` resolve to the general case (ADR-0011): an
+    ## old member must not fail the Project for naming what it used to be.
+    member = project.member("rep_b")
+    config = dict(member.raw_config)
+    config["experiment_type"] = "interaction"
+    cfgmod.save_config(member.directory, config)
+    assert Project(project.directory).validate() == []
+
+
+def test_diverging_designs_are_not_divergence(project):
+    ## rep_a and rep_b order their levels differently. That is design, which
+    ## the Focus Inventory shows; the Divergence Note is for data-source
+    ## settings, so it stays silent here.
     assert project.validate() == []
-    divergences = project.divergences()
-    assert any(d.aspect == "levels" for d in divergences)
-    assert "Genotype" in " ".join(d.detail for d in divergences)
+    assert project.divergences() == []
+
+
+def test_diverging_censoring_is_divergence(project):
+    member = project.member("rep_b")
+    config = dict(member.raw_config)
+    config["global"] = {"assume_censored": False}
+    cfgmod.save_config(member.directory, config)
+    divergences = Project(project.directory).divergences()
+    assert [d.aspect for d in divergences] == ["censoring"]
+
+
+def test_focuses_are_never_inherited_from_the_defaults(project):
+    config = dict(project.config)
+    config["defaults"]["focuses"] = {"Shared": {"factors": {"Genotype": ["wt"]}}}
+    cfgmod.write_yaml(project.config_path, config)
+    reloaded = Project(project.directory)
+    assert "focuses" not in reloaded.member("rep_a").raw_config or \
+        "Shared" not in reloaded.member("rep_a").config["focuses"]
+    assert [f.name for f in reloaded.member("rep_a").focuses()] == ["Factorial"]
+    assert any("is ignored" in p for p in reloaded.validate())
+
+
+def test_inherited_legacy_factors_migrate_into_the_member(tmp_path):
+    ## A pre-Focus Project could declare factors in its defaults; members
+    ## inherited them. Each member migrates them into its OWN `Interaction`
+    ## Focus, verbatim, so its Reference Levels survive.
+    root = tmp_path / "old"
+    Project.create(root, name="Old")
+    config = cfgmod.read_yaml(root / cfgmod.PROJECT_FILENAME)
+    config["defaults"]["experiment_type"] = "interaction"
+    config["defaults"]["factors"] = {"Genotype": ["wt", "mut"],
+                                     "Treatment": ["ctrl", "drug"]}
+    cfgmod.write_yaml(root / cfgmod.PROJECT_FILENAME, config)
+    make_experiment_dir(root / "rep", minimal=True, focus=None)
+    member = Project(root).member("rep")
+    [focus] = member.focuses()
+    assert (focus.name, focus.origin) == ("Interaction", "migrated")
+    assert focus.reference_level("Genotype") == "wt"
+    assert member.materialize_focuses()
+    written = cfgmod.load_config(member.directory)
+    assert list(written["focuses"]) == ["Interaction"]
+    assert written["focuses"]["Interaction"]["factors"]["Genotype"] == ["wt", "mut"]
+    assert any("predates Focuses" in p for p in Project(root).validate())
+
+
+def test_a_legacy_member_migrates_verbatim_and_drops_its_old_keys(tmp_path):
+    directory = make_experiment_dir(tmp_path / "legacy", legacy=True,
+                                    factors={"Genotype": ["wt", "mut"],
+                                             "Treatment": ["ctrl", "drug"]})
+    member = SurvivalExperiment(directory)
+    assert member.type.key == "standard_lifespan"
+    assert member.materialize_focuses()
+    written = cfgmod.load_config(directory)
+    assert "factors" not in written
+    assert written["experiment_type"] == "standard_lifespan"
+    assert written["focuses"]["Interaction"]["factors"]["Genotype"] == ["wt", "mut"]
+    assert not member.materialize_focuses()          # once only
 
 
 def test_data_file_discovery_prefers_data_dir_and_ignores_sidecars(project):
@@ -86,13 +154,16 @@ def test_standalone_experiment_needs_no_project(standalone):
     assert standalone.analysis_dir.name == "analysis"
 
 
-def test_unknown_type_key_is_an_error_not_a_silent_custom(tmp_path):
+def test_unknown_type_key_is_an_error_not_a_silent_fallback(tmp_path):
     directory = make_experiment_dir(tmp_path / "weird")
     config = cfgmod.load_config(directory)
     config["experiment_type"] = "not_a_type"
     cfgmod.save_config(directory, config)
+    ## Constructible, so a Project can list it and say what is wrong — but
+    ## never analysed as something it is not.
+    member = SurvivalExperiment(directory)
     with pytest.raises(ValueError, match="Unknown experiment_type"):
-        SurvivalExperiment(directory)
+        member.type
 
 
 def test_creating_a_project_writes_a_default_script(tmp_path):
@@ -137,7 +208,8 @@ def test_a_scaffolded_member_ships_the_default_experiment_script(project):
     written = cfgmod.read_yaml(member.config_path)
     assert [s["name"] for s in written["scripts"]] == [DEFAULT_EXPERIMENT_SCRIPT_NAME]
     assert written["scripts"][0]["notes"]
-    assert written["scripts"][0]["steps"] == [{"action": "run_analysis"}]
+    assert written["scripts"][0]["steps"] == [{"action": "run_in_focuses"},
+                                              {"action": "run_analysis"}]
     assert DEFAULT_EXPERIMENT_SCRIPT_NAME in {s["name"] for s in member.scripts()}
 
 
@@ -170,7 +242,8 @@ def test_a_config_without_scripts_is_seeded_on_write_but_an_empty_one_is_kept(tm
 
 def test_add_member_scaffolds_from_the_defaults(project):
     member = project.add_member("rep_c")
-    assert member.type.key == "interaction"
+    assert member.type.key == "standard_lifespan"
+    assert "factors" not in cfgmod.load_config(member.directory)
     assert (member.directory / cfgmod.CONFIG_FILENAME).is_file()
     assert member.directory in project.member_dirs()
 
@@ -189,7 +262,7 @@ def test_add_directory_copies_an_outside_directory_in(project, tmp_path):
     assert (member.data_dir / "cohort_x.xlsx").is_file()
     assert (source / "data" / "cohort_x.xlsx").is_file()   # original untouched
     assert member.directory in project.member_dirs()
-    assert member.type.key == "interaction"                # from the Project
+    assert member.type.key == "standard_lifespan"          # from the Project
 
 
 def test_add_directory_adopts_a_direct_subdirectory_in_place(project):
@@ -345,22 +418,22 @@ def test_type_problems_for_enforces_the_type_and_nothing_else(project):
     """
     from pysurvanalysis.experiment_types import get_type
 
-    same = get_type("interaction").scaffold_config()
+    same = get_type("standard_lifespan").scaffold_config()
     assert project.type_problems_for(same, "rep_a.yaml") == []
 
-    ## Different levels, same type: divergence, not an error.
-    diverging = dict(same, factors={"Genotype": ["mut", "wt"],
-                                    "Treatment": ["drug", "ctrl"]})
+    ## A different design, same type: members' designs differ by default.
+    diverging = dict(same, focuses={"Other": {"factors": {"Genotype": ["mut", "wt"]}}})
     assert project.type_problems_for(diverging, "other.yaml") == []
+
+    ## A retired key resolves to the general case.
+    legacy = dict(same, experiment_type="interaction")
+    assert project.type_problems_for(legacy, "legacy.yaml") == []
 
     ## An ordinary config problem is reported after the write, not grounds to
     ## refuse one: it breaks the member, not the Project.
     broken = dict(same, input={"format": "nonsense"})
     assert project.type_problems_for(broken, "broken.yaml") == []
 
-    wrong = get_type("standard_lifespan").scaffold_config()
+    wrong = dict(same, experiment_type="fecundity")
     problems = project.type_problems_for(wrong, "wrong.yaml")
-    assert problems == ["wrong.yaml is a Standard Lifespan but the Project's "
-                        "type is Interaction Experiment. Every Member "
-                        "Experiment must share it — the type selects the "
-                        "analyses, the Plot Set and the report sections."]
+    assert len(problems) == 1 and "Unknown experiment_type" in problems[0]

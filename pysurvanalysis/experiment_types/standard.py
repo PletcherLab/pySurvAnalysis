@@ -1,8 +1,11 @@
-"""Standard Lifespan — the baseline Experiment Type.
+"""Standard Lifespan — the general case, and the only Experiment Type.
 
 A DLife census workbook of chambers scored to death: assumed censoring on, the
 full survivorship battery, demographic-rate figures included because a lifespan
-cohort dies slowly enough for them to mean something.
+cohort dies slowly enough for them to mean something. Every analysis the app can
+do is reachable from it; the 2×2 **Factorial Battery** is offered whenever the
+active Focus is a populated 2×2, gated by Focus Shape rather than by type
+(ADR-0011, which retired the Interaction Experiment type).
 """
 
 from __future__ import annotations
@@ -45,6 +48,9 @@ class StandardLifespanType(ExperimentType):
         "km_curves", "nelson_aalen", "hazard_plot", "mortality", "forest_plot",
         "log_rank_pairwise", "log_rank_omnibus", "gehan_wilcoxon",
         "parametric_aft", "cox_ph", "rmst",
+        # The Factorial Battery — offered for a 2×2 Focus Shape, Not
+        # Applicable elsewhere (the Action declares the requirement).
+        "faceted_km", "interaction_plot", "cox_interaction", "rmst_interaction",
     )
 
     def report_intro(self) -> str | None:
@@ -69,8 +75,10 @@ class StandardLifespanType(ExperimentType):
 
     def report_sections(self) -> tuple[ReportSection, ...]:
         return (
+            ReportSection("focus", "Focus"),
             ReportSection("summary", "Experiment summary"),
             ReportSection("figures", "Survivorship figures"),
+            ReportSection("interaction", "Factorial analysis"),
             ReportSection("lifespan", "Lifespan statistics"),
             ReportSection("tests", "Survival comparisons"),
             ReportSection("quality", "Data quality"),
@@ -81,6 +89,9 @@ class StandardLifespanType(ExperimentType):
             "Summarize this lifespan experiment for a research audience. State "
             "the median and mean lifespan per treatment, describe how the "
             "survival curves differ, and report which log-rank comparisons "
-            "reached significance. Summarize only the numbers given to you — "
-            "never compute, infer, or speculate beyond them."
+            "reached significance. If a factorial model is given, state the "
+            "main effect of each factor and whether the interaction term was "
+            "significant; its coefficients are relative to each factor's "
+            "reference level. Summarize only the numbers given to you — never "
+            "compute, infer, or speculate beyond them."
         )

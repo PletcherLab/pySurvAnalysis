@@ -40,11 +40,15 @@ def write_cohort(path, *, factors=None, n_per_cell=25, seed=0):
 
 def write_dlife_workbook(path, *, chambers=4, censuses=6, sample_size=20,
                          factors=("Genotype", "Treatment"), assume_censored=None,
-                         drop_column=None):
+                         drop_column=None, defined_plots=None):
     """A minimal DLife workbook: a Design sheet, a RawData census, and an
     optional PrivateData flag.
 
-    *drop_column* omits one required column, for the validator's tests.
+    Chamber *n*'s level of factor *i* is ``"a"`` or ``"b"`` by bit *i* of *n*,
+    so four chambers cover a 2×2. *drop_column* omits one required column, for
+    the validator's tests. *defined_plots* (``{name: [treatment, …]}``) writes
+    a DefinedPlots sheet in the workbook's own layout: one column per plot,
+    the name in row 1, treatments from row 6.
     """
     directory = Path(path).parent
     directory.mkdir(parents=True, exist_ok=True)
@@ -73,14 +77,32 @@ def write_dlife_workbook(path, *, chambers=4, censuses=6, sample_size=20,
         if assume_censored is not None:
             pd.DataFrame([{"AssumeCensored": int(assume_censored)}]).to_excel(
                 writer, sheet_name="PrivateData", index=False)
+    if defined_plots:
+        import openpyxl
+
+        book = openpyxl.load_workbook(path)
+        sheet = book.create_sheet("DefinedPlots")
+        for col, (name, labels) in enumerate(defined_plots.items(), start=1):
+            sheet.cell(row=1, column=col, value=name)
+            for row, label in enumerate(labels, start=6):
+                sheet.cell(row=row, column=col, value=label)
+        book.save(path)
     return Path(path)
 
 
-def make_experiment_dir(directory, *, type_key="interaction", factors=None,
+#: The 2×2 Focus most fixtures declare.
+FACTORIAL = "Factorial"
+
+
+def make_experiment_dir(directory, *, type_key="standard_lifespan", factors=None,
                         n_per_cell=25, seed=0, exclusion_group=None,
-                        minimal=False):
+                        minimal=False, focus=FACTORIAL, legacy=False):
     """A ready-to-analyse Experiment Directory.
 
+    The config declares one 2×2 Focus named *focus* over *factors*, in their
+    order (``focus=None`` declares none, leaving the implicit Unfiltered).
+    ``legacy=True`` writes the pre-Focus form instead — ``experiment_type:
+    interaction`` and a ``factors:`` block — for the migration tests.
     ``minimal=True`` writes the member config a Project would scaffold — no
     ``global:`` of its own, so the Project's defaults are what is under test.
     """
@@ -92,8 +114,11 @@ def make_experiment_dir(directory, *, type_key="interaction", factors=None,
                  n_per_cell=n_per_cell, seed=seed)
     config = get_type(type_key).scaffold_config(minimal=minimal)
     config["input"] = {"format": "long", "time_col": "Age", "event_col": "Event"}
-    if type_key == "interaction":
+    if legacy:
+        config["experiment_type"] = "interaction"
         config["factors"] = factors
+    elif focus:
+        config["focuses"] = {focus: {"factors": factors}}
     if exclusion_group:
         config["exclusions"] = {"group": exclusion_group}
     cfgmod.save_config(directory, config)
@@ -102,10 +127,10 @@ def make_experiment_dir(directory, *, type_key="interaction", factors=None,
 
 @pytest.fixture
 def project(tmp_path):
-    """A Project with two Interaction members that diverge in level order."""
+    """A Project with two members, each declaring a 2×2 Focus; their level
+    orders — and so their Reference Levels — differ."""
     root = tmp_path / "proj"
-    Project.create(root, name="Test project", question="Does the drug help?",
-                   type_key="interaction")
+    Project.create(root, name="Test project", question="Does the drug help?")
     make_experiment_dir(root / "rep_a", seed=1, minimal=True)
     make_experiment_dir(root / "rep_b", seed=2, minimal=True,
                         factors={"Genotype": ["mut", "wt"],
@@ -132,7 +157,7 @@ def analysed_project(tmp_path_factory):
     """
     root = tmp_path_factory.mktemp("analysed")
     Project.create(root, name="Analysed project",
-                   question="Does the drug help?", type_key="interaction")
+                   question="Does the drug help?")
     make_experiment_dir(root / "rep_a", seed=1, minimal=True)
     make_experiment_dir(root / "rep_b", seed=2, minimal=True,
                         factors={"Genotype": ["mut", "wt"],

@@ -1,11 +1,14 @@
-"""The AI Narrative: per-member summaries plus one across-members paragraph.
+"""The AI Narrative: per-Focus summaries plus one across-Focuses paragraph.
 
 Two rules hold this together. The AI *summarizes* the pipeline's analysis and
 never performs its own — every number it sees is one the pipeline already
-computed and saved. And the across-members paragraph is qualitative by
-construction: it is written from the per-member digests, combines no numbers,
+computed and saved. And the across-Focuses paragraph is qualitative by
+construction: it is written from the per-Focus digests, combines no numbers,
 and is captioned as non-statistical wherever it appears. That paragraph is the
-only cross-member synthesis anywhere in the app (ADR-0001).
+only cross-Focus synthesis anywhere in the app (ADR-0001, ADR-0011).
+
+Only Focuses whose saved results are current are summarized: an Out of Date
+Focus's numbers describe a slice its config no longer declares.
 """
 
 from __future__ import annotations
@@ -58,8 +61,13 @@ def member_digest(saved) -> str:
     """A compact text rendering of one member's saved numbers."""
     lines: list[str] = []
     es = saved.experiment_summary
+    rec = saved.focus_record
     lines.append(f"Experiment type: {saved.experiment_type.label}")
-    lines.append(f"Factors: {', '.join(saved.factors) or 'none'}")
+    if rec:
+        lines.append(f"Focus: {rec.get('name')} — {rec.get('description') or ''}")
+        if rec.get("treatments"):
+            lines.append(f"Treatments: {', '.join(map(str, rec['treatments']))}")
+    lines.append(f"Varying factors: {', '.join(saved.factors) or 'none'}")
     lines.append(
         f"Individuals: {es.get('n_total')}, deaths: {es.get('n_deaths')}, "
         f"censored: {es.get('n_censored')} ({es.get('pct_censored')}%), "
@@ -67,6 +75,8 @@ def member_digest(saved) -> str:
     )
     if saved.exclusion_group:
         lines.append(f"Exclusion group applied: {saved.exclusion_group}")
+    for item in saved.not_applicable:
+        lines.append(f"Not applicable: {item.get('action')} — {item.get('reason')}")
 
     median = saved.median_surv
     if len(median):
@@ -88,8 +98,11 @@ def member_digest(saved) -> str:
     for model in saved.cox_analyses:
         if model.get("error"):
             continue
+        ref = model.get("reference") or {}
+        ref_text = (" (reference: " + ", ".join(f"{f}={v}" for f, v in ref.items()) + ")"
+                    if isinstance(ref, dict) and ref else "")
         lines.append(f"{model.get('title') or model.get('model_type')}: "
-                     f"{model.get('formula')}")
+                     f"{model.get('formula')}{ref_text}")
         lr = model.get("lr_interaction") or {}
         if lr:
             lines.append(f"  interaction LR test: chi2={lr.get('statistic')}, "
@@ -103,9 +116,10 @@ def member_digest(saved) -> str:
 def _member_prompt(name: str, digest: str, prompt_hint: str) -> str:
     return (
         f"{prompt_hint}\n\n"
-        f"Write ONE paragraph (at most 120 words) summarizing the experiment "
-        f"named {name!r} from the analysis output below. Do not restate every "
-        f"number — pick the ones that carry the result.\n\n"
+        f"Write ONE paragraph (at most 120 words) summarizing the analysis "
+        f"named {name!r} (a member experiment and the Focus — the slice of its "
+        f"data — it was analysed under) from the output below. Do not restate "
+        f"every number — pick the ones that carry the result.\n\n"
         f"--- analysis output ---\n{digest}\n--- end ---"
     )
 
@@ -113,17 +127,17 @@ def _member_prompt(name: str, digest: str, prompt_hint: str) -> str:
 def _across_prompt(question: str, summaries: dict[str, str]) -> str:
     joined = "\n\n".join(f"[{name}] {text}" for name, text in summaries.items())
     return (
-        "Below are independent summaries of separate experiments in one "
-        "project. They were analysed separately and their numbers were never "
-        "pooled.\n\n"
+        "Below are independent summaries of separate analyses in one project, "
+        "each a Focus — a slice of one experiment's data. They were analysed "
+        "separately and their numbers were never pooled.\n\n"
         f"The project's question: {question or 'not stated'}\n\n"
         "Write ONE paragraph (at most 100 words) describing where these "
-        "independent experiments agree and where they disagree. This is a "
+        "independent analyses agree and where they disagree. This is a "
         "qualitative comparison only: do not combine, average, or "
         "meta-analyse their numbers, and do not state a combined effect or a "
         "combined p-value. If they point in different directions, say so "
         "plainly.\n\n"
-        f"--- member summaries ---\n{joined}\n--- end ---"
+        f"--- summaries ---\n{joined}\n--- end ---"
     )
 
 
@@ -133,12 +147,12 @@ def _across_prompt(question: str, summaries: dict[str, str]) -> str:
 
 def generate(project, provider: Any = None, log=None,
              include_across: bool = True) -> dict[str, str]:
-    """Narrative for a Project: ``{member_name: text, "__across__": text}``.
+    """Narrative for a Project: ``{"<member> · <focus>": text, "__across__": text}``.
 
     Soft-fails throughout — a provider outage costs you the narrative, never
     the report.
     """
-    from ..project_report import SavedAnalysis
+    from ..project_report import SavedAnalysis, section_key
 
     emit = log or (lambda _m: None)
     if provider is None or isinstance(provider, str):
@@ -150,26 +164,32 @@ def generate(project, provider: Any = None, log=None,
 
     out: dict[str, str] = {}
     for member in project.members():
-        saved = SavedAnalysis(member)
-        if not saved.exists:
-            continue
-        try:
-            text = provider.complete(
-                SYSTEM,
-                _member_prompt(member.name, member_digest(saved),
-                               member.type.ai_summary_prompt()),
-            )
-        except ProviderError as exc:
-            emit(f"  [{member.name}] narrative skipped: {exc}")
-            continue
-        out[member.name] = text
-        emit(f"  [{member.name}] narrative written ({len(text.split())} words).")
+        statuses = {fs.name: fs for fs in member.status(check_blocked=False).focuses}
+        for focus in member.focuses():
+            fs = statuses.get(focus.name)
+            if fs is None or not fs.analyzed or fs.out_of_date:
+                continue
+            saved = SavedAnalysis(member, focus)
+            if not saved.exists:
+                continue
+            key = section_key(member.name, focus.name)
+            try:
+                text = provider.complete(
+                    SYSTEM,
+                    _member_prompt(key, member_digest(saved),
+                                   member.type.ai_summary_prompt()),
+                )
+            except ProviderError as exc:
+                emit(f"  [{key}] narrative skipped: {exc}")
+                continue
+            out[key] = text
+            emit(f"  [{key}] narrative written ({len(text.split())} words).")
 
     if include_across and len(out) > 1:
         try:
             out[ACROSS_KEY] = provider.complete(
                 SYSTEM, _across_prompt(project.question, out))
-            emit("  across-members paragraph written.")
+            emit("  across-Focuses paragraph written.")
         except ProviderError as exc:
-            emit(f"  across-members paragraph skipped: {exc}")
+            emit(f"  across-Focuses paragraph skipped: {exc}")
     return out

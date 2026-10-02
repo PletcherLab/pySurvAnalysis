@@ -1,15 +1,22 @@
-"""The Project Report — one bound document, one section per Member Experiment.
+"""The Project Report — one bound document, one section per **Focus**.
 
 A Project never pools (ADR-0001), so this binder combines nothing: it reads
-each member's *saved* analysis outputs and lays them out one after another,
-behind a cover carrying the Member Inventory and the Divergence Note. A member
-that has not been analysed yields a "not analysed" section — the report never
-silently analyses on the user's behalf.
+each Focus's *saved* analysis outputs and lays them out one after another,
+behind a cover carrying the **Focus Inventory** and, when members' data-source
+settings differ, the **Divergence Note**. The Focus, not the directory, is the
+unit of independent analysis (ADR-0011), so a member whose file holds three
+experiments contributes three sections.
 
-Members' sections are built by the same ``report_builder`` section functions the
-per-experiment report uses, fed by :class:`SavedAnalysis` — a read-only view of
-``analysis/`` shaped like an ``AnalysisResult``. One set of section builders,
-two sources.
+A declared Focus that has not been analysed yields a "not analysed" section —
+the report never silently analyses on the user's behalf. By the same rule it
+never silently presents results for something they no longer describe: a
+Focus whose saved results predate a change to its definition or Exclusion
+Group is **Out of Date**, and its section says so instead of showing them.
+
+Sections are built by the same ``report_builder`` section functions the
+per-Focus report uses, fed by :class:`SavedAnalysis` — a read-only view of
+``analysis/<focus>/`` shaped like an ``AnalysisResult``. One set of section
+builders, two sources.
 """
 
 from __future__ import annotations
@@ -22,25 +29,37 @@ from typing import Any
 import pandas as pd
 
 from . import report_builder as rb
+from .domain.focus import FocusOutputs
 from .report_pkg import model as m
 from .report_pkg.render import render
 
 
+def section_key(member_name: str, focus_name: str) -> str:
+    """How one Focus's section is keyed — in the AI Narrative and the report."""
+    return f"{member_name} · {focus_name}"
+
+
 class SavedAnalysis:
-    """A member's saved ``analysis/`` directory, shaped like an AnalysisResult.
+    """One Focus's saved ``analysis/<focus>/`` directory, shaped like an
+    AnalysisResult.
 
     Only the attributes the report sections actually read are provided; each is
     loaded lazily so binding a ten-member Project doesn't read forty CSVs it
     will not use.
     """
 
-    def __init__(self, experiment):
+    def __init__(self, experiment, focus=None):
         self.experiment = experiment
         self.experiment_type = experiment.type
-        self.analysis_dir = experiment.analysis_dir
-        self.summary_path = self.analysis_dir / "run_summary.json"
+        if focus is None:
+            focus = experiment.active()
+        self.focus = focus
+        self.outputs = FocusOutputs(experiment.analysis_dir, focus) if focus is not None \
+            else None
+        self.analysis_dir = self.outputs.root if self.outputs else experiment.analysis_dir
+        self.summary_path = self.outputs.summary if self.outputs else None
         self.payload: dict[str, Any] = {}
-        if self.summary_path.is_file():
+        if self.summary_path is not None and self.summary_path.is_file():
             try:
                 self.payload = json.loads(self.summary_path.read_text(encoding="utf-8"))
             except Exception:  # noqa: BLE001 - a corrupt summary reads as "not analysed"
@@ -61,6 +80,19 @@ class SavedAnalysis:
     @property
     def factors(self) -> list[str]:
         return list(self.payload.get("factors") or [])
+
+    @property
+    def focus_record(self) -> dict:
+        return dict(self.payload.get("focus") or {})
+
+    @property
+    def not_applicable(self) -> list[dict]:
+        return [dict(i) for i in self.payload.get("not_applicable") or []
+                if isinstance(i, dict)]
+
+    @property
+    def headline_plot_id(self) -> str | None:
+        return self.focus_record.get("headline")
 
     @property
     def assume_censored(self) -> bool:
@@ -93,49 +125,53 @@ class SavedAnalysis:
     def omnibus_lr(self) -> dict:
         return self.payload.get("omnibus_lr") or {}
 
-    def _csv(self, *relative: str) -> pd.DataFrame:
-        for rel in relative:
-            path = self.analysis_dir / rel
-            if path.is_file():
-                try:
-                    return pd.read_csv(path)
-                except Exception:  # noqa: BLE001 - an unreadable CSV is an empty table
-                    return pd.DataFrame()
+    def _csv(self, path: Path | None) -> pd.DataFrame:
+        if path is not None and path.is_file():
+            try:
+                return pd.read_csv(path)
+            except Exception:  # noqa: BLE001 - an unreadable CSV is an empty table
+                return pd.DataFrame()
         return pd.DataFrame()
+
+    def _data(self, stem: str) -> pd.DataFrame:
+        return self._csv(self.outputs.data(stem) if self.outputs else None)
+
+    def _stats(self, stem: str) -> pd.DataFrame:
+        return self._csv(self.outputs.stats(stem) if self.outputs else None)
 
     @property
     def summary(self) -> pd.DataFrame:
-        return self._csv("data_output/summary.csv")
+        return self._data("summary")
 
     @property
     def median_surv(self) -> pd.DataFrame:
-        return self._csv("data_output/median_survival.csv")
+        return self._data("median_survival")
 
     @property
     def mean_surv(self) -> pd.DataFrame:
-        return self._csv("data_output/mean_survival.csv")
+        return self._data("mean_survival")
 
     @property
     def surv_quantiles(self) -> pd.DataFrame:
-        return self._csv("statistics/survival_quantiles.csv")
+        return self._stats("survival_quantiles")
 
     @property
     def pairwise_lr(self) -> pd.DataFrame:
-        return self._csv("statistics/logrank_pairwise.csv")
+        return self._stats("logrank_pairwise")
 
     @property
     def pairwise_gw(self) -> pd.DataFrame:
-        return self._csv("statistics/gehan_wilcoxon_pairwise.csv")
+        return self._stats("gehan_wilcoxon_pairwise")
 
     @property
     def hazard_ratios(self) -> pd.DataFrame:
-        return self._csv("statistics/hazard_ratios.csv")
+        return self._stats("hazard_ratios")
 
     @property
     def lifespan_stats(self) -> dict:
         return {
-            "treatment_stats": self._csv("statistics/lifespan_treatment_stats.csv"),
-            "factor_stats": self._csv("statistics/lifespan_factor_stats.csv"),
+            "treatment_stats": self._stats("lifespan_treatment_stats"),
+            "factor_stats": self._stats("lifespan_factor_stats"),
         }
 
     @property
@@ -147,70 +183,95 @@ class SavedAnalysis:
         models: list[dict] = []
         for i, meta in enumerate(self.payload.get("factorial_models") or [], 1):
             model = dict(meta)
-            coefs = self._csv(f"statistics/factorial_{i:02d}_coefficients.csv")
+            coefs = self._stats(f"factorial_{i:02d}_coefficients")
             if len(coefs):
                 model["coefficients"] = coefs
-            ph = self._csv(f"statistics/factorial_{i:02d}_ph_test.csv")
+            ph = self._stats(f"factorial_{i:02d}_ph_test")
             if len(ph):
                 model["ph_test"] = ph
             models.append(model)
         return models
 
-    @property
-    def figure_paths(self) -> dict[str, Path]:
-        plots = self.analysis_dir / "plots"
+    def _plot_files(self, key: str) -> dict[str, Path]:
+        if self.outputs is None:
+            return {}
+        plots = self.outputs.plots_dir
         return {
-            plot_id: plots / filename
-            for plot_id, filename in (self.payload.get("figures") or {}).items()
+            name: plots / filename
+            for name, filename in (self.payload.get(key) or {}).items()
             if (plots / filename).is_file()
         }
+
+    @property
+    def figure_paths(self) -> dict[str, Path]:
+        return self._plot_files("figures")
+
+    @property
+    def defined_plot_paths(self) -> dict[str, Path]:
+        return self._plot_files("defined_plots")
 
 
 # ---------------------------------------------------------------------------
 # Cover, inventory, divergence
 # ---------------------------------------------------------------------------
 
-def _inventory_table(project, saved: dict[str, SavedAnalysis]) -> m.Table:
-    """One row per Member Experiment — the reader's map of the Project."""
-    columns = ["Member", "Analysed", "N", "Deaths", "Censored", "Treatments",
-               "Factors", "Exclusion group"]
-    rows: list[list[str]] = []
-    levels: list[m.Level | None] = []
+def _focus_rows(project) -> list[tuple]:
+    """``(member, FocusStatus, Focus)`` for every Focus of every member, in
+    member then declaration order."""
+    rows = []
     for member in project.members():
-        s = saved[member.name]
-        es = s.experiment_summary if s.exists else {}
-        rows.append([
-            member.name,
-            (s.payload.get("analyzed_at") or "yes") if s.exists else "no",
-            str(es.get("n_total") or "—"),
-            str(es.get("n_deaths") or "—"),
-            (f"{es.get('n_censored')} ({es.get('pct_censored')}%)"
-             if s.exists and es.get("n_censored") is not None else "—"),
-            str(es.get("n_treatments") or "—"),
-            ", ".join(s.factors) if s.exists else "—",
-            s.exclusion_group or "none",
+        st = member.status()
+        focuses = {f.name: f for f in member.focuses()}
+        for fs in st.focuses:
+            rows.append((member, fs, focuses.get(fs.name)))
+    return rows
+
+
+def _inventory_table(rows) -> m.Table:
+    """One row per Focus — the reader's map of the Project."""
+    columns = ["Member", "Focus", "Slice", "N", "Deaths", "Censored",
+               "Treatments", "State", "Not applicable"]
+    body: list[list[str]] = []
+    levels: list[m.Level | None] = []
+    for member, fs, _focus in rows:
+        censored = (f"{fs.n_censored} ({round(100.0 * fs.n_censored / fs.n_total, 1)}%)"
+                    if fs.analyzed and fs.n_total and fs.n_censored is not None else "—")
+        na = "; ".join(action for action, _ in fs.not_applicable) or "—"
+        body.append([
+            member.name, fs.name, fs.description or "—",
+            str(fs.n_total or "—") if fs.analyzed else "—",
+            str(fs.n_deaths or "—") if fs.analyzed else "—",
+            censored,
+            str(fs.n_treatments or "—") if fs.analyzed else "—",
+            fs.state, na,
         ])
-        levels.append(m.Level.NEUTRAL if s.exists else m.Level.WARN)
-    return m.Table(columns=columns, rows=rows, title="Member inventory",
+        levels.append(m.Level.NEUTRAL if fs.state == "analysed" else m.Level.WARN)
+    return m.Table(columns=columns, rows=body, title="Focus inventory",
                    row_levels=levels,
-                   caption="Each member is analysed independently; nothing here "
-                           "is pooled.")
+                   caption="Each Focus is analysed independently — a slice of one "
+                           "member's data file, named and declared in its config. "
+                           "Nothing here is pooled across Focuses or members.")
 
 
 def _divergence_blocks(project) -> list:
+    """The Divergence Note: data-source settings only.
+
+    Design divergence is shown by the Focus Inventory instead — members rarely
+    share factors, so a note saying so on every Project would teach readers to
+    skip it, and with it the one line that mattered.
+    """
     divergences = project.divergences()
     if not divergences:
-        return [m.Paragraph(
-            "No divergence detected between members: they declare the same "
-            "factors, levels, censoring policy and exclusion group."
-        )]
+        return []
     blocks: list = [m.Paragraph(
-        "Members of this Project differ in the ways listed below. Divergence is "
-        "expected — these experiments address one question in slightly different "
-        "ways — and no result in this report combines across them."
+        "Members of this Project differ in the data-source settings listed "
+        "below. That is legal — but it changes how every result is computed, "
+        "and no result in this report combines across them. Assumed censoring "
+        "on in one member and off in another, for instance, changes how every "
+        "death is counted and can flip a comparison's conclusion."
     )]
     blocks.append(m.Table(
-        columns=["Aspect", "How members differ"],
+        columns=["Setting", "How members differ"],
         rows=[[d.aspect, d.detail] for d in divergences],
         title="Divergence note",
         row_levels=[m.Level.WARN] * len(divergences),
@@ -219,53 +280,67 @@ def _divergence_blocks(project) -> list:
 
 
 def build_project_report(project, narrative: dict[str, str] | None = None) -> m.Report:
-    """The bound document: cover, inventory, divergence, then member sections."""
-    saved = {mem.name: SavedAnalysis(mem) for mem in project.members()}
-    analysed = [n for n, s in saved.items() if s.exists]
+    """The bound document: cover, inventory, divergence, then Focus sections."""
+    rows = _focus_rows(project)
+    current = [r for r in rows if r[1].state == "analysed"]
 
     report = m.Report(title=project.name)
-    status = [m.StatusLine(
-        f"{len(analysed)} of {len(saved)} member experiment(s) analysed.",
-        m.Level.OK if saved and len(analysed) == len(saved) else m.Level.WARN,
-    )] if saved else [m.StatusLine("This Project has no Member Experiments yet.",
-                                   m.Level.WARN)]
+    if rows:
+        status = [m.StatusLine(
+            f"{len(current)} of {len(rows)} Focus(es) analysed and current.",
+            m.Level.OK if len(current) == len(rows) else m.Level.WARN)]
+    elif project.members():
+        status = [m.StatusLine("No Focus could be resolved for any member.",
+                               m.Level.WARN)]
+    else:
+        status = [m.StatusLine("This Project has no Member Experiments yet.",
+                               m.Level.WARN)]
     report.add(m.Cover(
         title=f"{project.name} — Project Report",
         subtitle=project.question,
         metadata=[
             ("Experiment type", project.type.label),
-            ("Members", str(len(saved))),
+            ("Members", str(len(project.members()))),
+            ("Focuses", str(len(rows))),
             ("Generated", datetime.now().strftime("%Y-%m-%d %H:%M")),
             ("Path", str(project.directory)),
         ],
         status=status,
     ))
 
-    report.add(m.SectionDivider("Members"))
-    if saved:
-        report.add(_inventory_table(project, saved))
+    report.add(m.SectionDivider("Focuses"))
+    if rows:
+        report.add(_inventory_table(rows))
     report.extend(_divergence_blocks(project))
 
     if narrative and narrative.get("__across__"):
-        report.add(m.Heading("Across members", level=2))
+        report.add(m.Heading("Across Focuses", level=2))
         report.add(m.Paragraph(narrative["__across__"]))
         report.add(m.Paragraph(
             "*Qualitative summary only — no statistic in this report combines "
-            "members.*"
+            "Focuses or members.*"
         ))
 
-    for member in project.members():
-        s = saved[member.name]
+    for member, fs, focus in rows:
+        key = section_key(member.name, fs.name)
         ## No PageBreak of its own: a SectionDivider already starts on a
         ## fresh page, and asking for one here put an empty page — header and
-        ## footer only — in front of every member.
-        report.add(m.SectionDivider(member.name,
-                                    subtitle=member.type.label))
-        if not s.exists:
+        ## footer only — in front of every section.
+        report.add(m.SectionDivider(key, subtitle=fs.description or member.type.label))
+        if fs.blocked:
             report.add(m.Paragraph(
-                f"**{member.name} has not been analysed.** Run its analysis and "
-                f"rebuild this report; nothing was computed on its behalf here."
-            ))
+                f"**Focus {fs.name} is blocked** — it cannot run as declared, "
+                f"so nothing was analysed for it. {member.name}'s other "
+                f"Focuses are unaffected."))
+            report.add(m.Table(columns=["Why it is blocked"],
+                               rows=[[r] for r in fs.blocked],
+                               row_levels=[m.Level.ERROR] * len(fs.blocked)))
+            continue
+        if not fs.analyzed:
+            report.add(m.Paragraph(
+                f"**Focus {fs.name} has not been analysed.** Run its analysis "
+                f"and rebuild this report; nothing was computed on its behalf "
+                f"here."))
             problems = member.validate()
             if problems:
                 report.add(m.Table(
@@ -274,16 +349,23 @@ def build_project_report(project, narrative: dict[str, str] | None = None) -> m.
                     title="Why it cannot be analysed as configured",
                 ))
             continue
+        if fs.out_of_date:
+            report.add(m.Paragraph(
+                f"**Focus {fs.name}'s results are out of date** — they predate a "
+                f"change and are not shown: "
+                f"{'; '.join(fs.out_of_date_reasons)}. Re-run its analysis and "
+                f"rebuild this report."))
+            continue
 
-        if narrative and narrative.get(member.name):
-            report.add(m.Paragraph(narrative[member.name]))
-
+        saved = SavedAnalysis(member, focus)
+        if narrative and narrative.get(key):
+            report.add(m.Paragraph(narrative[key]))
         for section in member.type.report_sections():
             builder = rb._SECTION_BUILDERS.get(section.key)
             if builder is None:
                 continue
             try:
-                blocks = builder(s)
+                blocks = builder(saved)
             except Exception as exc:  # noqa: BLE001 - one bad section, not one bad report
                 blocks = [m.Paragraph(f"*{section.title} could not be rebuilt from "
                                       f"the saved analysis: {exc}*")]
