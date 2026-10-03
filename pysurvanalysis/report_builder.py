@@ -78,19 +78,45 @@ def _level_for_p(p: Any) -> m.Level:
     return m.Level.OK if value < 0.05 else m.Level.NEUTRAL
 
 
+def is_pvalue_column(name: Any) -> bool:
+    """True for a column holding p-values (``p``, ``p_value``, ``p_bonferroni``,
+    ``f_p_value``…) — never for a transform of one such as ``-log2(p)``."""
+    text = str(name).strip().lower()
+    return (text in {"p", "pvalue", "p-value", "p_value"}
+            or text.startswith("p_") or text.endswith("_p")
+            or text.endswith("_p_value"))
+
+
+def _p_for_level(df: pd.DataFrame, max_rows: int = 200) -> pd.Series | None:
+    """The p-value a row's highlight follows: the multiplicity-adjusted one
+    when the table has it, so the tint and the ``significant_0.05`` column
+    can never disagree; otherwise the plain ``p_value``."""
+    for column in ("p_bonferroni", "p_adjusted", "p_value"):
+        if column in getattr(df, "columns", []):
+            return df[column].head(max_rows)
+    return None
+
+
 def dataframe_table(df: pd.DataFrame, title: str | None = None,
                     caption: str | None = None, digits: int = 3,
                     max_rows: int = 200) -> m.Table | None:
-    """A Table block from a DataFrame, cells pre-stringified."""
+    """A Table block from a DataFrame, cells pre-stringified.
+
+    p-value columns go through :func:`format_pvalue` — a fixed three
+    decimals would print a highly significant result as "0.000".
+    """
     if df is None or len(df) == 0:
         return None
     frame = df.head(max_rows)
     columns = [str(c) for c in frame.columns]
+    pcols = [is_pvalue_column(c) for c in frame.columns]
     rows: list[list[str]] = []
     for _, row in frame.iterrows():
         cells = []
-        for value in row:
-            if isinstance(value, float):
+        for value, is_p in zip(row, pcols):
+            if is_p:
+                cells.append(format_pvalue(value))
+            elif isinstance(value, float):
                 cells.append(_num(value, digits))
             else:
                 cells.append("—" if value is None else str(value))
@@ -132,6 +158,33 @@ def left_out(result) -> list[dict]:
             if isinstance(item, dict)]
 
 
+def _chamber_sort_key(chamber: str):
+    """Chamber ids in numeric order where they are numbers (2 before 10)."""
+    text = str(chamber)
+    return (0, int(text), "") if text.lstrip("-").isdigit() else (1, 0, text)
+
+
+def exclusion_facts(result) -> tuple[int, int, list[str] | None]:
+    """``(removed, listed, ids)`` for the run's exclusions — live result or
+    saved one alike.
+
+    *removed* counts the chambers the exclusions actually took out of this
+    data; *listed* what the group and the workbook named; *ids* the removed
+    chambers' identities, or ``None`` when the record predates saving them —
+    then only the count is known, and no identity is invented for it.
+    """
+    listed_fn = getattr(result, "n_excluded_listed", None)
+    listed = (listed_fn() if callable(listed_fn)
+              else len(getattr(result, "excluded_chambers", None) or ()))
+    applied_fn = getattr(result, "excluded_applied", None)
+    ids = applied_fn() if callable(applied_fn) else None
+    count_fn = getattr(result, "n_excluded_applied", None)
+    removed = count_fn() if callable(count_fn) else (len(ids) if ids is not None else 0)
+    if ids is not None:
+        ids = sorted((str(c) for c in ids), key=_chamber_sort_key)
+    return int(removed or 0), int(listed or 0), ids
+
+
 def _cover(result, name: str) -> m.Cover:
     exp_type = result.experiment_type
     es = result.experiment_summary or {}
@@ -149,9 +202,7 @@ def _cover(result, name: str) -> m.Cover:
         ("Censored", f"{es.get('n_censored', '?')} ({es.get('pct_censored', '?')}%)"),
     ]
     group = getattr(result, "exclusion_group", None)
-    applied = (result.n_excluded_applied() if hasattr(result, "n_excluded_applied")
-               else len(result.excluded_chambers or set()))
-    listed = len(result.excluded_chambers or set())
+    applied, listed, _ids = exclusion_facts(result)
     if group and applied:
         exclusion_text = f"{group} — {applied} chamber(s) removed"
     elif group:
@@ -373,18 +424,42 @@ def _section_figures(result) -> list:
     return blocks
 
 
+def _tau_of(*frames) -> str | None:
+    """The restriction time a mean-survival table used, for its caption."""
+    for frame, column in frames:
+        if isinstance(frame, pd.DataFrame) and column in frame.columns and len(frame):
+            value = frame[column].dropna()
+            if len(value):
+                return _num(value.iloc[0])
+    return None
+
+
 def _section_lifespan(result) -> list:
     blocks: list = []
-    for df, title in ((result.median_surv, "Median survival"),
-                      (result.mean_surv, "Mean survival")):
-        table = dataframe_table(df, title=title)
+    median_caption = (
+        "Kaplan-Meier median: the first age at which survival is at or below "
+        "50%. The 95% interval is where the curve's log-log confidence band "
+        "reaches 50% (as R's survfit and lifelines); — means not reached.")
+    tau = _tau_of((result.mean_surv, "restriction_time"))
+    mean_caption = (
+        "Restricted mean survival time: the exact area under each treatment's "
+        "Kaplan-Meier step function from 0 to the common restriction time "
+        f"τ{f' = {tau}' if tau else ''} — the shortest follow-up of any "
+        "treatment, so every mean covers the same window.")
+    for df, title, caption in ((result.median_surv, "Median survival", median_caption),
+                               (result.mean_surv, "Mean survival", mean_caption)):
+        table = dataframe_table(df, title=title, caption=caption)
         if table:
             blocks.append(table)
     stats = result.lifespan_stats or {}
     if isinstance(stats, dict):
+        tau = _tau_of((stats.get("treatment_stats"), "tau"))
+        caption = (f"mean_rmst is restricted to the same common τ"
+                   f"{f' = {tau}' if tau else ''} as the Mean survival table; "
+                   f"t_max is each group's own last observed age.")
         for key, title in (("treatment_stats", "Lifespan statistics by treatment"),
                            ("factor_stats", "Lifespan statistics by factor level")):
-            table = dataframe_table(stats.get(key), title=title)
+            table = dataframe_table(stats.get(key), title=title, caption=caption)
             if table:
                 blocks.append(table)
     table = dataframe_table(result.surv_quantiles, title="Survival quantiles")
@@ -409,13 +484,21 @@ def _section_tests(result) -> list:
             ]],
             title="Overall comparison",
         ))
-    for df, title in ((result.pairwise_lr, "Pairwise log-rank"),
-                      (result.pairwise_gw, "Pairwise Gehan-Wilcoxon"),
-                      (result.hazard_ratios, "Pairwise hazard ratios")):
-        table = dataframe_table(df, title=title)
+    adjusted = ("Pairs are in the Focus's treatment order. Highlighted rows are "
+                "significant after the Bonferroni adjustment (p_bonferroni < 0.05, "
+                "the significant_0.05 column); p_value is unadjusted.")
+    for df, title, caption in (
+            (result.pairwise_lr, "Pairwise log-rank", adjusted),
+            (result.pairwise_gw, "Pairwise Gehan-Wilcoxon", adjusted),
+            (result.hazard_ratios, "Pairwise hazard ratios",
+             "hazard_ratio is group1 / group2, group1 being the treatment "
+             "earlier in the Focus's order: below 1, group1 dies at the lower "
+             "rate. Log-rank O/E estimate with an approximate 95% interval.")):
+        table = dataframe_table(df, title=title, caption=caption)
         if table:
-            if "p_value" in getattr(df, "columns", []):
-                table.row_levels = [_level_for_p(v) for v in df["p_value"].head(200)]
+            p = _p_for_level(df)
+            if p is not None:
+                table.row_levels = [_level_for_p(v) for v in p]
             blocks.append(table)
     return blocks
 
@@ -446,20 +529,33 @@ def _section_interaction(result) -> list:
         if formula:
             blocks.append(m.Paragraph(f"Model: `{formula}`"))
         meta = []
-        for key, label in (("n_subjects", "n"), ("n_events", "events"),
-                           ("concordance", "concordance"), ("AIC", "AIC")):
+        for key, label, digits in (("n_subjects", "n", 0), ("n_events", "events", 0),
+                                   ("tau", "τ", 2), ("concordance", "concordance", 3),
+                                   ("r_squared", "R²", 3), ("AIC", "AIC", 2)):
             if model.get(key) is not None:
-                meta.append(f"{label} = {_num(model[key])}")
+                meta.append(f"{label} = {_num(model[key], digits)}")
+        if model.get("f_statistic") is not None:
+            meta.append(f"robust F = {_num(model['f_statistic'])} "
+                        f"(p = {format_pvalue(model.get('f_p_value'))})")
         if meta:
             blocks.append(m.Paragraph(", ".join(meta) + "."))
+        if model.get("tau") is not None:
+            blocks.append(m.Paragraph(
+                f"Coefficients are differences in mean lifespan up to τ = "
+                f"{_num(model['tau'])}, the restriction time — the shortest "
+                f"follow-up of any treatment unless a script step set it."))
 
         lr = model.get("lr_interaction") or {}
         if lr:
             p = lr.get("p_value")
+            ## "statistic" since the rename; older Run Summaries say lr_stat,
+            ## and anything older still chi2.
+            stat = next((lr[k] for k in ("statistic", "lr_stat", "chi2")
+                         if lr.get(k) is not None), None)
             blocks.append(m.Table(
                 columns=["Test", "chi²", "df", "p", ""],
                 rows=[["Interaction (LR, vs main-effects model)",
-                       _num(lr.get("statistic")), str(lr.get("df", "—")),
+                       _num(stat), str(lr.get("df", "—")),
                        format_pvalue(p), significance_stars(p)]],
                 row_levels=[_level_for_p(p)],
                 caption=("A significant interaction means the effect of one "
@@ -473,7 +569,12 @@ def _section_interaction(result) -> list:
                                 caption=f"Relative to the Reference Levels: {ref_text}.")
         if table is not None:
             if isinstance(coefs, pd.DataFrame) and "p_value" in coefs.columns:
-                table.row_levels = [_level_for_p(v) for v in coefs["p_value"].head(200)]
+                ## The intercept's test (is the reference cell's mean zero?)
+                ## answers no question anyone asked; it is never highlighted.
+                kinds = (coefs["term_type"].head(200).astype(str).tolist()
+                         if "term_type" in coefs.columns else [""] * min(len(coefs), 200))
+                table.row_levels = [m.Level.NEUTRAL if kind == "intercept" else _level_for_p(v)
+                                    for v, kind in zip(coefs["p_value"].head(200), kinds)]
             blocks.append(table)
         ph = model.get("ph_test")
         table = dataframe_table(
@@ -481,29 +582,109 @@ def _section_interaction(result) -> list:
             caption="Small p-values indicate the PH assumption is violated.")
         if table is not None:
             blocks.append(table)
+        ## A fit that warned (a convergence problem, a PH test that could not
+        ## run) printed numbers as confident as any other; the warning is
+        ## part of the result.
+        notes = [str(w) for w in model.get("warnings") or [] if str(w).strip()]
+        if notes:
+            blocks.append(m.Table(
+                columns=["Model warning"], rows=[[w] for w in notes],
+                row_levels=[m.Level.WARN] * len(notes),
+                title=f"{title}: warnings",
+                caption="Raised while fitting this model. Read its numbers "
+                        "with these in mind."))
     return blocks
+
+
+def _parametric_block(models) -> m.Table | None:
+    """The AFT comparison: per treatment × model AIC, the best marked, and a
+    row with the reason for every treatment or family that was not fitted."""
+    from . import statistics
+
+    if not models:
+        return None
+    table = statistics.parametric_table(models)
+    if table is None or not len(table):
+        return None
+    rows: list[list[str]] = []
+    levels: list[m.Level] = []
+    for rec in table.to_dict("records"):
+        note = rec.get("note")
+        note = "" if note is None or (isinstance(note, float) and pd.isna(note)) else str(note)
+        model = rec.get("model")
+        treatment = rec.get("treatment")
+        rows.append([
+            "—" if treatment is None or pd.isna(treatment) else str(treatment),
+            "—" if model is None or (isinstance(model, float) and pd.isna(model)) else str(model),
+            _num(rec.get("aic")), _num(rec.get("delta_aic")),
+            _num(rec.get("median_survival")), note or "",
+        ])
+        if note.startswith("not fitted"):
+            levels.append(m.Level.WARN)
+        elif bool(rec.get("best")) is True:
+            levels.append(m.Level.OK)
+        else:
+            levels.append(m.Level.NEUTRAL)
+    return m.Table(
+        columns=["Treatment", "Model", "AIC", "ΔAIC", "Median (model)", "Note"],
+        rows=rows, row_levels=levels, title="Parametric model fits (AFT)",
+        caption=("Each treatment fitted on its own by Weibull, log-normal and "
+                 "log-logistic AFT models. Compare AIC within a treatment only; "
+                 "ΔAIC is the distance from that treatment's best (lowest AIC, "
+                 "highlighted). A treatment with fewer than 5 individuals or 2 "
+                 "deaths is not fitted, and a family whose fit failed is listed "
+                 "with the reason."))
 
 
 def _section_quality(result) -> list:
     blocks: list = []
-    applied = (result.n_excluded_applied() if hasattr(result, "n_excluded_applied")
-               else len(result.excluded_chambers or set()))
-    excluded = sorted(map(str, result.excluded_chambers or set())) if applied else []
+    removed, listed, ids = exclusion_facts(result)
     group = getattr(result, "exclusion_group", None)
-    if excluded:
+    via = f" via group **{group}**" if group else ""
+    if removed and ids:
         blocks.append(m.Paragraph(
-            f"{len(excluded)} chamber(s) excluded"
-            + (f" via group **{group}**" if group else "")
-            + f": {', '.join(excluded)}."
-        ))
+            f"{removed} chamber(s) excluded{via}: {', '.join(ids)}."))
+    elif removed:
+        ## A Run Summary from before the identities were saved: the count
+        ## is all that is known, and inventing ids for it would be worse.
+        blocks.append(m.Paragraph(
+            f"{removed} chamber(s) excluded{via}. This run recorded only the "
+            f"count — re-run the analysis to list which chambers."))
+    elif listed:
+        blocks.append(m.Paragraph(
+            f"No chambers were excluded from this analysis: the {listed} "
+            f"chamber(s) listed{via} are not in this data file."))
     else:
         blocks.append(m.Paragraph("No chambers were excluded from this analysis."))
-    models = result.parametric_models or {}
-    if models:
-        rows = [[str(k), _num(v.get("AIC")) if isinstance(v, dict) else _num(v)]
-                for k, v in models.items()]
-        blocks.append(m.Table(columns=["Parametric model", "AIC"], rows=rows,
-                              title="Parametric model fits"))
+
+    warnings_ = [str(w) for w in getattr(result, "load_warnings", None) or []]
+    if warnings_:
+        blocks.append(m.Table(
+            columns=["Data file warning"], rows=[[w] for w in warnings_],
+            row_levels=[m.Level.WARN] * len(warnings_),
+            title="Warnings from loading the data file",
+            caption="Reported by the loader, which read the file as it stands "
+                    "— check the data file where they point."))
+
+    threshold = int(getattr(result, "min_n_per_chamber", 0) or 0)
+    small = [dict(c) for c in getattr(result, "small_chambers", None) or []
+             if isinstance(c, dict)]
+    if threshold and small:
+        small.sort(key=lambda c: _chamber_sort_key(c.get("chamber", "")))
+        blocks.append(m.Table(
+            columns=["Chamber", "Treatment", "Individuals"],
+            rows=[[str(c.get("chamber", "")), str(c.get("treatment", "")),
+                   str(c.get("n", ""))] for c in small],
+            row_levels=[m.Level.WARN] * len(small),
+            title=f"Chambers with fewer than {threshold} individuals",
+            caption=(f"Below global.min_n_per_chamber = {threshold}. Flagged "
+                     f"for review, not excluded — exclude a chamber in the QC "
+                     f"viewer if it should not count.")))
+
+    models = getattr(result, "parametric_models", None) or {}
+    block = _parametric_block(models)
+    if block is not None:
+        blocks.append(block)
     return blocks
 
 

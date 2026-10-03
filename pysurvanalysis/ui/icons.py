@@ -63,6 +63,7 @@ _GLYPHS: dict[str, tuple[str, Category | None]] = {
     # Misc
     "warning":       ("fa5s.exclamation-triangle", Category.QC),
     "info":          ("fa5s.info-circle",          Category.NEUTRAL),
+    "help":          ("fa5s.question-circle",      Category.NEUTRAL),
     "play":          ("fa5s.play",                 Category.LOAD),
     "stop":          ("fa5s.stop",                 Category.QC),
     "browse":        ("fa5s.ellipsis-h",           Category.NEUTRAL),

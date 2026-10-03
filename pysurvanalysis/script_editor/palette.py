@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..help.window import with_help
 from ..ui import icon
 from .actions import Action
 
@@ -25,7 +26,7 @@ class Palette(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 8)
         outer.setSpacing(6)
-        outer.addWidget(QLabel("<b>Actions</b>"))
+        outer.addWidget(with_help(QLabel("<b>Actions</b>"), "script-actions"))
         outer.addWidget(QLabel("Double-click to append to the script."))
 
         self._list = QListWidget()
@@ -47,8 +48,7 @@ class Palette(QWidget):
             header.setFlags(Qt.ItemFlag.NoItemFlags)
             self._list.addItem(header)
             for action in sorted(cat_actions, key=lambda a: a.title):
-                suffix = "  ·type" if getattr(action, "from_type", False) else ""
-                item = QListWidgetItem(action.title + suffix)
+                item = QListWidgetItem(action.title)
                 item.setIcon(icon(action.icon_name, category=action.category))
                 item.setToolTip(action.description)
                 item.setData(int(Qt.ItemDataRole.UserRole), action.key)

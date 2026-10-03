@@ -23,7 +23,9 @@ experiment root — into ``data/``, because its loader reads ``data/`` alone.
 There is no such state here: this loader searches ``data/`` and then the
 directory root, so a workbook at either is already found. What is left of
 upstream's blocked-set are the states this loader really does refuse — no
-config, no data, and an ambiguous directory holding several candidate files.
+config, no data, and an ambiguous directory holding several candidate files —
+plus one of its own: a config that is not valid YAML, reported with its line
+rather than raised out of the walk.
 """
 
 from __future__ import annotations
@@ -60,6 +62,9 @@ NO_CONFIG = "no config"
 NO_DATA = "no data"
 AMBIGUOUS = "ambiguous"
 UNREADABLE = "unreadable"
+#: ``survival_config.yaml`` is there but is not valid YAML. Only a person
+#: with an editor can fix it, so no button is offered.
+BAD_CONFIG = "bad config"
 
 #: Which action clears each status. ``None`` means no button can fix it.
 _FIX = {NO_CONFIG: "config", AMBIGUOUS: "data_file"}
@@ -176,7 +181,12 @@ def classify(directory: Path | str) -> MemberLayout:
     ## An explicit `data_file:` settles the question before any search — it is
     ## exactly how the loader resolves an otherwise-ambiguous directory, and
     ## the fix this module offers for one.
-    named = cfgmod.load_config(directory).get("data_file") if configured else None
+    try:
+        named = cfgmod.load_config(directory).get("data_file") if configured else None
+    except ValueError as exc:
+        ## A blocked member, named with the file and line — never an
+        ## exception out of the walk, which would lose every other Project.
+        return _blocked(BAD_CONFIG, str(exc))
     if named:
         candidate = Path(named)
         if not candidate.is_absolute():

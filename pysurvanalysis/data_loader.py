@@ -225,16 +225,26 @@ def build_individual_data(
         No additional right-censored individuals are added.
     excluded_chambers : set or None
         Chamber IDs to skip entirely (sourced from the ChamberFlags sheet).
-        Excluded chambers contribute no rows to the output.
+        Excluded chambers contribute no rows to the output. Compared after
+        :func:`~pysurvanalysis.exclusions.normalize_chamber`, so ``"12.0"``
+        from a hand-edited ``remove_chambers.csv`` removes chamber 12.
+
+    Anything the data contradicts — a chamber whose RawData records more
+    deaths and censorings than its ``SampleSize`` — is listed in
+    ``df.attrs["load_warnings"]`` (a list of str) for the report, rather than
+    passing silently.
     """
-    _excluded = excluded_chambers or set()
+    from .exclusions import normalize_chamber
+
+    _excluded = {normalize_chamber(c) for c in (excluded_chambers or ())}
     rows: list[dict] = []
+    warnings: list[str] = []
 
     # Pre-compute chamber → design info lookup
     design_lookup = design.set_index("Chamber")
 
     for chamber_id, grp in raw.groupby("Chamber"):
-        if chamber_id in _excluded:
+        if normalize_chamber(chamber_id) in _excluded:
             continue
         grp = grp.sort_values("AgeH")
 
@@ -263,6 +273,18 @@ def build_individual_data(
 
             accounted += n_deaths + n_censored
 
+        n0 = pd.to_numeric(pd.Series([chamber_design["SampleSize"]]),
+                           errors="coerce").iloc[0]
+        ## More individuals scored than were set up is a data-entry error in
+        ## RawData or the Design sheet. Either way N is the recorded count,
+        ## and the report must say so: assumed censoring would otherwise add
+        ## a negative number of survivors, i.e. silently nothing.
+        if pd.notna(n0) and accounted > int(n0):
+            warnings.append(
+                f"Chamber {chamber_id}: RawData records {accounted} deaths and "
+                f"censorings but its SampleSize is {int(n0)} — N uses the "
+                f"{accounted} recorded; check the Design sheet or RawData.")
+
         if assume_censored:
             # Remaining individuals are right-censored at the last census time
             n0 = int(chamber_design["SampleSize"])
@@ -284,6 +306,7 @@ def build_individual_data(
     # Order columns nicely
     col_order = ["time", "event", "chamber", "treatment"] + factors
     df = df[col_order].sort_values(["treatment", "time"]).reset_index(drop=True)
+    df.attrs["load_warnings"] = warnings
 
     return df
 
@@ -295,6 +318,27 @@ def build_individual_data(
 def _sanitize_token(value: str) -> str:
     """Lowercase alphanumeric representation of a string (for fuzzy matching)."""
     return "".join(ch.lower() for ch in str(value) if ch.isalnum())
+
+
+def _levels_in_column(column: str, level_tokens: dict) -> list:
+    """The levels a wide column's name mentions.
+
+    Whole words first (``Female_20x_death`` → ``Female``), because a plain
+    substring test finds ``male`` inside ``female`` and calls the column
+    ambiguous. A name with no separators falls back to substrings, dropping
+    any level whose token lies inside another matched level's token.
+    """
+    import re
+
+    words = {w for w in re.split(r"[^0-9a-z]+", str(column).lower()) if w}
+    exact = [lvl for lvl, tok in level_tokens.items() if tok and tok in words]
+    if exact:
+        return exact
+    joined = _sanitize_token(column)
+    found = [lvl for lvl, tok in level_tokens.items() if tok and tok in joined]
+    return [lvl for lvl in found
+            if not any(level_tokens[lvl] != level_tokens[other]
+                       and level_tokens[lvl] in level_tokens[other] for other in found)]
 
 
 def _infer_wide_column_mapping(
@@ -330,8 +374,8 @@ def _infer_wide_column_mapping(
 
     for col in raw_df.columns:
         token = _sanitize_token(col)
-        a_match = [lvl for lvl, lvl_token in level_a_tokens.items() if lvl_token and lvl_token in token]
-        b_match = [lvl for lvl, lvl_token in level_b_tokens.items() if lvl_token and lvl_token in token]
+        a_match = _levels_in_column(col, level_a_tokens)
+        b_match = _levels_in_column(col, level_b_tokens)
 
         event_match = None
         for event_value, aliases in event_tokens.items():
@@ -360,17 +404,28 @@ def _individual_df_from_rows(
     rows: list[dict],
     factors: list[str],
 ) -> pd.DataFrame:
-    """Build a standardised individual-level DataFrame from a list of row dicts."""
+    """Build a standardised individual-level DataFrame from a list of row dicts.
+
+    Rows whose time or event is not a number are dropped — and counted in
+    ``df.attrs["load_warnings"]``, so a column of typos is not a silently
+    smaller N.
+    """
     df = pd.DataFrame(rows)
     df["time"] = pd.to_numeric(df["time"], errors="coerce")
     df["event"] = pd.to_numeric(df["event"], errors="coerce").astype("Int64")
+    n_rows = len(df)
     df = df.dropna(subset=["time", "event"]).copy()
+    warnings: list[str] = []
+    if len(df) < n_rows:
+        warnings.append(f"{n_rows - len(df)} row(s) dropped: their time or event "
+                        f"is blank or not a number.")
     df["event"] = df["event"].astype(int)
     if not set(df["event"].unique()).issubset({0, 1}):
         raise ValueError("Event column must contain only 0 and 1 values.")
     df["treatment"] = df[factors].fillna("").astype(str).agg("/".join, axis=1)
     col_order = ["time", "event", "chamber", "treatment"] + factors
     df = df[col_order].sort_values(["treatment", "time"]).reset_index(drop=True)
+    df.attrs["load_warnings"] = warnings
     return df
 
 
@@ -473,7 +528,9 @@ def load_csv_wide(
             mapping[col] = (lvl_a, lvl_b, int(event))
     else:
         if factor_levels is None:
-            raise ValueError("factor_levels is required when col_mapping is not provided.")
+            raise ValueError(
+                "A wide-format CSV needs input.col_mapping, or input.factor_levels "
+                "(each factor's levels, matched against the column names).")
         mapping = _infer_wide_column_mapping(raw, factor_names, factor_levels)
 
     rows = []

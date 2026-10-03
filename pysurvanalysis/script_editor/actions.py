@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..plotting import SMOOTHED_HAZARD_SIGMA
 from ..ui import Category
 from .spec import Action, ParamSpec, ProjectRunContext, RunContext  # noqa: F401
 
@@ -72,6 +73,59 @@ def _model_inputs(params: dict, ctx: RunContext) -> tuple:
     return data, list(dict.fromkeys(list(factors) + list(selected))), selected
 
 
+def _figure_options(ctx: RunContext) -> dict:
+    """The keywords a quick-look figure takes from its context — the
+    experiment's time label, the Focus's colours and display names — from
+    the same function the Plot Set uses, so a script's figure draws a Focus
+    exactly as the saved ones do."""
+    from .. import plot_registry
+
+    return plot_registry.figure_options(ctx.experiment, ctx.focus)
+
+
+def applied_exclusion_group(ctx: RunContext) -> str | None:
+    """The Exclusion Group this run applies, as its outputs must name it.
+
+    The config's active group, then every group an ``apply_exclusions`` step
+    added, joined with `` + `` — so a report never names one group while
+    counting the chambers of two.
+    """
+    base = ctx.experiment.exclusion_group if ctx.experiment is not None else None
+    names = [base] if base else []
+    names += [g for g in (ctx.script_groups or []) if g not in names]
+    return " + ".join(names) or None
+
+
+def _applied_experiment(ctx: RunContext):
+    """``(experiment, extra_excluded)`` for an analysis this step runs.
+
+    With no extra group, the experiment itself. With one, a shallow copy whose
+    in-memory config names :func:`applied_exclusion_group` — the pipeline
+    stamps the report and the Run Summary from the config, so this is what
+    makes them say what was actually removed — and every chamber removed
+    passed explicitly. A copy, not the experiment: the Hub holds the loaded
+    experiment while the run happens, and must never see the script's group
+    as the config's. The Run Summary then differs from the config, so the
+    Hub shows the result as Out of Date — true: the config alone would not
+    reproduce it.
+    """
+    import copy
+
+    experiment = ctx.experiment
+    extra = set(ctx.excluded_chambers or set())
+    label = applied_exclusion_group(ctx)
+    if label == experiment.exclusion_group:
+        return experiment, extra
+    ## Before the copy: materialising writes and re-reads the config, which
+    ## on the copy would replace the group set below.
+    experiment.materialize_focuses()
+    applied = copy.copy(experiment)
+    config = dict(experiment.config)
+    config["exclusions"] = {"group": label}
+    applied.config = config
+    return applied, set(experiment.excluded_chambers()) | extra
+
+
 # ---------------------------------------------------------------------------
 # Action implementations
 # ---------------------------------------------------------------------------
@@ -86,7 +140,7 @@ def _exec_load_data(params: dict, ctx: RunContext) -> None:
     if ctx.experiment is not None:
         raw, factors = ctx.experiment.load(extra_excluded=ctx.excluded_chambers)
         ctx.raw_data, ctx.factors = raw, factors
-        ctx.exclusion_group = ctx.experiment.exclusion_group
+        ctx.exclusion_group = applied_exclusion_group(ctx)
         group = f" · exclusion group '{ctx.exclusion_group}'" if ctx.exclusion_group else ""
         if ctx.focus is None:
             ctx.data = raw
@@ -145,21 +199,41 @@ def _exec_load_data(params: dict, ctx: RunContext) -> None:
 
 
 def _exec_apply_exclusions(params: dict, ctx: RunContext) -> None:
+    """Add a group's chambers to what this run excludes.
+
+    Every later load and analysis leaves them out, and already-loaded data
+    loses them too — the whole loaded frame as well as the current Focus's
+    slice, or the next Focus cut from it would get them back. The group is
+    recorded beside the config's own (:func:`applied_exclusion_group`), so the
+    run's outputs name both.
+    """
     from .. import exclusions
+    from ..domain.focus import norm_chamber
 
     directory = (ctx.experiment.directory if ctx.experiment is not None
                  else ctx.project_dir)
     if directory is None:
         raise RuntimeError("apply_exclusions: no experiment directory in context")
-    group = params.get("group", "default")
+    group = str(params.get("group") or "default").strip()
     chambers = exclusions.chambers_for_group(directory, group)
     ctx.excluded_chambers = (ctx.excluded_chambers or set()) | chambers
-    ctx.exclusion_group = group
+    if group not in ctx.script_groups:
+        ctx.script_groups.append(group)
+    ctx.exclusion_group = applied_exclusion_group(ctx)
     ctx.log(f"Applied {len(chambers)} chamber exclusion(s) from group '{group}'.")
-    if ctx.data is not None and "chamber" in ctx.data.columns and chambers:
-        before = len(ctx.data)
-        ctx.data = ctx.data[~ctx.data["chamber"].isin(chambers)].reset_index(drop=True)
-        ctx.log(f"  dropped {before - len(ctx.data)} rows from in-memory data.")
+    ## Compared the way the run compares chamber ids, so "12" in the file
+    ## and 12.0 in the data are the same chamber.
+    gone = {norm_chamber(c) for c in chambers}
+    if not gone:
+        return
+    for attr in ("raw_data", "data"):
+        frame = getattr(ctx, attr)
+        if frame is None or "chamber" not in frame.columns:
+            continue
+        keep = ~frame["chamber"].map(norm_chamber).isin(gone)
+        setattr(ctx, attr, frame[keep].reset_index(drop=True))
+        if attr == "data":
+            ctx.log(f"  dropped {int((~keep).sum())} rows from in-memory data.")
 
 
 def _exec_filter(params: dict, ctx: RunContext) -> None:
@@ -186,10 +260,12 @@ def _exec_km(params: dict, ctx: RunContext) -> None:
     if params.get("with_risk_table"):
         fig = plotting.plot_km_with_risk_table(
             ctx.lifetables, show_ci=show_ci, treatments=treatments,
+            **_figure_options(ctx),
         )
     else:
         fig = plotting.plot_km_curves(
             ctx.lifetables, show_ci=show_ci, treatments=treatments,
+            **_figure_options(ctx),
         )
     ctx.figure("KM curves", fig)
 
@@ -201,7 +277,8 @@ def _exec_nelson_aalen(params: dict, ctx: RunContext) -> None:
     if ctx.lifetables is None:
         ctx.lifetables = lifetable.compute_lifetables(ctx.data)
     treatments = _parse_list(params.get("treatments")) or None
-    fig = plotting.plot_nelson_aalen(ctx.lifetables, treatments=treatments)
+    fig = plotting.plot_nelson_aalen(ctx.lifetables, treatments=treatments,
+                                     **_figure_options(ctx))
     ctx.figure("Nelson-Aalen", fig)
 
 
@@ -213,10 +290,12 @@ def _exec_hazard(params: dict, ctx: RunContext) -> None:
         ctx.lifetables = lifetable.compute_lifetables(ctx.data)
     if params.get("smoothed"):
         fig = plotting.plot_smoothed_hazard(
-            ctx.lifetables, sigma=float(params.get("sigma", 2.0)),
+            ctx.lifetables,
+            sigma=float(params.get("sigma", SMOOTHED_HAZARD_SIGMA)),
+            **_figure_options(ctx),
         )
     else:
-        fig = plotting.plot_hazard(ctx.lifetables)
+        fig = plotting.plot_hazard(ctx.lifetables, **_figure_options(ctx))
     ctx.figure("Hazard rate", fig)
 
 
@@ -226,7 +305,8 @@ def _exec_mortality(_params: dict, ctx: RunContext) -> None:
     _require_data(ctx, "mortality")
     if ctx.lifetables is None:
         ctx.lifetables = lifetable.compute_lifetables(ctx.data)
-    ctx.figure("Mortality (qx)", plotting.plot_mortality(ctx.lifetables))
+    ctx.figure("Mortality (qx)", plotting.plot_mortality(
+        ctx.lifetables, **_figure_options(ctx)))
 
 
 def _exec_forest(_params: dict, ctx: RunContext) -> None:
@@ -237,7 +317,8 @@ def _exec_forest(_params: dict, ctx: RunContext) -> None:
     if hr is None or len(hr) == 0:
         ctx.log("forest_plot: no pairwise hazard ratios to display.")
         return
-    ctx.figure("Hazard-ratio forest", plotting.plot_hazard_ratio_forest(hr))
+    ctx.figure("Hazard-ratio forest", plotting.plot_hazard_ratio_forest(
+        hr, display_names=_figure_options(ctx)["display_names"]))
 
 
 def _exec_logrank_pairwise(_params: dict, ctx: RunContext) -> None:
@@ -274,6 +355,7 @@ def _exec_cox(params: dict, ctx: RunContext) -> None:
     include_inter = bool(params.get("include_interactions", True))
     res = statistics.cox_interaction_analysis(
         data, factors=factors, selected_factors=selected,
+        interactions=include_inter,
     )
     if "error" in res:
         ctx.log(f"cox_ph: {res['error']}")
@@ -284,12 +366,13 @@ def _exec_cox(params: dict, ctx: RunContext) -> None:
     )
     coefs = res.get("coefficients")
     if coefs is not None and len(coefs):
-        if not include_inter:
-            coefs = coefs[~coefs["covariate"].astype(str).str.contains(":", regex=False)]
         ctx.log(coefs.to_string(index=False))
     lr = res.get("lr_interaction")
     if lr:
-        ctx.log(f"LR interaction: chi2={lr.get('chi2')}, df={lr.get('df')}, p={lr.get('p_value')}")
+        from ..ai.narrative import lr_statistic
+
+        ctx.log(f"LR interaction: chi2={lr_statistic(lr)}, df={lr.get('df')}, "
+                f"p={lr.get('p_value')}")
 
 
 def _exec_rmst(params: dict, ctx: RunContext) -> None:
@@ -319,11 +402,18 @@ def _exec_parametric(_params: dict, ctx: RunContext) -> None:
 
     _require_data(ctx, "parametric_aft")
     res = statistics.fit_parametric_models(ctx.data)
-    if not res:
+    ## The AIC table, one row per treatment × model, a treatment too small
+    ## to fit carrying its reason — not the raw result dict, whose fitted
+    ## lifelines objects printed as a wall of reprs.
+    table = statistics.parametric_table(res)
+    if table is None or not len(table):
         ctx.log("parametric_aft: no models fit.")
         return
-    for family, summary in res.items():
-        ctx.log(f"{family}: {summary}")
+    ctx.log("Parametric AFT models (AIC — lower is better):")
+    ctx.log(table.to_string(index=False))
+    best = (res or {}).get("best_model_per_treatment") or {}
+    if best:
+        ctx.log("Best model: " + "; ".join(f"{t}: {m}" for t, m in best.items()))
 
 
 def _exec_chamber_qc(params: dict, ctx: RunContext) -> None:
@@ -335,17 +425,28 @@ def _exec_chamber_qc(params: dict, ctx: RunContext) -> None:
         return
     treatment = (params.get("treatment") or "").strip()
     pcl = lifetable.compute_lifetables_per_chamber(ctx.data)
+    label = _figure_options(ctx)["time_label"]
     if not treatment:
-        treatments = sorted(pcl["treatment"].unique())
+        ## In the Focus's display order, as every other figure — not
+        ## alphabetical.
+        from .. import statistics
+
+        present = {str(t) for t in pcl["treatment"].unique()}
+        treatments = [t for t in statistics.treatment_order(ctx.data)
+                      if str(t) in present]
         for t in treatments:
             ctx.figure(
                 f"QC chamber overlay: {t}",
-                plotting.plot_chamber_overlay_km(pcl, t, excluded_chambers=ctx.excluded_chambers),
+                plotting.plot_chamber_overlay_km(
+                    pcl, t, excluded_chambers=ctx.excluded_chambers,
+                    time_label=label),
             )
     else:
         ctx.figure(
             f"QC chamber overlay: {treatment}",
-            plotting.plot_chamber_overlay_km(pcl, treatment, excluded_chambers=ctx.excluded_chambers),
+            plotting.plot_chamber_overlay_km(
+                pcl, treatment, excluded_chambers=ctx.excluded_chambers,
+                time_label=label),
         )
 
 
@@ -362,16 +463,17 @@ def _exec_run_analysis(params: dict, ctx: RunContext) -> None:
             "run_analysis: no experiment loaded — this action needs an "
             "Experiment Directory."
         )
+    experiment, extra = _applied_experiment(ctx)
     if ctx.focus is not None:
-        result = ctx.experiment.run_analysis(
-            focus=ctx.focus, log=ctx.log, extra_excluded=ctx.excluded_chambers,
+        result = experiment.run_analysis(
+            focus=ctx.focus, log=ctx.log, extra_excluded=extra,
         )
         ctx.log(f"Focus {ctx.focus.name!r}: analysis written to {result.output_dir}")
         ctx.result = result
         ctx.data = result.individual_data
         ctx.lifetables = result.lifetables
         return
-    outcome = ctx.experiment.run_all(log=ctx.log, extra_excluded=ctx.excluded_chambers)
+    outcome = experiment.run_all(log=ctx.log, extra_excluded=extra)
     if outcome["failed"]:
         raise RuntimeError("; ".join(f"{n}: {m}" for n, m in outcome["failed"].items()))
 
@@ -389,24 +491,52 @@ def _exec_render_publication_figures(params: dict, ctx: RunContext) -> None:
     ctx.log(f"{len(written)} publication figure(s) in {ctx.experiment.figures_dir}")
 
 
+def _report_copy(result, directory) -> dict:
+    """Write *result*'s report into *directory* as well, named as in its
+    Focus's folder (``report_<focus>.md``, ``<member>_report_<focus>.pdf``)
+    so several Focuses can share one folder."""
+    import copy
+    from pathlib import Path
+
+    from .. import report_builder
+    from ..domain.focus import FocusOutputs
+
+    moved = copy.copy(result)
+    if getattr(result, "focus", None) is not None:
+        moved.outputs = FocusOutputs.at(Path(directory), result.focus)
+    return report_builder.write_experiment_report(moved, Path(directory))
+
+
 def _exec_report(params: dict, ctx: RunContext) -> None:
+    """Write the experiment report — into each Focus's ``analysis/<focus>/``,
+    and also into ``output_dir`` when one is given (it used to be ignored
+    whenever an experiment was loaded)."""
     from .. import report_builder
     from ..pipeline import run_analysis
 
+    out = str(params.get("output_dir") or "").strip() or None
     if ctx.experiment is not None:
-        result = ctx.result
-        if result is None:
+        results = []
+        if ctx.result is None:
+            experiment, extra = _applied_experiment(ctx)
             targets = ([ctx.focus] if ctx.focus is not None
                        else ctx.experiment.focuses())
             for focus in targets:
-                result = ctx.experiment.run_analysis(
-                    focus=focus, log=ctx.log, extra_excluded=ctx.excluded_chambers)
+                result = experiment.run_analysis(
+                    focus=focus, log=ctx.log, extra_excluded=extra)
                 ctx.log(f"Report: {result.output_dir}")
-            if ctx.focus is not None:
-                ctx.result = result
+                results.append(result)
+            if ctx.focus is not None and results:
+                ctx.result = results[-1]
         else:
-            report_builder.write_experiment_report(result, result.output_dir)
-            ctx.log(f"Report: {result.output_dir}")
+            report_builder.write_experiment_report(ctx.result, ctx.result.output_dir)
+            ctx.log(f"Report: {ctx.result.output_dir}")
+            results.append(ctx.result)
+        if out:
+            for result in results:
+                written = _report_copy(result, out)
+                for path in written.values():
+                    ctx.log(f"  also written to {path}")
         return
 
     if ctx.project_dir is None:
@@ -490,8 +620,10 @@ POOL: dict[str, Action] = {
         icon_name="hazard",
         params=(
             ParamSpec("smoothed", "bool", "Smoothed", default=False),
-            ParamSpec("sigma", "float", "Smoothing σ", default=2.0, min=0.1, max=20.0,
-                      enabled_when="smoothed"),
+            ## The Plot Set's own bandwidth, so a script step and the saved
+            ## figure draw the same estimate unless someone asks otherwise.
+            ParamSpec("sigma", "float", "Smoothing σ", default=SMOOTHED_HAZARD_SIGMA,
+                      min=0.1, max=20.0, enabled_when="smoothed"),
         ),
         execute_fn=_exec_hazard,
     ),
@@ -563,8 +695,11 @@ POOL: dict[str, Action] = {
         category=Category.ANALYZE,
         icon_name="rmst",
         params=(
+            ## No "include_interactions": the model always carries every
+            ## pairwise term, and the box changed nothing. A main-effects-only
+            ## fit needs a parameter statistics.rmst_interaction_analysis does
+            ## not have.
             ParamSpec("factors", "factors", "Factors (blank = all)"),
-            ParamSpec("include_interactions", "bool", "Include interactions", default=True),
             ParamSpec("tau", "float", "τ (hours, 0 = auto)", default=0.0, min=0.0, max=1e6),
         ),
         execute_fn=_exec_rmst,
@@ -599,7 +734,8 @@ POOL: dict[str, Action] = {
         category=Category.TOOLS,
         icon_name="report",
         params=(
-            ParamSpec("output_dir", "path", "Output dir (blank = project)"),
+            ParamSpec("output_dir", "path",
+                      "Also write the report to (blank = only analysis/<focus>/)"),
         ),
         execute_fn=_exec_report,
     ),

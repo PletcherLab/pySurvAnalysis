@@ -72,7 +72,12 @@ class RunContext:
     log: Callable[[str], None] = lambda _msg: None
     figure: Callable[[str, Any], None] = lambda _title, _fig: None
     excluded_chambers: set | None = None
+    #: The Exclusion Group(s) this run applies, as its outputs name them —
+    #: the config's active group plus :attr:`script_groups`.
     exclusion_group: str | None = None
+    #: Groups ``apply_exclusions`` steps added on top of the config's, in the
+    #: order applied.
+    script_groups: list = field(default_factory=list)
     assume_censored: bool = True
     input_format: str = "excel"      # excel | csv | csv_long | csv_wide
     wide_factor_names: list[str] | None = None
@@ -102,9 +107,10 @@ class Action:
     params: tuple[ParamSpec, ...] = ()
     execute_fn: Callable[[dict, Any], None] | None = None
     applicable_formats: tuple[str, ...] | None = None
-    #: True when this action is contributed by an Experiment Type rather than
-    #: living in the core registry (used by the palette to group and label).
-    from_type: bool = False
+    ## No "from_type" flag: it was meant to label Type Actions in the palette
+    ## ("·type"), but nothing ever set it — the Factorial Battery belongs to
+    ## every experiment (ADR-0011), and with one Experiment Type the label
+    ## would mark most of the list. The palette groups by category instead.
     #: The key of the Requirement the action needs from its Focus
     #: (``"comparison"``, ``"factorial_plot"``, ``"factorial_model"`` — see
     #: :mod:`pysurvanalysis.domain.focus`). The Hub shows the button only when

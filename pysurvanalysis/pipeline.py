@@ -101,6 +101,17 @@ class AnalysisResult:
         #: in no treatment, so outside the slice, and said so rather than
         #: silently dropped.
         self.unassigned: int = 0
+        #: What the loader noticed about the data file that did not stop it
+        #: (e.g. a chamber recording more deaths than its SampleSize).
+        self.load_warnings: list[str] = []
+        #: The type's ``min_n_per_chamber`` quality threshold (0 = off) and
+        #: ``{"chamber", "treatment", "n"}`` for every chamber of this Focus
+        #: below it — a warning in the report, never an exclusion.
+        self.min_n_per_chamber: int = 0
+        self.small_chambers: list[dict] = []
+        #: The ``omit:`` selection this run applied, ``{"analyses", "plots"}``
+        #: as sorted ids — recorded so a later change to it reads as Out of Date.
+        self.omitted: dict = {}
         # New analysis results
         self.pairwise_gw: pd.DataFrame = pairwise_gw if pairwise_gw is not None else pd.DataFrame()
         self.parametric_models: dict = parametric_models or {}
@@ -118,9 +129,28 @@ class AnalysisResult:
             return False
         return not self.individual_data["chamber"].astype(str).eq("N/A").all()
 
+    def excluded_applied(self) -> list[str]:
+        """The excluded chambers this data file actually held — what the
+        exclusions really removed — as sorted ``str`` ids.
+
+        A listed chamber the file never had removed nothing, and a CSV cohort
+        has no chamber identities to remove; neither is counted, so a stamp
+        never claims an exclusion that could not have happened. The file's
+        chambers come from its design (the Design sheet), which is read
+        before any exclusion.
+        """
+        from .domain.focus import norm_chamber
+
+        listed = {norm_chamber(c) for c in self.excluded_chambers or ()}
+        if not listed or not self.has_chambers():
+            return []
+        held = {norm_chamber(chamber)
+                for chamber, _cell in (getattr(self.design, "chamber_cells", None) or ())}
+        return sorted(str(c) for c in listed & held)
+
     def n_excluded_applied(self) -> int:
-        """How many excluded chambers this input could actually have."""
-        return len(self.excluded_chambers or set()) if self.has_chambers() else 0
+        """How many excluded chambers this input actually held."""
+        return len(self.excluded_applied())
 
     @property
     def focus_record(self) -> dict:
@@ -261,6 +291,9 @@ def run_analysis(
         factor_cols = opts.get("factor_cols", factor_cols)
         factor_names = opts.get("factor_names", factor_names)
         col_mapping = opts.get("col_mapping", col_mapping)
+        ## A wide CSV without a col_mapping is read by matching its column
+        ## names against each factor's levels — which only the config knows.
+        factor_levels = opts.get("factor_levels") or factor_levels
         csv_format = "auto" if fmt in {"auto", "excel"} else fmt
 
     emit(f"Loading {input_path.name}…")
@@ -287,7 +320,7 @@ def run_analysis(
         design = fm.discover_design(input_path, {
             "format": csv_format, "time_col": time_col, "event_col": event_col,
             "factor_cols": factor_cols, "col_mapping": col_mapping,
-            "factor_names": factor_names,
+            "factor_names": factor_names, "factor_levels": factor_levels,
         })
     if focus is None:
         focus = (experiment.active() if experiment is not None else None) \
@@ -384,9 +417,32 @@ def run_analysis(
     if "parametric_aft" in wanted:
         try:
             parametric_models = statistics.fit_parametric_models(individual_data)
-        except Exception:  # noqa: BLE001 - a non-converging AFT fit never kills a run
-            parametric_models = {}
+        except Exception as exc:  # noqa: BLE001 - a non-converging AFT fit never kills a run
+            ## Kept as a reason, not an empty dict: a report with no AFT
+            ## table and no word why reads as "left out", which it was not.
+            parametric_models = {"error": str(exc) or type(exc).__name__}
+            emit(f"  Parametric AFT models could not be fitted: {parametric_models['error']}")
+        for item in parametric_models.get("not_fitted") or []:
+            emit(f"  Parametric AFT — {item['treatment']}"
+                 f"{' · ' + item['model'] if item.get('model') else ''}: {item['reason']}")
     exp_summary = statistics.experiment_summary(individual_data)
+
+    ## What the loader noticed but did not refuse (C's data_loader stamps it
+    ## on the frame; the Focus slice may or may not carry the attrs across).
+    load_warnings: list[str] = []
+    for frame in (individual_data, raw_data):
+        for text in (getattr(frame, "attrs", {}) or {}).get("load_warnings") or []:
+            if str(text) not in load_warnings:
+                load_warnings.append(str(text))
+    for text in load_warnings:
+        emit(f"  Data warning: {text}")
+    ## The type's quality criterion: small chambers are flagged, never
+    ## dropped — whether to exclude one is a QC decision, not the pipeline's.
+    min_n_per_chamber = _min_n_per_chamber(config, exp_type)
+    small_chambers = _small_chambers(individual_data, min_n_per_chamber)
+    if small_chambers:
+        emit(f"  {len(small_chambers)} chamber(s) hold fewer than "
+             f"{min_n_per_chamber} individuals (global.min_n_per_chamber).")
 
     result = AnalysisResult(
         input_file=input_path,
@@ -421,6 +477,10 @@ def run_analysis(
     result.not_applicable = not_applicable
     result.left_out = left_out
     result.unassigned = unassigned
+    result.load_warnings = load_warnings
+    result.min_n_per_chamber = min_n_per_chamber
+    result.small_chambers = small_chambers
+    result.omitted = {"analyses": sorted(omit_analyses), "plots": sorted(omit_plots)}
 
     # ── The Factorial Battery, by Focus Shape ──────────────────────────────
     from .experiment_types.factorial import BATTERY, run_factorial_battery
@@ -459,26 +519,28 @@ def run_analysis(
         pairwise_gw.to_csv(outs.stats("gehan_wilcoxon_pairwise"), index=False)
     if len(hazard_ratios) > 0:
         hazard_ratios.to_csv(outs.stats("hazard_ratios"), index=False)
+    ## One row per treatment × model, the ones not fitted included; an earlier
+    ## run's table goes when this run fitted none, so it never reads as current.
+    aic_table = statistics.parametric_table(parametric_models)
+    aic_path = outs.stats("parametric_aic")
+    if len(aic_table):
+        aic_table.to_csv(aic_path, index=False)
+    else:
+        try:
+            aic_path.unlink(missing_ok=True)
+        except OSError:                 # open in a viewer — stale, not fatal
+            pass
 
     # ── Figures: the Plot Set this Focus earns, in order ──────────────────
     _draw_plot_set(result, omit_plots, omit_analyses,
                    not_applicable=_not_applicable, left_out=_left_out, emit=emit)
-    _drop_stale_outputs(result)
 
     # ── Defined Plots: all of a plot's curves, or none and a reason ────────
-    for plot_name, treatment_list in defined_plots:
-        label = f"Defined Plot {plot_name!r}"
-        if not fm.defined_plot_relevant(focus, design, list(treatment_list)):
-            continue                    # about another slice of the file
-        matched, why = fm.defined_plot_match(focus, design, list(treatment_list),
-                                             populated)
-        if why:
-            _not_applicable(label, why)
-            continue
-        fig_dp = plotting.plot_km_curves(lifetables, treatments=matched, title=plot_name)
-        path = outs.plot(f"defined_{fm.slugify(plot_name)}.png")
-        _plot_and_save(fig_dp, path)
-        result.defined_plot_paths[plot_name] = path
+    _draw_defined_plots(result, defined_plots, populated,
+                        not_applicable=_not_applicable, emit=emit)
+    ## After both: a Defined Plot's figure is as stale as a Plot Set one
+    ## once the sheet drops it or this Focus stops drawing it.
+    _drop_stale_outputs(result)
 
     # ── Report and run summary ─────────────────────────────────────────────
     from . import report_builder
@@ -497,10 +559,11 @@ def render_plots(experiment, focus=None, log=None) -> list[tuple[str, Any]]:
     """Draw the ticked figures of *focus*'s Plot Set — the Plots panel's
     **Generate plots**.
 
-    The same figures, from the same slice, that a full run draws, saved to the
-    same files under ``analysis/<focus>/plots/``; the statistics, the report
-    and the Run Summary stay as the last run wrote them. *focus* defaults to
-    the Active Focus. Returns ``(title, figure)`` pairs, left open for display.
+    The same figures, from the same slice, that a full run draws — the
+    workbook's Defined Plots included — saved to the same files under
+    ``analysis/<focus>/plots/``; the statistics, the report and the Run
+    Summary stay as the last run wrote them. *focus* defaults to the Active
+    Focus. Returns ``(title, figure)`` pairs, left open for display.
     """
     from .domain import focus as fm
     from .domain.experiment import BlockedFocusError, ExperimentError
@@ -541,11 +604,23 @@ def render_plots(experiment, focus=None, log=None) -> list[tuple[str, Any]]:
     if "hazard_ratios" in wanted and shape.admits(fm.COMPARISON)[0]:
         result.hazard_ratios = statistics.pairwise_hazard_ratios(data)
 
+    def _not_applicable(label: str, reason: str) -> None:
+        emit(f"  Not applicable — {label}: {reason}")
+
     figures = _draw_plot_set(
         result, omit_plots, omit_analyses,
-        not_applicable=lambda label, reason: emit(f"  Not applicable — {label}: {reason}"),
+        not_applicable=_not_applicable,
         left_out=lambda _id, label, reason=UNTICKED: emit(f"  Left out — {label}: {reason}"),
         emit=emit, keep=True)
+    ## The Defined Plots too: they are figures, and "Generate plots" that
+    ## left the experimenter's own groupings at whatever the last full run
+    ## drew was a second, quieter way of being out of date.
+    data_file = Path(result.input_file)
+    defined = (data_loader.load_defined_plots(data_file)
+               if data_file.suffix.lower() == ".xlsx" else [])
+    figures += _draw_defined_plots(result, defined, fm.populated_labels(data),
+                                   not_applicable=_not_applicable, emit=emit,
+                                   keep=True)
     emit(f"{len(figures)} figure(s) saved to {outs.plots_dir}")
     return figures
 
@@ -620,13 +695,83 @@ def _draw_plot_set(result: AnalysisResult, omit_plots, omit_analyses, *,
     return drawn
 
 
+def _unplaceable(labels: list[str], design) -> str:
+    """Why a Defined Plot cannot be matched to ANY Focus of this file, or "".
+
+    Relevance (``defined_plot_relevant``) answers "is this plot about this
+    Focus?" — and a plot whose labels are not full treatments of the file, or
+    name nothing it contains, is about none, so it used to vanish from every
+    report without a word. Such a plot is a mistake in the sheet; it is
+    recorded under every Focus instead, since none can claim it.
+    """
+    factors = list(getattr(design, "factors", ()) or ())
+    malformed = [str(t) for t in labels if len(str(t).split("/")) != len(factors)]
+    if malformed:
+        return (f"{', '.join(malformed)} — not a full treatment of this data "
+                f"file (one level of each of {'/'.join(factors) or 'no factors'}, "
+                f"joined by '/')")
+    levels = getattr(design, "levels", {}) or {}
+    known = [t for t in labels
+             if all(p.strip() in levels.get(f, ()) for f, p in
+                    zip(factors, str(t).split("/")))]
+    if not known:
+        return f"none of {', '.join(map(str, labels))} is a treatment of this data file"
+    return ""
+
+
+def _draw_defined_plots(result: AnalysisResult, defined_plots, populated, *,
+                        not_applicable, emit, keep: bool = False) -> list:
+    """Draw the workbook's Defined Plots that are about this run's Focus.
+
+    All of a plot's curves or none and a reason: a plot about another slice
+    of the file is not this Focus's business and is passed over in silence;
+    one about this Focus missing a listed treatment is Not Applicable with
+    the labels named; one that fits no Focus at all (:func:`_unplaceable`) is
+    Not Applicable here too. Drawn like the Plot Set — the Focus's order,
+    display names and colours, the experiment's time label. Shared by a full
+    run and Generate plots; with *keep* the figures come back open as
+    ``(title, figure)`` pairs.
+    """
+    from . import plot_registry
+    from .domain import focus as fm
+
+    focus, design = result.focus, result.design
+    drawn: list = []
+    for plot_name, treatment_list in defined_plots or []:
+        labels = list(treatment_list)
+        label = f"Defined Plot {plot_name!r}"
+        why = _unplaceable(labels, design)
+        if not why:
+            if not fm.defined_plot_relevant(focus, design, labels):
+                continue                    # about another slice of the file
+            matched, why = fm.defined_plot_match(focus, design, labels, populated)
+        if why:
+            not_applicable(label, why)
+            continue
+        fig = plotting.plot_km_curves(
+            result.lifetables, treatments=matched, title=plot_name,
+            **plot_registry.figure_options(result.experiment, focus))
+        path = result.outputs.plot(f"defined_{fm.slugify(plot_name)}.png")
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        result.defined_plot_paths[plot_name] = path
+        if keep:
+            drawn.append((f"Defined Plot — {plot_name} — {focus.name}", fig))
+        else:
+            import matplotlib.pyplot as mpl_plt
+
+            mpl_plt.close(fig)
+    if result.defined_plot_paths:
+        emit(f"  {len(result.defined_plot_paths)} Defined Plot(s) drawn.")
+    return drawn
+
+
 def _drop_stale_outputs(result: AnalysisResult) -> None:
     """Delete what an earlier run of this Focus wrote and this one did not —
     a figure or table since left out reads as current in the folder.
 
-    Only names this pipeline writes are touched (a Plot Set figure, a
-    comparison table, a factorial model's tables), never a file someone else
-    put there.
+    Only names this pipeline writes are touched (a Plot Set figure, a Defined
+    Plot's ``defined_*`` figure, a comparison table, a factorial model's
+    tables), never a file someone else put there.
     """
     from . import plot_registry
 
@@ -640,6 +785,12 @@ def _drop_stale_outputs(result: AnalysisResult) -> None:
     for plot_id in plot_registry.available():
         if plot_id not in result.figure_paths:
             _unlink(outs.plot(plot_registry.get(plot_id).filename))
+    ## A Defined Plot renamed or removed from the sheet, or one this Focus
+    ## now finds Not Applicable, left its old PNG looking current.
+    drawn = {Path(p).name for p in (result.defined_plot_paths or {}).values()}
+    for path in outs.plots_dir.glob(f"defined_*_{outs.slug}.png"):
+        if path.name not in drawn:
+            _unlink(path)
     for stem, frame in (("logrank_pairwise", result.pairwise_lr),
                         ("gehan_wilcoxon_pairwise", result.pairwise_gw),
                         ("hazard_ratios", result.hazard_ratios)):
@@ -659,6 +810,8 @@ def _jsonable(value):
     if isinstance(value, dict):
         return {k: _jsonable(v) for k, v in value.items()
                 if not hasattr(v, "to_csv")}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
     if hasattr(value, "item"):
         try:
             return value.item()
@@ -669,23 +822,76 @@ def _jsonable(value):
     return str(value)
 
 
+def _min_n_per_chamber(config: dict, exp_type) -> int:
+    """``global.min_n_per_chamber`` with the type's default; 0 (off) when it
+    is missing or malformed — Validate YAMLs is where a bad value is named."""
+    value = (config.get("global") or {}).get("min_n_per_chamber")
+    if value is None:
+        value = (getattr(exp_type, "default_global", None) or {}).get("min_n_per_chamber", 0)
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _small_chambers(individual_data: pd.DataFrame, threshold: int) -> list[dict]:
+    """``{"chamber", "treatment", "n"}`` for each chamber with fewer than
+    *threshold* individuals (none when the threshold is 0 or the data has no
+    chamber identities)."""
+    if not threshold or individual_data is None or "chamber" not in individual_data:
+        return []
+    chambers = individual_data["chamber"].astype(str)
+    if chambers.eq("N/A").all():
+        return []
+    rows: list[dict] = []
+    for chamber, grp in individual_data.groupby(chambers, sort=False):
+        if chamber == "N/A" or len(grp) >= threshold:
+            continue
+        treatments = list(dict.fromkeys(grp["treatment"].astype(str))) \
+            if "treatment" in grp else []
+        rows.append({"chamber": str(chamber), "treatment": ", ".join(treatments),
+                     "n": int(len(grp))})
+    return rows
+
+
+def _sha256(path: Path) -> str | None:
+    """The data file's content hash — lets a later reader tell an edited
+    workbook from the one these results came from (``None`` if unreadable)."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(block)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
 def _write_run_summary(result: AnalysisResult, output_dir: Path) -> None:
     """A small JSON the Hub and the Project Report read instead of re-analysing.
 
-    The Exclusion Group and the number of chambers it removed are stamped here
+    The Exclusion Group and the chambers it actually removed are stamped here
     and on every report, so a saved result always says what was excluded. So is
     the Focus's **analytic definition** — factors, ordered levels, Reference
     Levels — which is what lets a later reader notice the Focus has changed
-    since and call these results **Out of Date** rather than present them.
+    since and call these results **Out of Date** rather than present them;
+    the data file's hash, the censoring policy and the run's ``omit:``
+    selection are recorded for the same comparison.
     """
     import json
     from datetime import datetime
 
     es = result.experiment_summary or {}
     design = result.design
+    omitted = getattr(result, "omitted", None) or {}
     payload = {
         "analyzed_at": datetime.now().isoformat(timespec="seconds"),
         "input_file": result.input_file.name,
+        "data_sha256": _sha256(result.input_file),
         "experiment_type": getattr(result.experiment_type, "key", "standard_lifespan"),
         "focus": result.focus_record,
         "factors": list(result.factors),
@@ -699,8 +905,17 @@ def _write_run_summary(result: AnalysisResult, output_dir: Path) -> None:
         "time_max": es.get("time_max"),
         "assume_censored": bool(result.assume_censored),
         "exclusion_group": getattr(result, "exclusion_group", None),
+        ## The chambers really removed (listed AND held by the file), as
+        ## sorted str ids — the identities the reports print, and what a
+        ## later reader compares against the group's current list.
+        "excluded_chambers": result.excluded_applied(),
         "n_excluded": result.n_excluded_applied(),
         "n_excluded_listed": len(result.excluded_chambers or set()),
+        "omit": {"analyses": sorted(omitted.get("analyses") or ()),
+                 "plots": sorted(omitted.get("plots") or ())},
+        "load_warnings": [str(w) for w in getattr(result, "load_warnings", None) or []],
+        "min_n_per_chamber": int(getattr(result, "min_n_per_chamber", 0) or 0),
+        "small_chambers": list(getattr(result, "small_chambers", None) or []),
         "figures": {k: str(v.name) for k, v in
                     getattr(result, "figure_paths", {}).items()},
         "defined_plots": {k: str(v.name) for k, v in
@@ -708,6 +923,9 @@ def _write_run_summary(result: AnalysisResult, output_dir: Path) -> None:
         "not_applicable": list(result.not_applicable or []),
         "left_out": list(getattr(result, "left_out", None) or []),
         "omnibus_lr": _jsonable(result.omnibus_lr),
+        ## One record per treatment × AFT family, the ones not fitted (and
+        ## why) included; [] when the analysis was left out.
+        "parametric_models": statistics.parametric_records(result.parametric_models),
         # Enough of each factorial model to rebuild its report section from
         # disk; the coefficient tables sit beside it as CSVs.
         "factorial_models": [
@@ -722,6 +940,13 @@ def _write_run_summary(result: AnalysisResult, output_dir: Path) -> None:
                 "AIC": mdl.get("AIC"),
                 "reference": mdl.get("reference"),
                 "lr_interaction": _jsonable(mdl.get("lr_interaction")),
+                # RMST only (None for Cox): the restriction time and the fit.
+                "tau": _jsonable(mdl.get("tau")),
+                "rmst_overall": _jsonable(mdl.get("rmst_overall")),
+                "r_squared": _jsonable(mdl.get("r_squared")),
+                "f_statistic": _jsonable(mdl.get("f_statistic")),
+                "f_p_value": _jsonable(mdl.get("f_p_value")),
+                "warnings": [str(w) for w in mdl.get("warnings") or []],
             }
             for mdl in (result.cox_analyses or [])
         ],
@@ -729,10 +954,3 @@ def _write_run_summary(result: AnalysisResult, output_dir: Path) -> None:
     target = result.outputs.summary if result.outputs is not None \
         else Path(output_dir) / "run_summary.json"
     target.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
-
-
-def _plot_and_save(fig, path: Path, dpi: int = 150) -> None:
-    """Save a matplotlib figure and close it."""
-    import matplotlib.pyplot as mpl_plt
-    fig.savefig(path, dpi=dpi, bbox_inches="tight")
-    mpl_plt.close(fig)

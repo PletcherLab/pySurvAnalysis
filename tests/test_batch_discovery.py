@@ -118,6 +118,8 @@ def test_symlinked_directories_are_not_followed(tmp_path):
     assert any("symlink" in why for _key, why in found["skipped"])
 
 
+@pytest.mark.skipif(os.name == "nt", reason="chmod cannot make a directory "
+                    "unreadable on Windows; the directory stays listable")
 def test_an_unreadable_directory_is_reported_not_silently_dropped(tmp_path):
     """It may hold a whole Project; pruning it quietly understates the Batch."""
     _project(tmp_path / "ProjA")
@@ -130,6 +132,26 @@ def test_an_unreadable_directory_is_reported_not_silently_dropped(tmp_path):
         assert any(key == "locked" for key, _why in found["skipped"])
     finally:
         locked.chmod(0o755)
+
+
+def test_a_directory_the_walk_cannot_list_is_reported(tmp_path, monkeypatch):
+    """The same guarantee on every platform: Windows has no chmod that makes a
+    directory unlistable, so the refusal is simulated where the walk lists."""
+    from pysurvanalysis.domain import batch as batch_mod
+
+    _project(tmp_path / "ProjA")
+    (tmp_path / "locked").mkdir()
+    real_scandir = os.scandir
+
+    def _scandir(path):
+        if os.path.basename(os.fspath(path)) == "locked":
+            raise PermissionError(13, "Permission denied", os.fspath(path))
+        return real_scandir(path)
+
+    monkeypatch.setattr(batch_mod.os, "scandir", _scandir)
+    found = discover(tmp_path)
+    assert [p.key for p in found["projects"]] == ["ProjA"]
+    assert any(key == "locked" for key, _why in found["skipped"])
 
 
 def test_a_structural_predicate_never_raises_on_an_unreadable_directory(tmp_path):

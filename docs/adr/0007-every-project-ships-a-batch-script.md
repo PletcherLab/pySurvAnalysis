@@ -55,8 +55,8 @@ what the Batch Run would do there.
 
 `save_config` now applies the Project rule to `survival_config.yaml`: a config
 with no `scripts:` key at all is seeded with an Experiment Script named
-**`Standard analysis`** (one `run_analysis` step, with a `notes:` line saying
-where it came from) on its way to disk; an authored block — an empty list
+**`Standard analysis`** (a `run_in_focuses` step then `run_analysis`, so
+every Focus is analysed, with a `notes:` line saying where it came from) on its way to disk; an authored block — an empty list
 included — is never touched. Because every creation path (scaffold, adopt,
 upgrade, the Hub and Preflight repairs) writes through `save_config`, there is
 one rule and no second scaffolding path. The upgrade plan lists the seed as an
@@ -68,3 +68,12 @@ Resolution of a named Experiment Script is unchanged — the Project's central
 `experiment_scripts:`, then the member's own `scripts:`, then the built-ins —
 so a central recipe still serves every member, and a config written before
 this amendment still runs from the built-in until its next write seeds it.
+
+**Amendment (Hub designation, one resolution rule).** The Hub's Batch script
+picker now writes the choice to `batch.yaml` as `script:`; choosing "each
+project's own" removes the key and never creates the file, so a Batch nobody
+designated keeps having no `batch.yaml`. The resolution rule above — central
+`experiment_scripts:`, then the member's own `scripts:`, then the built-ins —
+now also governs the Hub's Experiment scripts card and
+`SurvivalExperiment.scripts()`, which had listed the member's own first: the
+script a button runs is the script a Batch Run would run.

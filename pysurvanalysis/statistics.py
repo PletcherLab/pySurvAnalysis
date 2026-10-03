@@ -1,20 +1,83 @@
 """Statistical tests for survival analysis.
 
 Currently implements:
-* Log-rank test (pairwise and omnibus/multi-group)
-* Restricted mean survival time (RMST) differences
-* Hazard ratio estimates
+* Log-rank and Gehan-Wilcoxon tests (pairwise and omnibus/multi-group)
+* Pairwise hazard ratio estimates (log-rank O/E)
+* The Factorial Battery's models — Cox main effects vs interactions, and the
+  RMST pseudo-value regression
+* Parametric AFT fits per treatment
 
-Designed for extension with Cox proportional hazards, interaction tests, etc.
+Treatments are always taken in **display order** (:func:`treatment_order`) —
+the Focus's level order, never alphabetical — so a pairwise table, a hazard
+ratio's direction and every figure agree about which treatment comes first.
 """
 
 from __future__ import annotations
 
+import warnings
+from contextlib import contextmanager
 from itertools import combinations
 
 import numpy as np
 import pandas as pd
 from scipy import stats
+
+
+# ---------------------------------------------------------------------------
+# Display order
+# ---------------------------------------------------------------------------
+
+def treatment_order(frame: pd.DataFrame) -> list[str]:
+    """The treatments of *frame* in display order, as text.
+
+    The ``treatment`` column's category order when it is categorical — which
+    :func:`~pysurvanalysis.domain.focus.apply_focus` makes it, in the Focus's
+    level order — otherwise the order of first appearance. Only labels with at
+    least one row are returned. Never alphabetical: sorting would put
+    ``mDilp235bx`` before ``wCS`` in every table and flip the direction of
+    every pairwise hazard ratio, whatever order the Focus declared.
+    """
+    if frame is None or "treatment" not in getattr(frame, "columns", ()) or not len(frame):
+        return []
+    col = frame["treatment"]
+    present = list(dict.fromkeys(col.dropna().astype(str)))
+    if isinstance(col.dtype, pd.CategoricalDtype):
+        seen = set(present)
+        return [str(c) for c in col.cat.categories if str(c) in seen]
+    return present
+
+
+def treatment_groups(frame: pd.DataFrame) -> list[tuple[str, pd.DataFrame]]:
+    """``(label, rows)`` per treatment, in :func:`treatment_order`."""
+    if frame is None or "treatment" not in getattr(frame, "columns", ()) or not len(frame):
+        return []
+    labels = frame["treatment"].astype(str)
+    return [(t, frame[labels == t]) for t in treatment_order(frame)]
+
+
+@contextmanager
+def _collect_warnings(sink: list[str]):
+    """Record what a model fit warns about into *sink*, deduplicated.
+
+    A fit that "converged" with a warning (a near-singular design, a halted
+    Newton step, a PH test that could not run) produces numbers that look as
+    sound as any other; the warning is part of the result and travels with
+    it into the model dict, the Run Summary and the report. Library
+    housekeeping (deprecations, future-version notices) is not. Kept even
+    when the fit then fails, since the warning often says why.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            yield
+        finally:
+            for w in caught:
+                if issubclass(w.category, (DeprecationWarning, PendingDeprecationWarning,
+                                           FutureWarning)):
+                    continue
+                lines = str(w.message).strip().splitlines()
+                if lines and lines[0] not in sink:
+                    sink.append(lines[0])
 
 
 def _build_count_table(
@@ -110,9 +173,9 @@ def logrank_multi(data: pd.DataFrame) -> dict:
 
     Returns
     -------
-    dict with keys: chi2, p_value, df, groups
+    dict with keys: chi2, p_value, df, groups (in display order)
     """
-    groups = sorted(data["treatment"].unique())
+    groups = treatment_order(data)
     k = len(groups)
     if k < 2:
         return {"chi2": 0.0, "p_value": 1.0, "df": 0, "groups": groups}
@@ -163,9 +226,10 @@ def pairwise_logrank(data: pd.DataFrame) -> pd.DataFrame:
     """Run log-rank tests for every pairwise combination of treatments.
 
     Returns a DataFrame with one row per pair, including Bonferroni-corrected
-    p-values.
+    p-values. Pairs follow display order: ``group1`` is the treatment earlier
+    in :func:`treatment_order`.
     """
-    treatments = sorted(data["treatment"].unique())
+    treatments = treatment_order(data)
     results = []
 
     for g1, g2 in combinations(treatments, 2):
@@ -233,8 +297,13 @@ def hazard_ratio_estimate(
 
 
 def pairwise_hazard_ratios(data: pd.DataFrame) -> pd.DataFrame:
-    """Compute hazard ratio estimates for all pairwise treatment comparisons."""
-    treatments = sorted(data["treatment"].unique())
+    """Compute hazard ratio estimates for all pairwise treatment comparisons.
+
+    Each ratio is ``group1`` over ``group2``, where ``group1`` is the treatment
+    earlier in display order (:func:`treatment_order`) — so the direction of
+    every ratio follows the Focus's level order, not the alphabet.
+    """
+    treatments = treatment_order(data)
     results = []
     for g1, g2 in combinations(treatments, 2):
         results.append(hazard_ratio_estimate(data, g1, g2))
@@ -245,6 +314,7 @@ def cox_interaction_analysis(
     data: pd.DataFrame,
     factors: list[str],
     selected_factors: list[str] | None = None,
+    interactions: bool = True,
 ) -> dict:
     """Fit Cox PH model and return interaction test + PH assumption test.
 
@@ -264,6 +334,8 @@ def cox_interaction_analysis(
     data : DataFrame with ``time``, ``event``, and factor columns.
     factors : all available factor column names.
     selected_factors : which factors to include (default: all).
+    interactions : ``False`` fits the main-effects model alone — its
+        coefficients, its PH test, and no LR interaction test.
 
     Returns
     -------
@@ -277,9 +349,13 @@ def cox_interaction_analysis(
         AIC               — AIC of the interaction model
         coefficients      — DataFrame of covariate results
         formula           — human-readable formula for the interaction model
-        warnings          — list of warnings
+        warnings          — what the fits and the PH test warned about (a
+                            convergence problem, a PH test that could not
+                            run) — reported with the model, never dropped
         lr_interaction    — dict with LR omnibus test results (or None if no
-                            interaction terms possible)
+                            interaction terms possible); the χ² is
+                            ``statistic`` (``lr_stat`` is kept for readers of
+                            summaries written before the rename)
         ph_test           — DataFrame of Schoenfeld residuals test results
                             (columns: covariate, test_statistic, p_value)
     """
@@ -306,7 +382,7 @@ def cox_interaction_analysis(
 
     interaction_cols: list[str] = []
     inter_df = main_df.copy()
-    for i, f1 in enumerate(selected_factors):
+    for i, f1 in enumerate(selected_factors if interactions else []):
         for f2 in selected_factors[i + 1:]:
             d1 = pd.get_dummies(data[f1], prefix=f1, drop_first=True, dtype=float)
             d2 = pd.get_dummies(data[f2], prefix=f2, drop_first=True, dtype=float)
@@ -326,28 +402,35 @@ def cox_interaction_analysis(
     # ── Fit main-effects model ─────────────────────────────────────────────
     cph_main = CoxPHFitter()
     try:
-        cph_main.fit(main_df, duration_col="time", event_col="event", show_progress=False)
+        with _collect_warnings(warnings_list):
+            cph_main.fit(main_df, duration_col="time", event_col="event", show_progress=False)
     except Exception as e:
         return {
             "model_type": "cox_ph",
             "factors_used": selected_factors,
             "error": f"Main-effects model failed: {e}",
             "formula": formula,
-            "warnings": [str(e)],
+            "warnings": warnings_list + [str(e)],
         }
 
     # ── Fit interaction model ──────────────────────────────────────────────
-    cph = CoxPHFitter()
-    try:
-        cph.fit(inter_df, duration_col="time", event_col="event", show_progress=False)
-    except Exception as e:
-        return {
-            "model_type": "cox_ph",
-            "factors_used": selected_factors,
-            "error": f"Interaction model failed: {e}",
-            "formula": formula,
-            "warnings": [str(e)],
-        }
+    ## With no interaction terms (one factor, or interactions off) the two
+    ## models are the same model; fitting it twice only doubles the warnings.
+    cph = cph_main
+    if interaction_cols:
+        cph = CoxPHFitter()
+        try:
+            with _collect_warnings(warnings_list):
+                cph.fit(inter_df, duration_col="time", event_col="event",
+                        show_progress=False)
+        except Exception as e:
+            return {
+                "model_type": "cox_ph",
+                "factors_used": selected_factors,
+                "error": f"Interaction model failed: {e}",
+                "formula": formula,
+                "warnings": warnings_list + [str(e)],
+            }
 
     # ── LR omnibus interaction test ────────────────────────────────────────
     lr_interaction: dict | None = None
@@ -358,6 +441,9 @@ def cox_interaction_analysis(
         lr_df = len(interaction_cols)
         lr_p = float(scipy_chi2.sf(lr_stat, df=lr_df))
         lr_interaction = {
+            ## "statistic" is the name every reader looks for; "lr_stat" stays
+            ## for anything still reading summaries written before it.
+            "statistic": round(lr_stat, 4),
             "lr_stat": round(lr_stat, 4),
             "df": lr_df,
             "p_value": lr_p,
@@ -370,7 +456,8 @@ def cox_interaction_analysis(
     # ── Proportional-hazards assumption test (Schoenfeld residuals) ────────
     ph_test_df: pd.DataFrame | None = None
     try:
-        ph_result = proportional_hazard_test(cph, inter_df, time_transform="rank")
+        with _collect_warnings(warnings_list):
+            ph_result = proportional_hazard_test(cph, inter_df, time_transform="rank")
         ph_summary = ph_result.summary.copy().reset_index()
         # Normalise column names across lifelines versions
         ph_summary.columns = [c.lower().replace(" ", "_") for c in ph_summary.columns]
@@ -399,7 +486,10 @@ def cox_interaction_analysis(
         "p": "p_value",
     })
     summary_df.index.name = "covariate"
-    summary_df = summary_df.reset_index()
+    ## lifelines' "cmp to" is the null value each β is tested against — 0 in
+    ## every row of every model here, so a column of zeros the report would
+    ## print beside the p-values.
+    summary_df = summary_df.drop(columns=["cmp to"], errors="ignore").reset_index()
 
     term_types = [
         "interaction" if ":" in cov else "main_effect"
@@ -450,7 +540,8 @@ def rmst_interaction_analysis(
     factors : all available factor column names.
     selected_factors : which factors to include (default: all).
     tau : restriction time.  Defaults to the minimum of the per-treatment
-          maximum observed times (so every group is fully observed).
+          maximum observed times (so every group is fully observed) — the
+          same common τ as the Mean survival table.
 
     Returns
     -------
@@ -458,10 +549,14 @@ def rmst_interaction_analysis(
     both can be rendered by the same UI / report code.  Key differences:
 
     * ``model_type`` is ``"rmst_pseudo"``
-    * ``coefficients`` has ``coef`` in *hours* (not log-hazard), and
-      ``HR`` / ``HR_lo`` / ``HR_hi`` are set to NaN (not applicable).
+    * ``tau`` is the restriction time used, ``r_squared`` / ``f_statistic`` /
+      ``f_p_value`` describe the regression
+    * ``coefficients`` has ``coef`` in the data's time unit (not
+      log-hazard), and ``HR`` / ``HR_lo`` / ``HR_hi`` are NaN (not applicable).
     """
     import statsmodels.api as sm
+
+    from .lifetable import _km_survival, _step_area, common_tau
 
     if selected_factors is None:
         selected_factors = list(factors)
@@ -471,27 +566,37 @@ def rmst_interaction_analysis(
 
     # ── 1. Determine restriction time ────────────────────────────────
     if tau is None:
-        tau = data.groupby("treatment")["time"].max().min()
+        tau = common_tau(data)
+    tau = float(tau)
 
-    # ── 2. Compute overall RMST via KM ───────────────────────────────
-    from .lifetable import _lifetable_one_treatment
+    # ── 2. RMST of the whole sample: the exact area under the KM step
+    #       function up to τ (trapezoids would understate every step) ──
+    times = data["time"].to_numpy(dtype=float)
+    events = data["event"].to_numpy(dtype=float)
 
-    def _rmst(df: pd.DataFrame, t: float) -> float:
-        lt = _lifetable_one_treatment(df)
-        lt = lt[lt["time"] <= t]
-        times = np.concatenate([[0.0], lt["time"].values])
-        surv = np.concatenate([[1.0], lt["km_lx"].values])
-        return float(np.trapezoid(surv, times))
+    def _rmst(t: np.ndarray, e: np.ndarray) -> float:
+        steps, surv = _km_survival(t, e)
+        return _step_area(steps, surv, tau)
 
-    theta_all = _rmst(data, tau)
+    theta_all = _rmst(times, events)
     n = len(data)
 
     # ── 3. Jackknife pseudo-values ───────────────────────────────────
+    ## Leaving out either of two individuals with the same (time, event)
+    ## gives the same curve, so each distinct pair is refitted once — census
+    ## data ties heavily, which makes this the difference between seconds
+    ## and minutes on a large Focus.
     pseudo = np.empty(n)
-    idx = data.index.values
-    for j, ix in enumerate(idx):
-        loo = data.drop(ix)
-        theta_loo = _rmst(loo, tau)
+    loo_cache: dict[tuple[float, float], float] = {}
+    keep = np.ones(n, dtype=bool)
+    for j in range(n):
+        key = (times[j], events[j])
+        theta_loo = loo_cache.get(key)
+        if theta_loo is None:
+            keep[j] = False
+            theta_loo = _rmst(times[keep], events[keep])
+            keep[j] = True
+            loo_cache[key] = theta_loo
         pseudo[j] = n * theta_all - (n - 1) * theta_loo
 
     # ── 4. Build design matrix ───────────────────────────────────────
@@ -524,14 +629,18 @@ def rmst_interaction_analysis(
 
     # ── 5. Fit OLS with robust (HC1) standard errors ────────────────
     try:
-        model = sm.OLS(pseudo, X).fit(cov_type="HC1")
+        with _collect_warnings(warnings_list):
+            model = sm.OLS(pseudo, X).fit(cov_type="HC1")
+            fvalue = float(np.squeeze(model.fvalue))
+            f_pvalue = float(np.squeeze(model.f_pvalue))
     except Exception as e:
         return {
             "model_type": "rmst_pseudo",
             "factors_used": selected_factors,
             "error": str(e),
             "formula": formula,
-            "warnings": [str(e)],
+            "tau": round(tau, 4),
+            "warnings": warnings_list + [str(e)],
         }
 
     # ── 6. Package results ───────────────────────────────────────────
@@ -563,11 +672,11 @@ def rmst_interaction_analysis(
         "factors_used": selected_factors,
         "n_subjects": n,
         "n_events": int(data["event"].sum()),
-        "tau": round(tau, 2),
-        "rmst_overall": round(theta_all, 2),
-        "r_squared": round(model.rsquared, 4),
-        "f_statistic": round(model.fvalue, 4) if np.isfinite(model.fvalue) else None,
-        "f_p_value": round(model.f_pvalue, 6) if np.isfinite(model.f_pvalue) else None,
+        "tau": round(tau, 4),
+        "rmst_overall": round(theta_all, 4),
+        "r_squared": round(float(model.rsquared), 4),
+        "f_statistic": round(fvalue, 4) if np.isfinite(fvalue) else None,
+        "f_p_value": f_pvalue if np.isfinite(f_pvalue) else None,
         "coefficients": coef_df,
         "formula": formula,
         "warnings": warnings_list,
@@ -581,7 +690,7 @@ def rmst_interaction_analysis(
 def summary_statistics(data: pd.DataFrame) -> pd.DataFrame:
     """Summary counts per treatment: N, deaths, censored, % censored."""
     records = []
-    for treatment, grp in data.groupby("treatment"):
+    for treatment, grp in treatment_groups(data):
         n = len(grp)
         deaths = int(grp["event"].sum())
         censored = n - deaths
@@ -657,9 +766,9 @@ def pairwise_gehan_wilcoxon(data: pd.DataFrame) -> pd.DataFrame:
     """Run Gehan-Wilcoxon tests for every pairwise combination of treatments.
 
     Returns a DataFrame with one row per pair, including Bonferroni-corrected
-    p-values.
+    p-values. Pairs follow display order, as :func:`pairwise_logrank`.
     """
-    treatments = sorted(data["treatment"].unique())
+    treatments = treatment_order(data)
     results = []
 
     for g1, g2 in combinations(treatments, 2):
@@ -672,6 +781,11 @@ def pairwise_gehan_wilcoxon(data: pd.DataFrame) -> pd.DataFrame:
         df["p_bonferroni"] = (df["p_value"] * n_tests).clip(upper=1.0)
         df["significant_0.05"] = df["p_bonferroni"] < 0.05
     return df
+
+
+#: Below these a treatment gets no parametric fit (and a row saying why).
+AFT_MIN_INDIVIDUALS = 5
+AFT_MIN_DEATHS = 2
 
 
 def fit_parametric_models(
@@ -693,13 +807,20 @@ def fit_parametric_models(
     -------
     dict with keys:
         results_by_treatment : dict of treatment → list of model dicts
-        aic_comparison : DataFrame with AIC for each model/treatment
+        aic_comparison : DataFrame with AIC for each fitted model/treatment
+                         (plus ``delta_aic`` from the treatment's best, and
+                         ``best``)
         best_model_per_treatment : dict of treatment → best model name
+        not_fitted : ``{"treatment", "model", "reason"}`` for every treatment
+                     too small to fit (``model`` None) and every fit that
+                     failed — said, never silently missing
+        table : :func:`parametric_table` of the above — every treatment ×
+                model, fitted or not, in display order
     """
     from lifelines import WeibullAFTFitter, LogNormalAFTFitter, LogLogisticAFTFitter
 
     if treatments is None:
-        treatments = sorted(data["treatment"].unique())
+        treatments = treatment_order(data)
 
     model_classes = {
         "Weibull": WeibullAFTFitter,
@@ -709,10 +830,24 @@ def fit_parametric_models(
 
     results_by_treatment: dict[str, list[dict]] = {}
     aic_records = []
+    not_fitted: list[dict] = []
+    labels = data["treatment"].astype(str)
 
     for treatment in treatments:
-        grp = data[data["treatment"] == treatment][["time", "event"]].copy()
-        if len(grp) < 5 or grp["event"].sum() < 2:
+        grp = data[labels == str(treatment)][["time", "event"]].copy()
+        ## Two parameters from fewer than five individuals or one death is
+        ## not an estimate. Recorded, so the report says why the treatment
+        ## has no row rather than leaving it to look forgotten.
+        if len(grp) < AFT_MIN_INDIVIDUALS:
+            not_fitted.append({"treatment": treatment, "model": None,
+                               "reason": f"only {len(grp)} individual(s) — "
+                                         f"needs at least {AFT_MIN_INDIVIDUALS}"})
+            continue
+        n_deaths = int(grp["event"].sum())
+        if n_deaths < AFT_MIN_DEATHS:
+            not_fitted.append({"treatment": treatment, "model": None,
+                               "reason": f"only {n_deaths} death(s) — "
+                                         f"needs at least {AFT_MIN_DEATHS}"})
             continue
 
         treatment_results = []
@@ -721,6 +856,8 @@ def fit_parametric_models(
                 model = ModelClass()
                 model.fit(grp, duration_col="time", event_col="event")
                 aic = float(model.AIC_)
+                if not np.isfinite(aic):
+                    raise ValueError("the fit did not converge (non-finite AIC)")
                 params = model.params_.to_dict() if hasattr(model.params_, "to_dict") else {}
                 median_t = float(model.median_survival_time_) if hasattr(model, "median_survival_time_") else np.nan
                 treatment_results.append({
@@ -738,60 +875,108 @@ def fit_parametric_models(
                     "log_likelihood": round(float(model.log_likelihood_), 4),
                     "median_survival": round(median_t, 2) if np.isfinite(median_t) else np.nan,
                 })
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 - one failed family is a row, not a crash
+                message = str(exc).strip().splitlines()
+                not_fitted.append({"treatment": treatment, "model": model_name,
+                                   "reason": f"fit failed: "
+                                             f"{message[0] if message else type(exc).__name__}"})
 
         results_by_treatment[treatment] = treatment_results
 
-    aic_df = pd.DataFrame(aic_records)
+    aic_df = pd.DataFrame(aic_records, columns=["treatment", "model", "aic",
+                                                "log_likelihood", "median_survival"])
     best_per_treatment: dict[str, str] = {}
     if len(aic_df) > 0:
-        idx = aic_df.groupby("treatment")["aic"].idxmin()
+        idx = aic_df.groupby("treatment", sort=False)["aic"].idxmin()
         for _, row in aic_df.loc[idx].iterrows():
             best_per_treatment[row["treatment"]] = row["model"]
+        aic_df["delta_aic"] = (aic_df["aic"]
+                               - aic_df.groupby("treatment", sort=False)["aic"].transform("min")).round(2)
+        aic_df["best"] = [best_per_treatment.get(t) == mdl
+                          for t, mdl in zip(aic_df["treatment"], aic_df["model"])]
 
-    return {
+    fit = {
         "results_by_treatment": results_by_treatment,
         "aic_comparison": aic_df,
         "best_model_per_treatment": best_per_treatment,
+        "not_fitted": not_fitted,
     }
+    fit["table"] = parametric_table(fit, order=list(treatments),
+                                    models=list(model_classes))
+    return fit
 
 
-def survival_quantiles(
-    data: pd.DataFrame,
-    quantiles: list[float] | None = None,
-) -> pd.DataFrame:
-    """Compute survival time quantiles from KM curves.
+#: The columns of :func:`parametric_table` — the CSV, the Run Summary's
+#: ``parametric_models`` records and the report's table.
+PARAMETRIC_COLUMNS = ("treatment", "model", "aic", "delta_aic", "log_likelihood",
+                      "median_survival", "best", "note")
 
-    Returns the time at which survival drops below each quantile for each
-    treatment.  Uses the KM step function, so the reported time is the
-    first event time where S(t) ≤ (1 - quantile).
 
-    Parameters
-    ----------
-    data : individual-level DataFrame with ``time``, ``event``, ``treatment``
-    quantiles : list of quantiles as fractions, e.g. [0.10, 0.25, 0.50, 0.75, 0.90]
+def parametric_table(fit: dict | None, order: list[str] | None = None,
+                     models: list[str] | None = None) -> pd.DataFrame:
+    """One row per treatment × model, fitted or not — the readable form of
+    :func:`fit_parametric_models`.
 
-    Returns
-    -------
-    DataFrame with treatment as index and one column per quantile.
+    Fitted rows carry ``aic``, ``delta_aic`` (from that treatment's best, so 0
+    marks it), ``log_likelihood``, the model's ``median_survival`` and
+    ``best``; a family that failed, or a treatment too small to fit (``model``
+    empty), carries the reason in ``note`` instead of numbers.
     """
-    from .lifetable import _lifetable_one_treatment
+    columns = list(PARAMETRIC_COLUMNS)
+    if not fit:
+        return pd.DataFrame(columns=columns)
+    if isinstance(fit.get("table"), pd.DataFrame) and order is None:
+        return fit["table"]
+    if fit.get("error"):
+        ## The whole step failed — one row saying so, so the CSV, the Run
+        ## Summary and the report all carry the reason.
+        return pd.DataFrame([{"treatment": None, "model": None, "aic": np.nan,
+                              "delta_aic": np.nan, "log_likelihood": np.nan,
+                              "median_survival": np.nan, "best": False,
+                              "note": f"not fitted: {fit['error']}"}], columns=columns)
+    aic = fit.get("aic_comparison")
+    rows: list[dict] = []
+    for rec in (aic.to_dict("records") if isinstance(aic, pd.DataFrame) else []):
+        rows.append({**rec, "note": "lowest AIC" if rec.get("best") else ""})
+    for item in fit.get("not_fitted") or []:
+        rows.append({"treatment": item.get("treatment"), "model": item.get("model"),
+                     "aic": np.nan, "delta_aic": np.nan, "log_likelihood": np.nan,
+                     "median_survival": np.nan, "best": False,
+                     "note": f"not fitted: {item.get('reason')}"})
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    frame = pd.DataFrame(rows).reindex(columns=columns)
+    order = order or list(dict.fromkeys(str(t) for t in frame["treatment"]))
+    models = models or ["Weibull", "Log-Normal", "Log-Logistic"]
+    t_rank = {str(t): i for i, t in enumerate(order)}
+    m_rank = {m: i for i, m in enumerate(models)}
+    frame["_t"] = frame["treatment"].astype(str).map(t_rank).fillna(len(t_rank))
+    frame["_m"] = frame["model"].map(m_rank).fillna(-1)
+    frame = frame.sort_values(["_t", "_m"], kind="stable").drop(columns=["_t", "_m"])
+    frame["best"] = frame["best"].fillna(False).astype(bool)
+    return frame.reset_index(drop=True)
 
-    if quantiles is None:
-        quantiles = [0.10, 0.25, 0.50, 0.75, 0.90]
 
-    records = []
-    for treatment, grp in data.groupby("treatment"):
-        lt = _lifetable_one_treatment(grp)
-        row: dict = {"treatment": treatment}
-        for q in quantiles:
-            threshold = 1.0 - q
-            below = lt[lt["km_lx"] <= threshold]
-            row[f"q{int(q * 100)}"] = float(below["time"].iloc[0]) if len(below) > 0 else np.nan
-        records.append(row)
-
-    return pd.DataFrame(records)
+def parametric_records(fit: dict | None) -> list[dict]:
+    """:func:`parametric_table` as JSON-safe records (NaN → None) — what the
+    Run Summary stores under ``parametric_models``."""
+    table = parametric_table(fit)
+    records: list[dict] = []
+    for rec in table.to_dict("records"):
+        clean = {}
+        for key, value in rec.items():
+            if isinstance(value, (float, np.floating)):
+                clean[key] = None if not np.isfinite(value) else float(value)
+            elif isinstance(value, (np.integer,)):
+                clean[key] = int(value)
+            elif isinstance(value, (bool, np.bool_)):
+                clean[key] = bool(value)
+            elif value is None or (not isinstance(value, str) and pd.isna(value)):
+                clean[key] = None
+            else:
+                clean[key] = str(value)
+        records.append(clean)
+    return records
 
 
 def experiment_summary(data: pd.DataFrame) -> dict:
@@ -800,12 +985,13 @@ def experiment_summary(data: pd.DataFrame) -> dict:
     Returns
     -------
     dict with: n_treatments, n_chambers, n_total, n_deaths, n_censored,
-               pct_censored, time_min, time_max, factors
+               pct_censored, time_min, time_max, treatments (display
+               order), factors
     """
     n_total = len(data)
     n_deaths = int(data["event"].sum())
     n_censored = n_total - n_deaths
-    treatments = sorted(data["treatment"].unique())
+    treatments = treatment_order(data)
 
     n_chambers = int(data["chamber"].nunique()) if "chamber" in data.columns else None
     time_min = float(data["time"].min())

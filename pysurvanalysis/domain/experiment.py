@@ -50,6 +50,33 @@ def is_data_file(path: Path) -> bool:
     )
 
 
+#: sha256 digests keyed on (path, size, mtime). The Hub asks for a member's
+#: status on every refresh; hashing a workbook each time would make a status
+#: check cost a file read, and an unchanged file needs hashing once.
+_SHA_CACHE: dict[tuple, str] = {}
+
+
+def file_sha256(path: str | Path) -> str | None:
+    """Hex sha256 of a file's bytes — what a Run Summary records as
+    ``data_sha256`` — or ``None`` when it cannot be read."""
+    import hashlib
+
+    p = Path(path)
+    try:
+        st = p.stat()
+        key = (str(p.resolve()), st.st_size, st.st_mtime_ns)
+        if key in _SHA_CACHE:
+            return _SHA_CACHE[key]
+        digest = hashlib.sha256()
+        with p.open("rb") as fh:
+            for block in iter(lambda: fh.read(1 << 20), b""):
+                digest.update(block)
+    except OSError:
+        return None
+    _SHA_CACHE[key] = digest.hexdigest()
+    return _SHA_CACHE[key]
+
+
 class ExperimentError(RuntimeError):
     """A problem that prevents an Experiment Directory being used."""
 
@@ -182,7 +209,17 @@ class SurvivalExperiment:
     def _reload_config(self) -> None:
         from ..experiment_types import type_for_config
 
-        self.raw_config = cfgmod.load_config(self.directory)
+        ## A config that is not valid YAML is a listed problem (validate(),
+        ## status()), not an exception, for the same reason as an unknown type
+        ## below: one hand-edited file must not stop the Project listing its
+        ## members, or abort the Hub. It reads as empty — so its type is the
+        ## Project's, which every member shares anyway — but nothing may run
+        ## or write under it (_require_config): a write would replace the
+        ## user's file with defaults, and a run would analyse a guess.
+        try:
+            self.raw_config, self.config_error = cfgmod.load_config(self.directory), None
+        except ValueError as exc:
+            self.raw_config, self.config_error = {}, str(exc)
         self.config = cfgmod.merge_defaults(self.raw_config, self.defaults)
         ## Resolved now, raised on use: a member naming a type this build does
         ## not have must still be constructible, so the Project can list it
@@ -191,6 +228,11 @@ class SurvivalExperiment:
             self._type, self._type_error = type_for_config(self.config), None
         except ValueError as exc:
             self._type, self._type_error = None, exc
+
+    def _require_config(self) -> None:
+        """Refuse to run or write while ``survival_config.yaml`` cannot be read."""
+        if self.config_error:
+            raise ExperimentError(f"{self.name}: {self.config_error}")
 
     @property
     def type(self):
@@ -320,7 +362,13 @@ class SurvivalExperiment:
 
     def focuses(self) -> list[Focus]:
         """Every Focus this experiment has: declared, else migrated, else
-        **Unfiltered** (which needs the data file's design)."""
+        **Unfiltered** (which needs the data file's design).
+
+        None while the config cannot be read: what it declares is unknown,
+        and an Unfiltered stand-in would be a Focus nobody chose.
+        """
+        if self.config_error:
+            return []
         declared = self.declared_focuses()
         if declared:
             return declared
@@ -353,6 +401,7 @@ class SurvivalExperiment:
         """
         from ..experiment_types import STANDARD, is_retired
 
+        self._require_config()
         names = [f.name for f in focuses]
         if len(set(names)) != len(names):
             raise ExperimentError("Two Focuses share a name.")
@@ -475,16 +524,38 @@ class SurvivalExperiment:
 
     def _move_results(self, source: Path, old_slug: str, focus: Focus) -> None:
         """Move a result directory to *focus*'s place, renaming the
-        ``_<old>`` suffix of every file and rewriting the Run Summary's name."""
+        ``_<old>`` suffix of every file and rewriting the Run Summary's name.
+
+        The Markdown report's image directory (``report_<old>_figures/``,
+        named for the report) is renamed with it and the report's image links
+        rewritten, so a renamed Focus's ``report_<new>.md`` still shows its
+        figures.
+        """
         import json
 
         dest = self.focus_dir(focus)
         shutil.move(str(source), str(dest))
         suffix = f"_{old_slug}"
+        assets = f"{suffix}_figures"
+        moved_assets: dict[str, str] = {}
         for path in sorted(dest.rglob("*"), key=lambda p: len(p.parts), reverse=True):
             if path.is_file() and path.stem.endswith(suffix):
                 path.rename(path.with_name(
                     path.stem[: -len(suffix)] + f"_{focus.slug}" + path.suffix))
+            elif path.is_dir() and path.name.endswith(assets):
+                new_name = path.name[: -len(assets)] + f"_{focus.slug}_figures"
+                path.rename(path.with_name(new_name))
+                moved_assets[path.name] = new_name
+        for report in dest.rglob("*.md"):
+            try:
+                text = report.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            updated = text
+            for old_name, new_name in moved_assets.items():
+                updated = updated.replace(f"]({old_name}/", f"]({new_name}/")
+            if updated != text:
+                report.write_text(updated, encoding="utf-8")
         summary = self.outputs(focus).summary
         if summary.is_file():
             try:
@@ -593,6 +664,7 @@ class SurvivalExperiment:
         Hub, a script and a Batch Run all leave out the same things."""
         if kind not in cfgmod.OMIT_KINDS:
             raise ValueError(f"Unknown omit kind {kind!r}.")
+        self._require_config()
         left_out = set(self.omitted(kind))
         if included:
             left_out.discard(item_id)
@@ -616,16 +688,28 @@ class SurvivalExperiment:
         self._reload_config()
 
     def scripts(self) -> list[dict]:
-        """Experiment Scripts: the member's own, then the Project's central set."""
+        """Experiment Scripts this experiment can run, one per name: the
+        Project's central ``experiment_scripts:`` first, then the member's own
+        ``scripts:`` that no central script shadows.
+
+        The resolution rule (ADR-0007), applied to the listing: a name both
+        sets define runs the central recipe everywhere — from a Batch Run's
+        ``run_in_experiments`` and from the Hub alike — so the central one is
+        the one listed. Built-ins are not included; they are resolvable by
+        name only (:func:`~pysurvanalysis.script_editor.project_actions.resolve_experiment_script`).
+        """
         own = cfgmod.scripts_of(self.raw_config, "scripts")
         if self.project is None:
             return own
         central = self.project.experiment_scripts()
-        names = {s["name"] for s in own}
-        return own + [s for s in central if s["name"] not in names]
+        names = {s["name"] for s in central}
+        return central + [s for s in own if s["name"] not in names]
 
     def validate(self) -> list[str]:
         """Config-level problems (no data is loaded)."""
+        if self.config_error:
+            ## Nothing else can be checked against a file that did not parse.
+            return [self.config_error]
         problems = list(cfgmod.validate_config(self.config))
         if not self.has_data():
             problems.append(
@@ -662,21 +746,32 @@ class SurvivalExperiment:
 
     # ── loading and analysis ───────────────────────────────────────────────
 
-    def load(self, extra_excluded: set | None = None, focus: Focus | None = None):
+    def load(self, extra_excluded: set | None = None, focus: Focus | None = None,
+             *, apply_exclusions: bool = True):
         """Load the individual-level frame, exclusions applied.
 
         With *focus*, the frame is that Focus's slice — ``treatment``
         relabelled by its varying factors and ordered by its levels — and the
         factors returned are the varying ones. Without, it is the whole file
         with every discovered factor.
+
+        ``apply_exclusions=False`` keeps every chamber — the Exclusion Group's
+        and the workbook's ChamberFlags alike — for the QC Viewer, which must
+        show a chamber to let anyone decide about it. Everything else (the
+        censoring policy, the ``input:`` options) is the run's own, so a QC
+        curve is the curve an analysis would use. Such a frame is returned
+        only — never kept as :attr:`data`, which is the analysable slice.
         """
         from .. import data_loader
 
+        self._require_config()
         opts = cfgmod.input_options(self.config)
         path = self.data_file()
-        excluded = set(self.excluded_chambers()) | set(extra_excluded or set())
-        if path.suffix.lower() == ".xlsx":
-            excluded |= set(data_loader.load_chamber_flags(path))
+        excluded: set = set()
+        if apply_exclusions:
+            excluded = set(self.excluded_chambers()) | set(extra_excluded or set())
+            if path.suffix.lower() == ".xlsx":
+                excluded |= set(data_loader.load_chamber_flags(path))
 
         fmt = str(opts.get("format", "auto"))
         csv_format = "auto" if fmt in {"auto", "excel"} else fmt
@@ -690,11 +785,13 @@ class SurvivalExperiment:
             csv_format=csv_format,
             col_mapping=opts.get("col_mapping"),
             factor_names=opts.get("factor_names"),
+            factor_levels=opts.get("factor_levels"),
         )
         if focus is not None:
             data = focusmod.apply_focus(data, focus)
             factors = list(focus.varying_factors)
-        self.data, self.factors = data, list(factors)
+        if apply_exclusions:
+            self.data, self.factors = data, list(factors)
         return data, list(factors)
 
     def run_analysis(self, focus: Focus | str | None = None, log=None,
@@ -707,6 +804,7 @@ class SurvivalExperiment:
         """
         from .. import pipeline
 
+        self._require_config()
         if isinstance(focus, str):
             focus = self.focus(focus)
         if focus is None:
@@ -741,6 +839,7 @@ class SurvivalExperiment:
         use.
         """
         emit = log or (lambda _m: None)
+        self._require_config()
         self.materialize_focuses()
         focuses = self.focuses()
         wanted = set(only or [])
@@ -766,17 +865,52 @@ class SurvivalExperiment:
 
     # ── status ─────────────────────────────────────────────────────────────
 
+    def run_inputs(self) -> dict:
+        """What a run would use now, in the Run Summary's own keys — the
+        other half of the **Out of Date** comparison.
+
+        Cheap enough for every Hub refresh: the data file's hash is cached on
+        its size and mtime, and nothing else reads data. A key that cannot be
+        known (no data file) is simply absent, and is then not compared.
+        """
+        current: dict = {"omit": {kind: sorted(self.omitted(kind))
+                                  for kind in cfgmod.OMIT_KINDS}}
+        try:
+            path = self.data_file()
+        except ExperimentError:
+            return current
+        current["data_sha256"] = file_sha256(path)
+        try:
+            current["excluded_chambers"] = sorted(
+                {str(focusmod.norm_chamber(c)) for c in self.all_excluded_chambers()})
+        except Exception:  # noqa: BLE001 - an unreadable flag sheet is not a change
+            pass
+        ## Assumed censoring changes no number of a CSV cohort (already
+        ## individual-level), so flipping it there is not a reason to re-run.
+        if path.suffix.lower() == ".xlsx" and self._type is not None:
+            current["assume_censored"] = self._type.resolve_assume_censored(self.config)
+        return current
+
     def focus_status(self, focus: Focus, design=None,
-                     check_blocked: bool = True) -> FocusStatus:
-        """A cheap, filesystem-only summary of one Focus — never re-analyses."""
+                     check_blocked: bool = True,
+                     current: dict | None = None) -> FocusStatus:
+        """A cheap, filesystem-only summary of one Focus — never re-analyses.
+
+        *current* is :meth:`run_inputs`, passed in by :meth:`status` so it is
+        worked out once per experiment rather than once per Focus.
+        """
         import json
 
+        if current is None:
+            current = self.run_inputs()
         fs = FocusStatus(name=focus.name, slug=focus.slug, origin=focus.origin,
                          description=focus.describe(design))
         if check_blocked and design is not None:
             try:
+                excluded = current.get("excluded_chambers")
                 populated = focusmod.labels_after_exclusion(
-                    focus, design, self.all_excluded_chambers())
+                    focus, design,
+                    excluded if excluded is not None else self.all_excluded_chambers())
                 fs.blocked = tuple(str(r) for r in
                                    focusmod.block_reasons(focus, design, populated))
             except Exception:  # noqa: BLE001 - a status must still list
@@ -800,11 +934,14 @@ class SurvivalExperiment:
         fs.not_applicable = tuple(
             (str(item.get("action", "")), str(item.get("reason", "")))
             for item in payload.get("not_applicable") or [] if isinstance(item, dict))
-        ## Out of Date = the configuration disagrees with what the saved run
-        ## recorded: the Focus's analytic definition, or the Exclusion Group.
-        ## Compared by content, not by mtime — copying a Project between
-        ## drives reorders mtimes but never the record.
-        reasons = focusmod.out_of_date_reasons(focus, payload, self.exclusion_group)
+        ## Out of Date = what a run would use now disagrees with what the
+        ## saved run recorded: the Focus's analytic definition, the Exclusion
+        ## Group and the chambers it removes, the data file's contents, the
+        ## censoring policy, the selection. Compared by content, not by mtime
+        ## — copying a Project between drives reorders mtimes but never the
+        ## record.
+        reasons = focusmod.out_of_date_reasons(
+            focus, payload, self.exclusion_group, current=current, design=design)
         fs.out_of_date = bool(reasons)
         fs.out_of_date_reasons = tuple(reasons)
         return fs
@@ -826,7 +963,8 @@ class SurvivalExperiment:
             focuses = self.focuses()
         except Exception:  # noqa: BLE001
             focuses = []
-        st.focuses = tuple(self.focus_status(f, design, check_blocked)
+        current = self.run_inputs() if focuses else {}
+        st.focuses = tuple(self.focus_status(f, design, check_blocked, current)
                            for f in focuses)
         try:
             st.orphaned = tuple(self.orphaned_results())

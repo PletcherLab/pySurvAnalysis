@@ -157,12 +157,11 @@ def test_the_members_table_is_the_way_to_load(hub):
 
 
 def _boxes(card) -> dict:
-    """The card's checkboxes, by label, in order."""
+    """The card's checkboxes, by label, in order (each sits in a row with
+    its help button)."""
     from PyQt6.QtWidgets import QCheckBox
 
-    layout = card.body_layout()
-    widgets = [layout.itemAt(i).widget() for i in range(layout.count())]
-    return {w.text(): w for w in widgets if isinstance(w, QCheckBox)}
+    return {w.text(): w for w in card.findChildren(QCheckBox)}
 
 
 def _push_buttons(card) -> list[str]:
@@ -186,8 +185,8 @@ def test_analyze_is_a_box_per_analysis_over_one_run_button(hub):
     layout = hub._analyze_card.body_layout()
     widgets = [layout.itemAt(i).widget() for i in range(layout.count())]
     run_at = next(i for i, w in enumerate(widgets)
-                  if w.text().strip() == "Run analysis")
-    assert all(widgets.index(box) < run_at for box in boxes.values())
+                  if getattr(w, "text", lambda: "")().strip() == "Run analysis")
+    assert all(widgets.index(box.parent()) < run_at for box in boxes.values())
 
 
 def test_plots_is_a_box_per_figure_over_one_generate_button(hub):

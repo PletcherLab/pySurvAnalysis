@@ -6,8 +6,9 @@ default quality criteria and the report sections, plus the actions it
 contributes to the Hub and the script registry (ADR-0002). It deliberately
 says nothing about the experimental *design*: one data file may hold several
 designs, so which analyses and figures apply is decided by the active
-**Focus Shape** (ADR-0011). The 2×2 figures, for instance, are not a type's
-Plot Set — they are added to any run whose Focus is a populated 2×2.
+**Focus Shape** (ADR-0011). The figures crossing factors, for instance, are
+not a type's Plot Set — they are added to any run whose Focus varies two or
+more factors.
 
 A type also declares its **Analysis Set** — the optional analyses a run may
 perform — and a run leaves out whichever of either set the config's ``omit:``
@@ -72,8 +73,9 @@ ALL_ANALYSIS_DEFS: tuple[AnalysisDef, ...] = (
                 "deaths more heavily.",
                 requires="comparison"),
     AnalysisDef("hazard_ratios", "Pairwise hazard ratios",
-                "A Cox hazard ratio with 95% CI for every pair; the "
-                "hazard-ratio forest draws these.",
+                "A hazard ratio with 95% CI for every pair (log-rank "
+                "observed/expected estimate); the hazard-ratio forest draws "
+                "these.",
                 requires="comparison"),
     AnalysisDef("parametric_aft", "Parametric AFT models",
                 "Weibull, log-normal and log-logistic accelerated-failure-time "
@@ -257,19 +259,25 @@ class ExperimentType:
 ALL_PLOT_DEFS: tuple[PlotDef, ...] = (
     PlotDef("km_curves", "Kaplan-Meier curves", "Survivorship by treatment."),
     PlotDef("km_risk_table", "KM curves with at-risk table",
-            "Survivorship with the number at risk beneath the axis."),
+            "Survivorship with the number at risk — individuals alive and "
+            "uncensored entering each age — beneath the axis, at 0, 25, 50, "
+            "75 and 100% of the last age."),
     PlotDef("nelson_aalen", "Nelson-Aalen cumulative hazard",
             "Cumulative hazard by treatment."),
     PlotDef("log_log", "Log-log diagnostic",
             "Parallel lines support the proportional-hazards assumption.",
             requires="comparison"),
-    PlotDef("cumulative_events", "Cumulative deaths", "Cumulative event counts."),
-    PlotDef("hazard", "Hazard rate", "Interval hazard rate."),
+    PlotDef("cumulative_events", "Cumulative deaths",
+            "Cumulative probability of death, 1 − S(t) from the Kaplan-Meier "
+            "estimate (so censoring-aware), with its 95% band."),
+    PlotDef("hazard", "Hazard rate", "Raw interval hazard rate, unsmoothed."),
     PlotDef("smoothed_hazard", "Smoothed hazard", "Kernel-smoothed hazard rate."),
     PlotDef("mortality", "Mortality (qx)", "Interval mortality probability."),
     PlotDef("number_at_risk", "Number at risk", "Individuals at risk over time."),
     PlotDef("survival_distribution", "Lifespan distribution",
-            "Distribution of individual lifespans by treatment."),
+            "Distribution of individual lifespans by treatment — recorded "
+            "deaths only; censored individuals are excluded, since their "
+            "lifespan is unknown."),
     PlotDef("hazard_ratio_forest", "Hazard-ratio forest",
             "Pairwise hazard ratios with 95% confidence intervals.",
             requires="comparison", needs=("hazard_ratios",)),
@@ -278,7 +286,9 @@ ALL_PLOT_DEFS: tuple[PlotDef, ...] = (
             "by the others.",
             requires="factorial_plot"),
     PlotDef("interaction_lifespan", "Lifespan interaction plot",
-            "Median lifespan by factor level; non-parallel lines indicate interaction.",
+            "Kaplan-Meier median lifespan of each cell with its 95% confidence "
+            "interval: the first varying factor on x, a line per level of the "
+            "others. Non-parallel lines indicate interaction.",
             requires="factorial_plot"),
 )
 

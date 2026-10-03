@@ -8,10 +8,15 @@ treatments and their colours. The selection is live: N, the treatments, the
 **Focus Shape** and anything that would block the Focus update as you edit, so
 you can see before analysing whether the Factorial Battery will be offered.
 
-Nothing is written until Save, and Save writes the ``focuses:`` block of
-``survival_config.yaml`` — the same block that can be edited by hand. A Focus
-renamed here takes its results with it; one deleted here leaves its results as
-Orphaned Results for the Hub to list.
+No edit is written until Save, and Save writes the ``focuses:`` block of
+``survival_config.yaml`` — the same block that can be edited by hand — with
+every varying factor's Reference Level stated, so a later reorder cannot move
+it. (Opening the window does write one thing: an experiment's *implicit*
+Unfiltered or migrated Focus is materialised into the file first, as CONTEXT
+says, so it can be seen and renamed.) A Focus renamed here takes its results
+with it; one deleted here leaves its results as Orphaned Results for the Hub
+to list. Factors and levels a Focus names that the data file lacks are shown,
+marked, so they can be dropped rather than saved back unseen.
 
 A factor left unticked is **pooled over**; a factor ticked with one level is a
 **filter**; a factor ticked with two or more levels **varies** and labels the
@@ -21,6 +26,7 @@ treatments. The window says which, in words, under the factor list.
 from __future__ import annotations
 
 from PyQt6.QtCore import QSize, Qt
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -48,10 +54,19 @@ from PyQt6.QtWidgets import (
 
 from ..domain import focus as focusmod
 from ..domain.focus import Focus
+from ..help.window import HelpButton, install_f1, with_help
 
 #: Rows every factor's level list shows before it scrolls — one height for
 #: all, so a two-level factor does not collapse to a sliver beside a seven.
 VISIBLE_LEVELS = 4
+
+
+def _empty_factor_reasons(focus: Focus) -> list[str]:
+    """A factor box ticked with no level ticked: neither a filter nor pooled
+    over, so the Focus cannot be saved until it is one or the other."""
+    return [f"factor {f!r} is ticked but none of its levels is — tick the "
+            f"levels to keep, or untick {f} to pool over it"
+            for f, levels in focus.factors.items() if not levels]
 
 
 class _LevelList(QListWidget):
@@ -80,15 +95,30 @@ class _LevelList(QListWidget):
 
 
 class _FactorBox(QGroupBox):
-    """One discovered factor: include it, tick and order its levels, and pick
-    its Reference Level."""
+    """One factor: include it, tick and order its levels, and pick its
+    Reference Level.
 
-    def __init__(self, factor: str, levels: tuple[str, ...], on_change) -> None:
-        super().__init__(factor)
+    Shows the Focus as it is, including what the data file no longer has: a
+    level the Focus names but the file lacks is listed (marked, ticked) so it
+    can be unticked, and a *stale* box (``stale=True``) stands for a whole
+    factor the file lacks, so it can be dropped by unticking it. Hiding
+    either would make them impossible to remove — and saved back unseen.
+    """
+
+    def __init__(self, factor: str, levels: tuple[str, ...], on_change,
+                 *, stale: bool = False) -> None:
+        super().__init__(f"{factor} — not in the data file" if stale else factor)
         self.factor = factor
+        self.stale = stale
+        #: The levels the data file has; anything else shown is stale.
+        self._design_levels: tuple[str, ...] = () if stale else tuple(str(v) for v in levels)
         self._on_change = on_change
         self.setCheckable(True)
         self.setChecked(False)
+        if stale:
+            self.setToolTip(f"This Focus names factor {factor!r}, which the data "
+                            f"file does not have, so it is Blocked. Untick the "
+                            f"box to drop the factor from the Focus.")
         self.toggled.connect(lambda _on: self._changed())
 
         lay = QHBoxLayout(self)
@@ -97,11 +127,7 @@ class _FactorBox(QGroupBox):
         self.levels.setToolTip("Tick the levels this Focus keeps; drag (or use "
                                "▲▼) to set their display order.")
         for level in levels:
-            item = QListWidgetItem(str(level))
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable
-                          | Qt.ItemFlag.ItemIsDragEnabled)
-            item.setCheckState(Qt.CheckState.Checked)
-            self.levels.addItem(item)
+            self.levels.addItem(self._item(str(level), True))
         self.levels.itemChanged.connect(lambda _i: self._changed())
         self.levels.model().rowsMoved.connect(lambda *_a: self._changed())
         ## Top-aligned: the ▲▼/Reference column can stand taller than four
@@ -115,12 +141,18 @@ class _FactorBox(QGroupBox):
             btn.setFixedWidth(30)
             btn.clicked.connect(lambda _c, s=step: self._move(s))
             side.addWidget(btn)
-        side.addWidget(QLabel("Reference:"))
+        ref_head = QHBoxLayout()
+        ref_head.setSpacing(4)
+        ref_head.addWidget(QLabel("Reference:"))
+        ref_head.addStretch(1)
+        ref_head.addWidget(HelpButton("reference-level"))
+        side.addLayout(ref_head)
         self.reference = QComboBox()
         self.reference.setToolTip(
             "The Cox baseline for this factor. Separate from display order, so "
             "levels can read 20x, 40x while the model baselines on the 40x "
-            "control. Defaults to the first level ticked.")
+            "control. Defaults to the first level ticked, and is saved "
+            "explicitly, so reordering the levels later never moves it.")
         self.reference.currentIndexChanged.connect(lambda _i: self._on_change())
         side.addWidget(self.reference)
         side.addStretch(1)
@@ -129,36 +161,61 @@ class _FactorBox(QGroupBox):
 
     # ── state ──────────────────────────────────────────────────────────────
 
+    def _item(self, level: str, checked: bool) -> QListWidgetItem:
+        """A level row. The level itself rides in UserRole, so the label can
+        say what is wrong with it without changing what is saved."""
+        missing = level not in self._design_levels
+        item = QListWidgetItem(f"{level}  (not in the data file)" if missing else level)
+        item.setData(Qt.ItemDataRole.UserRole, level)
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable
+                      | Qt.ItemFlag.ItemIsDragEnabled)
+        item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+        if missing:
+            item.setForeground(QColor("#b91c1c"))
+            item.setToolTip(f"The data file has no level {level!r} of "
+                            f"{self.factor}, so this Focus is Blocked. Untick "
+                            f"it to drop it from the Focus.")
+        return item
+
+    @staticmethod
+    def _level(item: QListWidgetItem) -> str:
+        value = item.data(Qt.ItemDataRole.UserRole)
+        return str(value) if value is not None else item.text()
+
     def chosen_levels(self) -> list[str]:
-        return [self.levels.item(i).text() for i in range(self.levels.count())
+        return [self._level(self.levels.item(i)) for i in range(self.levels.count())
                 if self.levels.item(i).checkState() == Qt.CheckState.Checked]
 
-    def explicit_reference(self) -> str | None:
-        """The reference, when it is not simply the first level (``None``)."""
+    def reference_choice(self) -> str | None:
+        """The Reference Level, when the factor varies (``None`` otherwise).
+
+        The *effective* one — the first level when nobody chose — so a saved
+        Focus always states its baseline, and reordering levels later (here
+        or by hand) can never silently move the Cox baseline.
+        """
         levels = self.chosen_levels()
+        if len(levels) < 2:
+            return None
         ref = self.reference.currentData()
-        return ref if ref and levels and ref != levels[0] else None
+        return ref if ref in levels else levels[0]
 
     def load(self, levels: list[str] | None, reference: str | None) -> None:
-        """Show *levels* (ticked, in this order, others after unticked)."""
+        """Show *levels* (ticked, in this order, others after unticked).
+
+        Rebuilt from the data file's levels each time, plus whatever stale
+        levels *this* Focus names, so one Focus's stale rows never linger
+        into the next one's."""
         blocked = self.levels.blockSignals(True)
+        self.levels.clear()
         if levels is None:
             self.setChecked(False)
-            for i in range(self.levels.count()):
-                self.levels.item(i).setCheckState(Qt.CheckState.Checked)
+            for level in self._design_levels:
+                self.levels.addItem(self._item(level, True))
         else:
             self.setChecked(True)
-            present = [self.levels.item(i).text() for i in range(self.levels.count())]
-            order = [lv for lv in levels if lv in present] + \
-                [lv for lv in present if lv not in levels]
-            self.levels.clear()
-            for level in order:
-                item = QListWidgetItem(level)
-                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable
-                              | Qt.ItemFlag.ItemIsDragEnabled)
-                item.setCheckState(Qt.CheckState.Checked if level in levels
-                                   else Qt.CheckState.Unchecked)
-                self.levels.addItem(item)
+            named = [str(lv) for lv in levels]
+            for level in named + [lv for lv in self._design_levels if lv not in named]:
+                self.levels.addItem(self._item(level, level in named))
         self.levels.blockSignals(blocked)
         self._sync_reference(reference)
 
@@ -225,7 +282,8 @@ class FocusWindow(QDialog):
             "and every output carries its name. Untick a factor to pool over "
             "it; tick one level to keep only that level.")
         intro.setWordWrap(True)
-        outer.addWidget(intro)
+        outer.addWidget(with_help(intro, "focus"))
+        install_f1(self, lambda: "focus-window")
 
         split = QSplitter(Qt.Orientation.Horizontal)
         outer.addWidget(split, 1)
@@ -237,22 +295,28 @@ class FocusWindow(QDialog):
         self._list = QListWidget()
         self._list.currentRowChanged.connect(self._on_select)
         llay.addWidget(self._list, 1)
-        for text, slot, tip in (
-                ("New", self._new, "A new Focus over every discovered factor."),
-                ("Duplicate", self._duplicate, "Copy the selected Focus."),
+        ## Every button carries its "?" so the column stays one width.
+        for text, slot, tip, topic in (
+                ("New", self._new, "A new Focus over every discovered factor.",
+                 "focus-window"),
+                ("Duplicate", self._duplicate, "Copy the selected Focus.",
+                 "focus-window"),
                 ("Delete", self._delete,
                  "Remove the selected Focus. Its results stay on disk as "
-                 "Orphaned Results until adopted or deleted in the Hub."),
+                 "Orphaned Results until adopted or deleted in the Hub.",
+                 "focus-status"),
                 ("Import from DefinedPlots…", self._import_defined,
                  "Propose a Focus for each Defined Plot in the workbook whose "
-                 "treatments form a rectangular product of levels."),
+                 "treatments form a rectangular product of levels.",
+                 "defined-plots"),
                 ("Copy Focuses from…", self._copy_from,
                  "Copy Focuses from another member of this Project, checked "
-                 "against this member's data before anything is added.")):
+                 "against this member's data before anything is added.",
+                 "focus-window")):
             btn = QPushButton(text)
             btn.setToolTip(tip)
             btn.clicked.connect(slot)
-            llay.addWidget(btn)
+            llay.addWidget(with_help(btn, topic))
             if text.startswith("Import"):
                 self._btn_import = btn
                 btn.setEnabled(experiment.data_file().suffix.lower() == ".xlsx")
@@ -267,13 +331,17 @@ class FocusWindow(QDialog):
         form = QFormLayout()
         self._name = QLineEdit()
         self._name.textEdited.connect(lambda _t: self._on_edit())
-        form.addRow("Name:", self._name)
+        form.addRow("Name:", with_help(self._name, "focus-window"))
         rlay.addLayout(form)
 
         boxes = QWidget()
         blay = QVBoxLayout(boxes)
         blay.setContentsMargins(0, 0, 0, 0)
+        self._boxes_layout = blay
         self._boxes: dict[str, _FactorBox] = {}
+        #: The selected Focus's factors the data file lacks — rebuilt on each
+        #: selection, one unticked-to-drop box each.
+        self._stale_boxes: dict[str, _FactorBox] = {}
         for factor in self.design.factors:
             box = _FactorBox(factor, self.design.levels.get(factor, ()), self._on_edit)
             self._boxes[factor] = box
@@ -287,7 +355,7 @@ class FocusWindow(QDialog):
         self._preview = QLabel("")
         self._preview.setWordWrap(True)
         self._preview.setTextFormat(Qt.TextFormat.RichText)
-        rlay.addWidget(self._preview)
+        rlay.addWidget(with_help(self._preview, "focus-shape"))
 
         self._table = QTableWidget(0, 3)
         self._table.setHorizontalHeaderLabels(["Treatment", "Display name", "Colour"])
@@ -369,32 +437,56 @@ class FocusWindow(QDialog):
         focus = self._focuses[row]
         self._loading = True
         self._name.setText(focus.name)
-        for factor, box in self._boxes.items():
+        self._rebuild_stale_boxes(focus)
+        for factor, box in self._all_boxes().items():
             box.load(focus.factors.get(factor), focus.reference.get(factor))
         self._loading = False
         self._refresh_preview()
 
+    def _rebuild_stale_boxes(self, focus: Focus) -> None:
+        """One box per factor *focus* names that the data file lacks, above
+        the discovered ones — ticked, so unticking drops the factor."""
+        for box in self._stale_boxes.values():
+            self._boxes_layout.removeWidget(box)
+            box.deleteLater()
+        self._stale_boxes = {}
+        for index, (factor, levels) in enumerate(
+                (f, lv) for f, lv in focus.factors.items() if f not in self._boxes):
+            box = _FactorBox(factor, tuple(levels), self._on_edit, stale=True)
+            self._stale_boxes[factor] = box
+            self._boxes_layout.insertWidget(index, box)
+
+    def _all_boxes(self) -> dict[str, _FactorBox]:
+        return {**self._boxes, **self._stale_boxes}
+
     # ── editing ────────────────────────────────────────────────────────────
 
     def _focus_from_widgets(self) -> Focus:
+        """The selected Focus as the widgets show it.
+
+        The Focus's own factor order is kept (newly ticked factors follow, in
+        the data file's order): the treatment labels are built in that order,
+        and an edit to one level must not rename every treatment. A factor
+        ticked with no level ticked is kept with no levels, so the preview
+        and Save can refuse it — treating it as pooled over would be a
+        different Focus from the one on screen. Each varying factor's
+        Reference Level is written explicitly (see
+        :meth:`_FactorBox.reference_choice`).
+        """
         current = self._focuses[self._current]
+        boxes = self._all_boxes()
+        order = [f for f in current.factors if f in boxes] + \
+            [f for f in boxes if f not in current.factors]
         factors: dict[str, list[str]] = {}
         reference: dict[str, str] = {}
-        for factor, box in self._boxes.items():
+        for factor in order:
+            box = boxes[factor]
             if not box.isChecked():
                 continue
-            levels = box.chosen_levels()
-            if not levels:
-                continue
-            factors[factor] = levels
-            ref = box.explicit_reference()
+            factors[factor] = box.chosen_levels()
+            ref = box.reference_choice()
             if ref:
                 reference[factor] = ref
-        ## Factors the data file no longer has (a stale Focus being edited)
-        ## are kept as they were rather than silently dropped.
-        for factor, levels in current.factors.items():
-            if factor not in self._boxes:
-                factors[factor] = list(levels)
         return current.copy(name=self._name.text().strip() or current.name,
                             factors=factors, reference=reference)
 
@@ -423,6 +515,7 @@ class FocusWindow(QDialog):
                              + ", ".join(shape.absent))
         reasons = (focusmod.block_reasons(focus, self.design, populated)
                    if self._raw is not None else focusmod.stale_reasons(focus, self.design))
+        reasons = _empty_factor_reasons(focus) + list(reasons)
         if not focus.factors:
             reasons = ["Tick at least one factor."]
         for reason in reasons:
@@ -534,8 +627,15 @@ class FocusWindow(QDialog):
         if not ok or not choice:
             return
         source = others[names.index(choice)]
+        ## Checked against THIS member's active exclusions too: a Focus whose
+        ## cell this member's QC emptied would be blocked here just the same.
+        try:
+            excluded = self.experiment.all_excluded_chambers()
+        except Exception:  # noqa: BLE001 - no exclusions known is no exclusions
+            excluded = set()
         ok_focuses, rejected = focusmod.copy_check(
-            source.focuses(), self.design, existing=[f.name for f in self._focuses])
+            source.focuses(), self.design, existing=[f.name for f in self._focuses],
+            excluded=excluded)
         for focus in ok_focuses:
             self._add(focus)
         if rejected:
@@ -546,9 +646,45 @@ class FocusWindow(QDialog):
 
     # ── saving ─────────────────────────────────────────────────────────────
 
+    def _confirm_stale(self, lines: list[str]) -> bool:
+        """Ask before saving Focuses that name what the data file lacks."""
+        answer = QMessageBox.question(
+            self, "Save blocked Focuses?",
+            "These Focuses name factors or levels the data file does not "
+            "contain, so they will stay Blocked until the names are fixed:\n\n"
+            + "\n".join(lines) + "\n\nSave anyway?",
+            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel)
+        return answer == QMessageBox.StandardButton.Save
+
+    @staticmethod
+    def _with_explicit_references(focus: Focus) -> Focus:
+        """*focus* stating every varying factor's Reference Level.
+
+        A reference left implicit is "the first level", so reordering the
+        levels — here, or by hand in the YAML — would silently move the Cox
+        baseline. Written out, only an explicit change of reference moves
+        it; and since Out of Date compares *effective* references, writing
+        the default down never puts a result Out of Date.
+        """
+        reference = {f: v for f, v in focus.reference.items()
+                     if f in focus.factors and str(v) in focus.factors[f]}
+        for factor in focus.varying_factors:
+            reference[factor] = focus.reference_level(factor)
+        return focus.copy(reference=reference)
+
     def accept(self) -> None:  # noqa: D102 - Qt override
         if self._current >= 0:
             self._harvest_presentation()
+            ## What is on screen is what is saved — an unedited Focus's working
+            ## copy is otherwise whatever was loaded, stale names and all.
+            self._focuses[self._current] = self._focus_from_widgets()
+        problems = [f"Focus {f.name!r}: {reason}" for f in self._focuses
+                    for reason in _empty_factor_reasons(f)]
+        if problems:
+            QMessageBox.warning(self, "Cannot save", "\n".join(problems))
+            return
+        self._focuses = [self._with_explicit_references(f) for f in self._focuses]
         problems = focusmod.validate_focus_block(
             {"focuses": focusmod.focuses_to_config(self._focuses)})
         names = [f.name for f in self._focuses]
@@ -556,6 +692,10 @@ class FocusWindow(QDialog):
             problems.append("Two Focuses share a name.")
         if problems:
             QMessageBox.warning(self, "Cannot save", "\n".join(problems))
+            return
+        stale = [f"- {reason}" for f in self._focuses
+                 for reason in focusmod.stale_reasons(f, self.design)]
+        if stale and not self._confirm_stale(stale):
             return
         renames = {old: f.name for old, f in zip(self._origin, self._focuses)
                    if old is not None and old != f.name}

@@ -10,8 +10,10 @@ experiments contributes three sections.
 A declared Focus that has not been analysed yields a "not analysed" section —
 the report never silently analyses on the user's behalf. By the same rule it
 never silently presents results for something they no longer describe: a
-Focus whose saved results predate a change to its definition or Exclusion
-Group is **Out of Date**, and its section says so instead of showing them.
+Focus whose saved results predate a change to its definition, its data file
+or its exclusions is **Out of Date**, and its section says so instead of
+showing them. What a section does show is what the run recorded — the
+chambers it excluded, the AFT table, the model warnings — never a stand-in.
 
 Sections are built by the same ``report_builder`` section functions the
 per-Focus report uses, fed by :class:`SavedAnalysis` — a read-only view of
@@ -109,12 +111,39 @@ class SavedAnalysis:
 
     @property
     def excluded_chambers(self) -> set:
-        # Identities are not saved, only the count; the quality section reports
-        # the count, which is exactly what the stamp promises.
-        return set(range(int(self.payload.get("n_excluded") or 0)))
+        """The chambers the run removed, as saved — empty for a summary
+        written before identities were recorded (only the count survives
+        there, and no identity is invented for it)."""
+        return set(self.excluded_applied() or ())
+
+    def excluded_applied(self) -> list[str] | None:
+        """The removed chambers' ids, or ``None`` when the summary predates
+        saving them."""
+        ids = self.payload.get("excluded_chambers")
+        if not isinstance(ids, list):
+            return None
+        return [str(c) for c in ids]
 
     def n_excluded_applied(self) -> int:
-        return int(self.payload.get("n_excluded") or 0)
+        ids = self.excluded_applied()
+        return len(ids) if ids is not None else int(self.payload.get("n_excluded") or 0)
+
+    def n_excluded_listed(self) -> int:
+        listed = self.payload.get("n_excluded_listed")
+        return int(listed) if listed is not None else self.n_excluded_applied()
+
+    @property
+    def load_warnings(self) -> list[str]:
+        return [str(w) for w in self.payload.get("load_warnings") or []]
+
+    @property
+    def min_n_per_chamber(self) -> int:
+        return int(self.payload.get("min_n_per_chamber") or 0)
+
+    @property
+    def small_chambers(self) -> list[dict]:
+        return [dict(c) for c in self.payload.get("small_chambers") or []
+                if isinstance(c, dict)]
 
     @property
     def experiment_summary(self) -> dict:
@@ -181,7 +210,15 @@ class SavedAnalysis:
 
     @property
     def parametric_models(self) -> dict:
-        return {}
+        """The AFT comparison as the run saved it (``{"table": DataFrame}``),
+        or ``{}`` when the run left it out or predates saving it."""
+        from .statistics import PARAMETRIC_COLUMNS
+
+        records = self.payload.get("parametric_models")
+        if not isinstance(records, list) or not records:
+            return {}
+        rows = [r for r in records if isinstance(r, dict)]
+        return {"table": pd.DataFrame(rows, columns=list(PARAMETRIC_COLUMNS))} if rows else {}
 
     @property
     def cox_analyses(self) -> list[dict]:

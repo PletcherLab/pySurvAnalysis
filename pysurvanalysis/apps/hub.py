@@ -1,8 +1,11 @@
 """The Analysis Hub — pySurvAnalysis's main window.
 
-A horizontal tile strip (Batch · Project · Analyze · QC · Plots · Scripts · AI ·
-Tools) over a full-width output area. Each tile shows only live status; all of
-its controls live in an anchored panel, one open at a time.
+A two-tier tile strip over a full-width output area. The ribbon is Batch ·
+Project · Experiment, beside a status readout; the Experiment tile's panel
+holds the Active Focus selector and the five experiment-level sub-tiles —
+QC · Analyze · Plots · Scripts · AI — each opening the panel it always had.
+Each tile shows only live status; all of its controls live in an anchored
+panel, one open at a time.
 
 Two things differ from the sister app by design:
 
@@ -33,7 +36,7 @@ from ..gui_env import sanitize_input_method_environment, use_agg_matplotlib
 sanitize_input_method_environment()
 use_agg_matplotlib()
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QEvent, QObject, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QBrush
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -58,8 +61,11 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..help import analysis_topic, plot_topic
+from ..help.window import HelpButton, install_f1, show_help, with_help
 from ..domain import (
     Batch,
+    ExperimentError,
     Project,
     ProjectError,
     SurvivalExperiment,
@@ -90,10 +96,11 @@ PANEL_WIDTH = 540
 #: The five experiment sub-panels hold a column of buttons and checkboxes,
 #: and a control stretched across 540px was mostly padding. The widest is a
 #: Plot Set checkbox ("Nelson-Aalen cumulative hazard", ~290px — a checkbox
-#: label cannot wrap), so this leaves it room on a wider system font.
+#: label cannot wrap) plus its help button, so this leaves it room on a
+#: wider system font.
 #: The Batch/Project/Experiment panels keep the full width for their tables
 #: and the sub-tile row.
-NARROW_PANEL_WIDTH = 380
+NARROW_PANEL_WIDTH = 400
 _PANEL_WIDTHS = {key: NARROW_PANEL_WIDTH
                  for key in ("qc", "analyze", "plots", "scripts", "ai")}
 
@@ -128,6 +135,27 @@ _WIDE_TILES = {"batch", "project", "experiment"}
 #: The Batch picker's leading entry — designates nothing (see ADR: no
 #: designation means each Project runs its own default script).
 BATCH_OWN_SCRIPT_ITEM = f"Each project's own {DEFAULT_PROJECT_SCRIPT_NAME!r} script (default)"
+
+
+class _CloseWatcher(QObject):
+    """Calls *callback* once a watched window has closed.
+
+    An event filter rather than a signal, because QMainWindow declares no
+    "closed" signal and the windows it watches (the QC viewer) are another
+    module's. Deferred to the next event-loop turn so the window has finished
+    closing — and any file it wrote on the way out is on disk — before the
+    callback reads it.
+    """
+
+    def __init__(self, window, callback) -> None:
+        super().__init__(window)
+        self._callback = callback
+        window.installEventFilter(self)
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt override)
+        if event.type() == QEvent.Type.Close:
+            QTimer.singleShot(0, self._callback)
+        return False
 
 
 class HubWindow(QMainWindow):
@@ -180,7 +208,13 @@ class HubWindow(QMainWindow):
         theme_btn = QPushButton(icon("theme_dark"), "")
         theme_btn.setToolTip("Toggle light/dark theme")
         theme_btn.clicked.connect(self._toggle_theme)
-        for btn in (recent_btn, theme_btn):
+        ## The manual, opened at the page for whatever panel is open; F1 does
+        ## the same from anywhere in the window.
+        help_btn = QPushButton(icon("help"), " Help")
+        help_btn.setToolTip("Open the manual at the page for the open panel (F1).")
+        help_btn.clicked.connect(lambda: show_help(self._help_topic()))
+        install_f1(self, self._help_topic)
+        for btn in (recent_btn, help_btn, theme_btn):
             self._topbar.add_right(btn)
         outer.addWidget(self._topbar)
 
@@ -240,9 +274,9 @@ class HubWindow(QMainWindow):
         open_btn.clicked.connect(self._pick_directory)
         rescan = QPushButton(icon("refresh"), " Rescan")
         rescan.setToolTip(
-            "Walk the batch folder again. The project list is read once when "
-            "the folder is selected; rescan after adding or fixing projects "
-            "outside the app.")
+            "Walk the batch folder again and re-read batch.yaml. The project "
+            "list is read once when the folder is selected; rescan after "
+            "adding or fixing projects (or batch.yaml) outside the app.")
         rescan.clicked.connect(self._action_rescan_batch)
         self._btn_batch_rescan = rescan
         row.addWidget(open_btn)
@@ -265,6 +299,16 @@ class HubWindow(QMainWindow):
             "path inside the batch folder. Double-click to open that Project; "
             "right-click for its blocked members.")
         self._batch_table.doubleClicked.connect(self._on_batch_double_clicked)
+        ## What the user ticked or unticked, by key — kept apart from what a
+        ## rebuild derives, so a row's default can follow the Project (a
+        ## repaired one becomes runnable and checked) while the user's own
+        ## choice never does.
+        ## Per Batch root, because keys are relative to it: opening a Project
+        ## from the table and coming back must not forget them.
+        self._batch_choices_by_root: dict[Path, dict[str, bool]] = {}
+        self._batch_choices: dict[str, bool] = {}
+        self._filling_batch_table = False
+        self._batch_table.itemChanged.connect(self._on_batch_item_changed)
         ## Right-click, not double-click: double-click already means "open
         ## this Project", so the repair menu takes the gesture that is free.
         self._batch_table.setContextMenuPolicy(
@@ -282,6 +326,15 @@ class HubWindow(QMainWindow):
         self._batch_script = QComboBox()
         self._batch_script.setSizePolicy(QSizePolicy.Policy.Ignored,
                                          QSizePolicy.Policy.Fixed)
+        self._batch_script.setToolTip(
+            "The Project Script a Batch Run executes in every checked "
+            "Project. A choice is saved as batch.yaml's designation; the "
+            "first entry stores none, so each Project runs its own 'batch' "
+            "script.")
+        ## `activated`, not `currentIndexChanged`: only a choice the user
+        ## made is a designation — the refresh that fills the picker must
+        ## never write batch.yaml.
+        self._batch_script.activated.connect(self._on_batch_script_chosen)
         row.addWidget(self._batch_script, 1)
         card.add_body(row)
 
@@ -293,7 +346,7 @@ class HubWindow(QMainWindow):
         ## Through a lambda: clicked() would otherwise pass its bool into the
         ## focus argument.
         run.clicked.connect(lambda: self._action_run_batch())
-        card.add_body(run)
+        card.add_body(with_help(run, "preflight"))
 
         ## A Batch Run touches every member of every Project, so the figure
         ## tabs it would open run into the hundreds and bury the Output tab
@@ -319,6 +372,7 @@ class HubWindow(QMainWindow):
         for widget in self._batch_widgets:
             widget.setEnabled(False)
         self._batch_card = card
+        card.set_help("batch-panel")
         self._panels["batch"].add_card(card)
 
     def _build_project_panel(self) -> None:
@@ -335,11 +389,14 @@ class HubWindow(QMainWindow):
         card = Card("Create/Load", Category.NEUTRAL, icon_name="project",
                     subtitle="Open a Project directory and edit its project.yaml.")
         self._project_create_card = card
+        card.set_help("project-create")
 
-        ## Two columns, four buttons, no ragged row: the three states a folder
-        ## can be in — it is a Project, it does not exist at all, or its
-        ## directory exists but its project.yaml does not — then the editor
-        ## for the one that is open.
+        ## The three states a folder can be in — it is a Project, it does not
+        ## exist at all, or its directory exists but its project.yaml does not
+        ## — then the editor for the one that is open. "Initialize existing
+        ## directory…" takes a row of its own: beside any other label it asks
+        ## for more than the 540px panel has, and the panel clips rather than
+        ## scrolling sideways, so the pair simply lost its right edge.
         grid = QGridLayout()
         grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(8)
@@ -377,9 +434,10 @@ class HubWindow(QMainWindow):
         self._btn_edit_project_cfg.setEnabled(False)
         self._btn_edit_project_cfg.clicked.connect(
             self._action_edit_project_config)
-        for i, btn in enumerate((open_btn, create_btn, init_btn,
-                                 self._btn_edit_project_cfg)):
-            grid.addWidget(btn, i // 2, i % 2)
+        grid.addWidget(open_btn, 0, 0)
+        grid.addWidget(create_btn, 0, 1)
+        grid.addWidget(init_btn, 1, 0, 1, 2)
+        grid.addWidget(self._btn_edit_project_cfg, 2, 0, 1, 2)
         ## Full width on its own row: not a fifth way in, but the check you
         ## run over the Project that is open.
         validate_btn = ActionButton("Validate YAMLs", Category.NEUTRAL,
@@ -390,7 +448,7 @@ class HubWindow(QMainWindow):
             "Validating only the loaded member left the rest of a Project "
             "unchecked, which is exactly where a type mismatch hides.")
         validate_btn.clicked.connect(self._action_validate_project)
-        grid.addWidget(validate_btn, 2, 0, 1, 2)
+        grid.addWidget(validate_btn, 3, 0, 1, 2)
         for col in range(2):
             grid.setColumnStretch(col, 1)
         card.add_body(grid)
@@ -408,8 +466,22 @@ class HubWindow(QMainWindow):
                             icon_name="experiment",
                             subtitle="Double-click a member to load it.")
         self._project_members_card = members_card
+        members_card.set_help("project-members")
         self._members_table = self._make_table(
             ["Member", "Config", "Focuses", "N", "Analysed", "Exclusions"])
+        ## What each number means, said where it is read: a member holds
+        ## several Focuses, so "N" and "Analysed" are each one choice among
+        ## several honest answers.
+        for column, tip in (
+                (3, "Individuals in ONE analysed slice: the Active Focus's for "
+                    "the loaded member, otherwise the largest Focus with "
+                    "current results. Focuses overlap, so they are never "
+                    "added up. '—' when no Focus has current results."),
+                (4, "Focuses with current results / declared Focuses, or the "
+                    "analysis date when every Focus is current. 're-run "
+                    "needed' when a saved result is Out of Date; 'blocked' "
+                    "when the member or a Focus cannot run as it stands.")):
+            self._members_table.horizontalHeaderItem(column).setToolTip(tip)
         self._members_table.doubleClicked.connect(self._on_member_double_clicked)
         members_card.add_body(self._members_table)
         hint = QLabel("A row marked Config: missing is a folder with no "
@@ -446,14 +518,14 @@ class HubWindow(QMainWindow):
             "status, so the missing configs can be made and the ambiguous "
             "ones settled without hunting through a file manager.")
         configs_btn.clicked.connect(self._action_member_configs)
-        ## Two columns, like the card above and for the same reason: three of
-        ## these labels across a 540px panel do not fit, and the panel does
-        ## not scroll sideways — it clips. The two ways IN sit side by side,
-        ## and the bulk editor takes its own full-width row below them, where
-        ## Validate YAMLs sits on the Create/Load card.
-        for i, btn in enumerate((create_exp, init_exp)):
-            grid.addWidget(btn, 0, i)
-        grid.addWidget(configs_btn, 1, 0, 1, 2)
+        ## One per row, in the order of the card above: the way in for a
+        ## member that does not exist, the one for a directory already here,
+        ## then the bulk editor. Side by side they asked for more than the
+        ## 540px panel has — "Initialize existing directory…" alone is over
+        ## half of it — and the panel clips rather than scrolling sideways.
+        grid.addWidget(create_exp, 0, 0, 1, 2)
+        grid.addWidget(init_exp, 1, 0, 1, 2)
+        grid.addWidget(configs_btn, 2, 0, 1, 2)
         for col in range(2):
             grid.setColumnStretch(col, 1)
         members_card.add_body(grid)
@@ -496,22 +568,23 @@ class HubWindow(QMainWindow):
 
         actions_card = Card("Actions", Category.NEUTRAL, icon_name="report")
         self._project_actions_card = actions_card
+        actions_card.set_help("project-actions")
         ## Every button here is NEUTRAL. They are all project actions, and
         ## colouring each by the category of the work it happens to do made
         ## one card read as a rainbow of unrelated things — the panel's
         ## identity already comes from the tile above it. Category colour is
         ## reserved for the panels where it distinguishes something: the
-        ## type-contributed Analyze and Plots buttons, and Tools.
+        ## experiment-level sub-panels below the Experiment tile.
         grid = QGridLayout()
         grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(8)
         report_btn = ActionButton("Project report", Category.NEUTRAL,
                                   icon_name="report")
         report_btn.setToolTip(
-            "Bind one section per Member Experiment from each member's SAVED "
-            "outputs, behind the Member Inventory and the Divergence Note. A "
-            "member that has not been analysed yields a 'not analysed' "
-            "section rather than being silently analysed.")
+            "Bind one section per Focus, across every member, from each "
+            "Focus's SAVED outputs, behind the Focus Inventory and the "
+            "Divergence Note. A Focus that has not been analysed yields a "
+            "'not analysed' section rather than being silently analysed.")
         report_btn.clicked.connect(self._action_project_report)
         view_btn = ActionButton("View reports", Category.NEUTRAL,
                                 icon_name="pdf")
@@ -525,9 +598,12 @@ class HubWindow(QMainWindow):
             "(or the loaded one); with several to choose from and none "
             "picked, it asks which.")
         plots_btn.clicked.connect(self._action_open_plot_editor)
-        for i, btn in enumerate((report_btn, view_btn, plots_btn)):
-            grid.addWidget(btn, 0, i)
-        for col in range(3):
+        ## The two report buttons side by side, the editor below them: three
+        ## across asked for more than the panel has, and it clips.
+        grid.addWidget(report_btn, 0, 0)
+        grid.addWidget(view_btn, 0, 1)
+        grid.addWidget(plots_btn, 1, 0, 1, 2)
+        for col in range(2):
             grid.setColumnStretch(col, 1)
         actions_card.add_body(grid)
 
@@ -555,6 +631,7 @@ class HubWindow(QMainWindow):
         ## and the format is a detail of how it writes.
         row.addWidget(render_btn, 2)
         row.addWidget(self._fig_format, 1)
+        row.addWidget(HelpButton("publication-figures"))
         actions_card.add_body(row)
         self._panels["project"].add_card(actions_card)
 
@@ -562,6 +639,7 @@ class HubWindow(QMainWindow):
                             subtitle="The Project's own scripts first, then "
                                      "the built-ins.")
         self._project_scripts_card = scripts_card
+        scripts_card.set_help("project-scripts")
         row = QHBoxLayout()
         self._project_script = QComboBox()
         self._project_script.setSizePolicy(QSizePolicy.Policy.Ignored,
@@ -576,8 +654,9 @@ class HubWindow(QMainWindow):
         edit_btn.setToolTip(
             "Open the Script Editor on project.yaml — Project Scripts plus "
             "the central experiment_scripts: one recipe serving every member.")
-        edit_btn.clicked.connect(self._action_open_script_editor)
-        scripts_card.add_body(edit_btn)
+        edit_btn.clicked.connect(
+            lambda: self._action_open_script_editor(project_level=True))
+        scripts_card.add_body(with_help(edit_btn, "script-editor"))
         self._panels["project"].add_card(scripts_card)
 
     def _set_member_actions_enabled(self, enabled: bool) -> None:
@@ -590,6 +669,7 @@ class HubWindow(QMainWindow):
             subtitle="Tick what a run includes, then Run analysis. Results and "
                      "the report go to analysis/<focus>/; the ticks are saved "
                      "in the config, so scripts and Batch Runs match.")
+        self._analyze_card.set_help("analyze-panel")
         self._panels["analyze"].add_card(self._analyze_card)
 
     def _build_experiment_panel(self) -> None:
@@ -625,11 +705,13 @@ class HubWindow(QMainWindow):
         edit_btn.clicked.connect(lambda: self._action_edit_focuses(new=False))
         row.addWidget(new_btn)
         row.addWidget(edit_btn)
+        row.addWidget(HelpButton("focus-window"))
         focus_card.add_body(row)
+        focus_card.set_help("focus")
         self._focus_shape = QLabel("")
         self._focus_shape.setWordWrap(True)
         self._focus_shape.setStyleSheet("color: palette(mid);")
-        focus_card.add_body(self._focus_shape)
+        focus_card.add_body(with_help(self._focus_shape, "focus-shape"))
         ## Results no declared Focus names — listed, never bound into a report.
         self._orphan_row = QWidget()
         orow = QHBoxLayout(self._orphan_row)
@@ -646,6 +728,7 @@ class HubWindow(QMainWindow):
         drop.clicked.connect(self._action_delete_results)
         orow.addWidget(adopt)
         orow.addWidget(drop)
+        orow.addWidget(HelpButton("focus-status"))
         self._orphan_row.setVisible(False)
         focus_card.add_body(self._orphan_row)
         self._panels["experiment"].add_card(focus_card)
@@ -683,6 +766,7 @@ class HubWindow(QMainWindow):
             "viewer (flag chambers, then Save Exclusions… under a name) — "
             "setting a name no group carries excludes nothing.")
         row.addWidget(self._group_combo, 1)
+        row.addWidget(HelpButton("exclusions"))
         card.add_body(row)
         ## The empty state, said where it appears: an empty picker otherwise
         ## reads as broken, when it just means nobody has saved a group yet.
@@ -695,13 +779,16 @@ class HubWindow(QMainWindow):
         apply_btn.setToolTip(
             "Write `exclusions: {group: …}` into survival_config.yaml. Every "
             "future run drops that group's chambers and stamps the group on "
-            "its outputs; a blank name clears the key.")
+            "its outputs. A blank name means no group: the key is removed, or "
+            "set to an empty group when the Project Defaults name one, so the "
+            "member does not silently inherit it.")
         apply_btn.clicked.connect(self._action_set_exclusion_group)
         card.add_body(apply_btn)
 
         viewer = ActionButton("Chamber QC viewer…", Category.QC, icon_name="chamber")
         viewer.clicked.connect(self._action_open_qc_viewer)
-        card.add_body(viewer)
+        card.add_body(with_help(viewer, "qc-viewer"))
+        card.set_help("qc-panel")
         self._panels["qc"].add_card(card)
 
     def _build_plots_panel(self) -> None:
@@ -711,6 +798,7 @@ class HubWindow(QMainWindow):
             "Plots", Category.PLOTS, icon_name="plot",
             subtitle="Tick the figures to draw, then Generate plots. Every "
                      "saved run includes the same ticked figures.")
+        self._plot_actions_card.set_help("plots-panel")
         self._panels["plots"].add_card(self._plot_actions_card)
         ## No Publication-figure card here. Authoring a figure is Plot Editor
         ## work — the Spec and its Style are what a figure IS (ADR-0005) — and
@@ -720,22 +808,27 @@ class HubWindow(QMainWindow):
 
     def _build_scripts_panel(self) -> None:
         card = Card("Experiment scripts", Category.SCRIPTS, icon_name="scripts",
-                    subtitle="The loaded experiment's own scripts, plus the "
-                             "Project's central set.")
+                    subtitle="The Project's central scripts, then the loaded "
+                             "experiment's own, then the built-ins — a "
+                             "central script wins a name both define, as in "
+                             "a Batch Run.")
         self._scripts_combo = QComboBox()
         card.add_body(self._scripts_combo)
         run = ActionButton("Run script", Category.SCRIPTS, icon_name="play")
         run.clicked.connect(self._action_run_experiment_script)
         card.add_body(run)
         edit = ActionButton("Edit scripts…", Category.SCRIPTS, icon_name="config")
-        edit.clicked.connect(self._action_open_script_editor)
-        card.add_body(edit)
+        edit.setToolTip("Open the Script Editor on the loaded experiment's "
+                        "survival_config.yaml scripts.")
+        edit.clicked.connect(lambda: self._action_open_script_editor())
+        card.add_body(with_help(edit, "script-editor"))
+        card.set_help("experiment-scripts")
         self._panels["scripts"].add_card(card)
 
     def _build_ai_panel(self) -> None:
         card = Card("AI narrative", Category.AI, icon_name="ai",
-                    subtitle="A paragraph per member plus a labelled "
-                             "across-members paragraph. Summarizes the saved "
+                    subtitle="A paragraph per analysed Focus plus a labelled "
+                             "across-Focuses paragraph. Summarizes the saved "
                              "numbers; never computes its own.")
         self._ai_status = QLabel("")
         self._ai_status.setWordWrap(True)
@@ -755,6 +848,7 @@ class HubWindow(QMainWindow):
         with_report.clicked.connect(
             lambda: self._action_project_report(with_narrative=True))
         card.add_body(with_report)
+        card.set_help("ai-narrative")
         self._panels["ai"].add_card(card)
 
     @staticmethod
@@ -772,6 +866,15 @@ class HubWindow(QMainWindow):
         return table
 
     # ── panel open/close ───────────────────────────────────────────────────
+
+    #: The manual page for each panel — what Help and F1 open.
+    _PANEL_HELP = {"batch": "batch-panel", "project": "project-members",
+                   "experiment": "experiment-panel", "qc": "qc-panel",
+                   "analyze": "analyze-panel", "plots": "plots-panel",
+                   "scripts": "experiment-scripts", "ai": "ai-narrative"}
+
+    def _help_topic(self) -> str:
+        return self._PANEL_HELP.get(self._open_panel or "", "hub")
 
     def _toggle_panel(self, key: str) -> None:
         if self._open_panel == key:
@@ -934,28 +1037,39 @@ class HubWindow(QMainWindow):
         self._project = None
         self._experiment = None
 
-        if is_project_dir(p):
-            try:
+        ## Every branch reads a YAML file, and one that does not parse raises
+        ## a ValueError naming the file and line. Said, not fatal: the
+        ## selection stays, so Validate YAMLs and the editors can still reach
+        ## the file that needs fixing.
+        try:
+            if is_project_dir(p):
                 self._project = Project(p)
-            except ProjectError as exc:
-                self._warn(str(exc))
-        elif is_experiment_dir(p):
-            # A standalone Experiment Directory loads itself: with no pooling,
-            # a Project buys it nothing (ADR-0003).
-            parent_project = Project(p.parent) if is_project_dir(p.parent) else None
-            self._project = parent_project
-            defaults = parent_project.defaults if parent_project else {}
-            self._experiment = SurvivalExperiment(p, defaults=defaults,
-                                                  project=parent_project)
-            self._log.append_line(f"Loaded standalone experiment {p.name} "
-                             f"({self._experiment.type.label}).")
-        else:
-            ## Recursive: Projects need not be immediate children, so a
-            ## grouping folder full of dated subfolders is a Batch too. The
-            ## walk is done once here and cached on the Batch.
-            candidate = Batch(p)
-            if candidate.batch_projects():
-                self._batch = candidate
+            elif is_experiment_dir(p):
+                # A standalone Experiment Directory loads itself: with no
+                # pooling, a Project buys it nothing (ADR-0003).
+                parent_project = Project(p.parent) if is_project_dir(p.parent) else None
+                self._project = parent_project
+                defaults = parent_project.defaults if parent_project else {}
+                self._experiment = SurvivalExperiment(p, defaults=defaults,
+                                                      project=parent_project)
+                self._log.append_line(f"Loaded standalone experiment {p.name} "
+                                      f"({self._experiment.type.label}).")
+            else:
+                ## Recursive: Projects need not be immediate children, so a
+                ## grouping folder full of dated subfolders is a Batch too.
+                ## The walk is done once here and cached on the Batch.
+                candidate = Batch(p)
+                if candidate.batch_projects():
+                    self._batch = candidate
+                    if candidate.config_error:
+                        ## Listed anyway — the walk finds the Projects — but
+                        ## it cannot run until the file parses.
+                        self._warn(f"{candidate.config_error}\n\nThe batch is "
+                                   f"listed but cannot run until "
+                                   f"{cfgmod.BATCH_FILENAME} is fixed.")
+        except (ProjectError, ValueError) as exc:
+            self._warn(str(exc))
+        self._batch_choices = self._batch_choices_by_root.setdefault(p, {})
 
         ui_settings.add_recent_project(str(p))
         kind = ("Batch" if self._batch is not None else
@@ -994,11 +1108,13 @@ class HubWindow(QMainWindow):
                 self._refresh_all()
             return
         try:
-            self._experiment = self._project.member(name)
-        except ProjectError as exc:
+            experiment = self._project.member(name)
+            label = experiment.type.label
+        except (ProjectError, ValueError) as exc:     # a config that will not parse
             self._warn(str(exc))
             return
-        self._log.append_line(f"Loaded {name} ({self._experiment.type.label}).")
+        self._experiment = experiment
+        self._log.append_line(f"Loaded {name} ({label}).")
         self._refresh_all()
         ## Loading is a means, not an end, but analysing comes second: every
         ## experiment-level surface acts on the Active Focus, so the
@@ -1015,16 +1131,23 @@ class HubWindow(QMainWindow):
         ## the table went on showing the state the Project was loaded with,
         ## and a member that had just gone stale never said so. Cheap: one
         ## small YAML per member, which is what the status contract assumes.
-        if self._project is not None:
-            self._project.members(reload=True)
-        self._refresh_tables()
-        self._refresh_focuses()
-        self._refresh_action_panels()
-        self._refresh_scripts()
-        self._refresh_exclusion_groups()
-        self._refresh_ai()
-        self._refresh_project_card()
-        self._refresh_tiles()
+        ## A config that does not parse raises a ValueError naming the file
+        ## and line; said in the log rather than allowed to abort the Hub — a
+        ## refresh runs after every action, so one hand-edited YAML would
+        ## otherwise take the window down with it.
+        try:
+            if self._project is not None:
+                self._project.members(reload=True)
+            self._refresh_tables()
+            self._refresh_focuses()
+            self._refresh_action_panels()
+            self._refresh_scripts()
+            self._refresh_exclusion_groups()
+            self._refresh_ai()
+            self._refresh_project_card()
+            self._refresh_tiles()
+        except (ValueError, ExperimentError) as exc:
+            self._log.append_line(f"! {exc}")
 
     def _refresh_project_card(self) -> None:
         """The Create/Load card's own state: what the fourth button will do,
@@ -1091,11 +1214,25 @@ class HubWindow(QMainWindow):
         self._tiles["project"].set_dimmed(False)
         if self._project is not None:
             members = self._project.members()
-            analysed = sum(1 for m in members if m.status().analyzed)
+            ## Counted per Focus, the unit of analysis, and only CURRENT
+            ## results: a member whose every result was Out of Date used to
+            ## count as analysed, on the tile beside a table saying "re-run
+            ## needed".
+            declared = current = 0
+            for member in members:
+                try:
+                    focuses = member.status(check_blocked=False).focuses
+                except Exception:  # noqa: BLE001 - a broken member counts nothing
+                    continue
+                declared += len(focuses)
+                current += sum(1 for f in focuses if f.analyzed and not f.out_of_date)
             loaded = (f"loaded: {self._experiment.name}" if self._experiment
                       else "double-click a member to load")
             self._tiles["project"].set_summary(
-                [f"{len(members)} member(s) · {analysed} analysed", loaded])
+                [f"{len(members)} member(s) · {current}/{declared} Focuses analysed",
+                 loaded,
+                 "analysed = saved results that are current; Out of Date "
+                 "results are not counted"])
         elif self._experiment is not None:
             self._tiles["project"].set_summary(
                 ["standalone experiment", self._experiment.name])
@@ -1138,13 +1275,21 @@ class HubWindow(QMainWindow):
                  (f"{fstatus.n_total or '—'} individuals · {fstatus.state}"
                   if fstatus and fstatus.analyzed
                   else (fstatus.state if fstatus else "not analysed yet"))])
+            excluded = self._chambers_excluded(self._experiment)
             self._subtiles["qc"].set_summary(
                 [f"group: {self._experiment.exclusion_group or 'none'}",
-                 f"{status.n_excluded} chamber(s) excluded"])
+                 f"{'—' if excluded is None else excluded} chamber(s) excluded",
+                 "chambers of this data file that the active group and the "
+                 "workbook's ChamberFlags remove from every Focus's next run"])
+            ## The Headline Figure is a property of the Focus, not the type:
+            ## the faceted KM when the Active Focus crosses factors.
+            shape = (self._experiment.estimated_shape(active)
+                     if active is not None else None)
             self._subtiles["plots"].set_summary(
-                [f"focus shape: {fstatus.shape or '—'}" if fstatus
+                [f"focus shape: {fstatus.shape or (shape.describe() if shape else '—')}"
+                 if fstatus
                  else f"{len(self._experiment.type.plot_ids())} figure(s) in the set",
-                 f"headline: {self._experiment.type.headline_plot_id or '—'}"])
+                 f"headline: {self._experiment.type.headline_for(shape) or '—'}"])
             self._subtiles["scripts"].set_summary(
                 [f"{len(self._experiment.scripts())} experiment script(s)",
                  f"{len(self._project.scripts()) if self._project else 0} "
@@ -1168,7 +1313,7 @@ class HubWindow(QMainWindow):
             self._subtiles["ai"].set_dimmed(not ready)
             self._subtiles["ai"].set_summary(
                 [f"{providers} provider(s)",
-                 "per-member + across-members" if ready
+                 "per Focus + across Focuses" if ready
                  else "select a project first"])
         self._refresh_card_dimming()
         self._refresh_report_button()
@@ -1177,8 +1322,6 @@ class HubWindow(QMainWindow):
         if self._project is not None:
             rows.append(("Project", f"{self._project.name} · "
                                     f"{self._project.type.label}"))
-            if self._project.question:
-                rows.append(("Question", self._project.question))
         if self._experiment is not None:
             rows.append(("Experiment", f"{self._experiment.name} · "
                                        f"{self._experiment.type.label}"))
@@ -1189,6 +1332,12 @@ class HubWindow(QMainWindow):
                          if active is not None else "none resolved"))
         else:
             rows.append(("Experiment", "none loaded"))
+        ## Last, because the readout shows only its first rows and spills the
+        ## rest into the tooltip: placed after Project, the question pushed
+        ## the Focus row out of sight exactly when an experiment was loaded,
+        ## and the Focus is the half of the answer that changes the numbers.
+        if self._project is not None and self._project.question:
+            rows.append(("Question", self._project.question))
         self._status_panel.set_rows(rows)
 
     def _refresh_report_button(self) -> None:
@@ -1251,14 +1400,25 @@ class HubWindow(QMainWindow):
                 card.restyle()
 
     def _refresh_tables(self) -> None:
+        self._filling_batch_table = True
+        try:
+            self._refresh_batch_table()
+        finally:
+            self._filling_batch_table = False
+        self._refresh_members_table()
+
+    def _on_batch_item_changed(self, item) -> None:
+        """Record a tick the user made — not one a rebuild made."""
+        if self._filling_batch_table or item.column() != 0:
+            return
+        self._batch_choices[item.text()] = item.checkState() == Qt.CheckState.Checked
+
+    def _refresh_batch_table(self) -> None:
         ## Rebuilding must not silently re-check a Project the user unchecked;
-        ## a new row defaults to checked unless nothing in it can run, which
-        ## can only produce a failure.
-        previous = {}
-        for row in range(self._batch_table.rowCount()):
-            item = self._batch_table.item(row, 0)
-            if item is not None:
-                previous[item.text()] = item.checkState()
+        ## a row nobody decided is checked exactly when it can run — one with
+        ## nothing usable can only produce a failure, and one repaired since
+        ## becomes runnable and joins. Carrying the previous check column
+        ## instead froze a repaired Project unchecked for the session.
         self._batch_table.setRowCount(0)
         live = self._batch is not None
         self._batch_empty.setVisible(not live)
@@ -1286,9 +1446,9 @@ class HubWindow(QMainWindow):
                 row = self._batch_table.rowCount() - 1
                 item = self._batch_table.item(row, 0)
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                item.setCheckState(previous.get(
-                    entry.key, Qt.CheckState.Checked if entry.runnable
-                    else Qt.CheckState.Unchecked))
+                wanted = self._batch_choices.get(entry.key, entry.runnable)
+                item.setCheckState(Qt.CheckState.Checked if wanted
+                                   else Qt.CheckState.Unchecked)
                 item.setToolTip(str(entry.directory))
                 if blocked:
                     ## Red, with the reasons in the tooltip: the panel has no
@@ -1313,22 +1473,40 @@ class HubWindow(QMainWindow):
             names += [n for n in project_actions.builtin_names() if n not in names]
             self._batch_script.addItems(names)
             if self._batch.designated_script:
+                ## A designation naming a script only some Projects carry is
+                ## still the designation in force — listed, rather than the
+                ## picker reading "each project's own" while it applies.
                 idx = self._batch_script.findText(self._batch.designated_script)
-                if idx >= 0:
-                    self._batch_script.setCurrentIndex(idx)
+                if idx < 0:
+                    self._batch_script.addItem(self._batch.designated_script)
+                    idx = self._batch_script.count() - 1
+                self._batch_script.setCurrentIndex(idx)
 
+    def _refresh_members_table(self) -> None:
         self._members_table.setRowCount(0)
         if self._project is not None:
             for member in self._project.members():
                 st = member.status()
                 focuses = st.focuses
+                ## The layout half of being blocked — no data file, or several
+                ## and no `data_file:` — is a property of the directory, not of
+                ## any Focus, so the Focus states below never saw it and such a
+                ## member read as a normal row until a run failed on it.
+                try:
+                    place = layout_mod.classify(member.directory)
+                except ValueError as exc:         # its config does not parse
+                    place = layout_mod.MemberLayout(
+                        member.directory, member.name, layout_mod.UNREADABLE,
+                        str(exc), configured=True)
                 ## Per Focus, because the Focus is the unit of analysis: "2/3"
                 ## says one slice still needs running, and "re-run needed"
                 ## beats a bare date — the saved results are real, they just
                 ## describe a slice or a population the config no longer asks
                 ## for.
                 current = st.n_analyzed
-                if st.blocked:
+                if place.blocked:
+                    analysed = f"blocked: {place.status}"
+                elif st.blocked:
                     analysed = f"{current}/{len(focuses)} · {len(st.blocked)} blocked"
                 elif st.out_of_date:
                     analysed = "re-run needed"
@@ -1339,23 +1517,38 @@ class HubWindow(QMainWindow):
                     analysed = "no"
                 names = ", ".join(f.name for f in focuses[:3]) + \
                     (" …" if len(focuses) > 3 else "")
+                ## One slice's N, never a sum — each Focus is its own slice and
+                ## they overlap. Which slice is said in the cell's tooltip.
+                active = self._experiment.active() if self._is_loaded(member) else None
+                shown = self._shown_slice(st, active)
                 self._append_row(self._members_table, [
                     member.name,
                     "yes",
                     f"{len(focuses)}: {names}" if focuses else "—",
-                    str(st.n_total or "—"),
+                    str(shown.n_total) if shown is not None and shown.n_total else "—",
                     analysed,
                     st.exclusion_group or "none",
                 ])
+                row = self._members_table.rowCount() - 1
+                if shown is not None:
+                    which = ("the Active Focus" if active is not None
+                             and shown.name == active.name
+                             else "the largest Focus with current results")
+                    self._members_table.item(row, 3).setToolTip(
+                        f"N of Focus {shown.name} — {which}.")
                 trouble = [f for f in focuses
                            if f.blocked or (f.analyzed and f.out_of_date)]
-                if trouble:
-                    row = self._members_table.rowCount() - 1
+                if place.blocked or trouble:
                     brush = QBrush(blocked_color())
-                    detail = "\n".join(
+                    lines = []
+                    if place.blocked:
+                        lines.append(f"Blocked — {place.detail or place.status}. "
+                                     + self._member_fix_hint(place))
+                    lines += [
                         f"{f.name}: blocked — {'; '.join(f.blocked)}" if f.blocked
                         else f"{f.name}: out of date — {'; '.join(f.out_of_date_reasons)}"
-                        for f in trouble)
+                        for f in trouble]
+                    detail = "\n".join(lines)
                     for column in range(self._members_table.columnCount()):
                         cell = self._members_table.item(row, column)
                         if cell is not None:
@@ -1393,6 +1586,65 @@ class HubWindow(QMainWindow):
         for col, value in enumerate(values):
             table.setItem(row, col, QTableWidgetItem(str(value)))
 
+    @staticmethod
+    def _chambers_excluded(experiment) -> int | None:
+        """How many of the data file's chambers the active configuration
+        removes — the Exclusion Group plus the workbook's ChamberFlags.
+
+        Configuration, like the group named beside it, so it no longer comes
+        from whichever Focus happened to be analysed first (under whatever
+        group was active then). Chambers a group lists that the file does not
+        have are not counted, and a CSV, which has no chamber identities,
+        removes none. ``None`` when the data file cannot be read.
+        """
+        from ..domain.focus import norm_chamber
+
+        design = experiment.try_design()
+        if design is None:
+            return None
+        if not design.chamber_cells:
+            return 0
+        try:
+            excluded = {norm_chamber(c) for c in experiment.all_excluded_chambers()}
+        except Exception:  # noqa: BLE001 - an unreadable qc file counts nothing
+            return None
+        present = {norm_chamber(chamber) for chamber, _cell in design.chamber_cells}
+        return len(present & excluded)
+
+    def _is_loaded(self, member) -> bool:
+        """Whether *member* is the experiment loaded in the Hub. By directory:
+        a refresh re-reads the members, so the objects are never the same."""
+        return (self._experiment is not None
+                and Path(member.directory) == Path(self._experiment.directory))
+
+    @staticmethod
+    def _shown_slice(status, active=None):
+        """The Focus whose numbers stand for a member in one cell: the Active
+        Focus's when it has current results, otherwise the largest Focus that
+        does. ``None`` when nothing current exists.
+
+        Never the first analysed Focus in file order — that was an arbitrary
+        slice, out-of-date ones included, presented as the member's N.
+        """
+        current = [f for f in status.focuses if f.analyzed and not f.out_of_date]
+        if active is not None:
+            for focus in current:
+                if focus.name == active.name:
+                    return focus
+        return max(current, key=lambda f: f.n_total or 0, default=None)
+
+    @staticmethod
+    def _member_fix_hint(place) -> str:
+        """What clears a member's layout block, in the words of the button
+        that does it."""
+        if place.fix == "data_file":
+            return ("Name the experiment's file with Experiment configs… → "
+                    "Set data file….")
+        if place.status == layout_mod.NO_DATA:
+            return ("Put its .xlsx/.csv/.tsv in data/ (or the directory root), "
+                    "or point `data_file:` at it.")
+        return "It has to be sorted out by hand."
+
     def _refresh_action_panels(self) -> None:
         """Rebuild the Analyze and Plots cards for the Active Focus (ADR-0012).
 
@@ -1413,8 +1665,13 @@ class HubWindow(QMainWindow):
 
         experiment = self._experiment
         if experiment is None:
-            analyze.addWidget(QLabel("Load an experiment to see its analyses."))
-            plots.addWidget(QLabel("Load an experiment to see its plots."))
+            ## Wrapped: an unwrapped label is as wide as its text, and these
+            ## two were wider than the narrow sub-panels they sit in.
+            for layout, text in ((analyze, "Load an experiment to see its analyses."),
+                                 (plots, "Load an experiment to see its plots.")):
+                empty = QLabel(text)
+                empty.setWordWrap(True)
+                layout.addWidget(empty)
             return
 
         exp_type = experiment.type
@@ -1423,8 +1680,9 @@ class HubWindow(QMainWindow):
         omit_analyses = experiment.omitted("analyses")
         offered = exp_type.analysis_set_for(shape)
         for analysis in offered:
-            analyze.addWidget(self._selection_box(
-                "analyses", analysis, shape, checked=analysis.id not in omit_analyses))
+            analyze.addWidget(with_help(self._selection_box(
+                "analyses", analysis, shape, checked=analysis.id not in omit_analyses),
+                analysis_topic(analysis.id)))
         run = ActionButton("Run analysis", Category.ANALYZE, icon_name="analyze")
         run.setToolTip("Run the ticked analyses and figures under the Active "
                        "Focus, and write the results and the report to "
@@ -1438,9 +1696,9 @@ class HubWindow(QMainWindow):
         omit_plots = experiment.omitted("plots")
         for plot in exp_type.plot_set_for(shape):
             needs = [labels.get(n, n) for n in plot.needs if n in omit_analyses]
-            plots.addWidget(self._selection_box(
+            plots.addWidget(with_help(self._selection_box(
                 "plots", plot, shape, checked=plot.id not in omit_plots,
-                needs=needs))
+                needs=needs), plot_topic(plot.id)))
         generate = ActionButton("Generate plots", Category.PLOTS, icon_name="plot")
         generate.setToolTip("Draw the ticked figures for the Active Focus into "
                             "tabs, and save them to analysis/<focus>/plots/.")
@@ -1492,7 +1750,14 @@ class HubWindow(QMainWindow):
         experiment = self._experiment
         if experiment is None:
             return
-        experiment.set_included(kind, item.id, included)
+        try:
+            experiment.set_included(kind, item.id, included)
+        except (ExperimentError, ValueError, OSError) as exc:
+            ## A config that does not parse refuses every write; put the box
+            ## back to what the file says rather than let it lie.
+            self._warn(str(exc))
+            QTimer.singleShot(0, self._refresh_action_panels)
+            return
         self._log.append_line(
             f"{item.label}: {'included in' if included else 'left out of'} "
             f"{experiment.name}'s runs — {cfgmod.CONFIG_FILENAME} omit:.")
@@ -1726,8 +1991,11 @@ class HubWindow(QMainWindow):
             notes.append("Orphaned results (no Focus names them): "
                          + ", ".join(status.orphaned))
         if status.legacy_results:
-            notes.append("Pre-Focus results in analysis/ — never adopted; "
-                         "re-run to replace them.")
+            ## A re-run writes into analysis/<focus>/ and never touches the
+            ## bare files, so "re-run to replace them" left them there for
+            ## good. Delete… is the only thing that removes them.
+            notes.append("Pre-Focus results in analysis/ — never adopted and "
+                         "never replaced by a re-run; Delete… removes them.")
         self._orphan_label.setText(" · ".join(notes))
         self._orphan_row.setVisible(bool(notes))
 
@@ -1825,12 +2093,21 @@ class HubWindow(QMainWindow):
         if self._batch is None:
             self._warn("Select a directory that holds Projects first.")
             return
+        if self._batch.config_error:
+            self._warn(f"{self._batch.config_error}\n\nFix "
+                       f"{cfgmod.BATCH_FILENAME} before running this batch — its "
+                       f"designated script is unknown until it parses.")
+            return
         dialog = BatchPreflightDialog(
             self, self._batch.directory,
             checked=self._batch_checked_keys(), log=self._log.append_line)
         if focus is not None:
             dialog.focus_member(focus)
         accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        if accepted:
+            ## What the user decided in the review is what the table shows
+            ## next — one set of ticks, not two that drift apart.
+            self._batch_choices.update(dialog.user_choices)
         ## Scaffolding inside the dialog changes the tree either way, so the
         ## cached walk is stale whether or not the run goes ahead.
         self._batch.rescan()
@@ -1850,6 +2127,28 @@ class HubWindow(QMainWindow):
                     lambda: batch.run(name, log=print,
                                       project_names=keys).summary(),
                     batch=True)
+
+    def _on_batch_script_chosen(self, _index: int) -> None:
+        """Persist the picker: the designation lives in ``batch.yaml``, so a
+        command-line ``batch`` run and the next session see the same choice.
+        It used to be read from the file but never written, so a choice made
+        here applied to one click of Run batch and nothing else."""
+        if self._batch is None:
+            return
+        text = self._batch_script.currentText()
+        name = None if text == BATCH_OWN_SCRIPT_ITEM else text
+        try:
+            written = self._batch.designate(name)
+        except (OSError, ValueError) as exc:
+            self._warn(f"Could not save the designation to "
+                       f"{cfgmod.BATCH_FILENAME}:\n{exc}")
+            return
+        if written:
+            self._log.append_line(
+                f"[batch] {cfgmod.BATCH_FILENAME}: "
+                + (f"every Project runs {name!r}." if name else
+                   f"no designation — each Project runs its own "
+                   f"{DEFAULT_PROJECT_SCRIPT_NAME!r} script."))
 
     def _batch_checked_keys(self) -> list[str]:
         """The Projects checked in the Batch table, by key."""
@@ -1872,6 +2171,9 @@ class HubWindow(QMainWindow):
             + (f", {blocked} blocked member(s)" if blocked else ""))
         for key, why in found["skipped"]:
             self._log.append_line(f"[batch] {key} skipped — {why}")
+        if self._batch.config_error:
+            self._log.append_line(f"! {self._batch.config_error} — the batch "
+                                  f"cannot run until it is fixed.")
         self._refresh_all()
 
     def _batch_entry_at(self, row: int):
@@ -1955,11 +2257,15 @@ class HubWindow(QMainWindow):
         from ..ai import narrative as ai_narrative
 
         project = self._project
+        ## The AI card's choice, read now on the GUI thread: this button sits
+        ## under the Provider picker, and quietly taking the first configured
+        ## provider instead made the picker a decoration for it.
+        provider = (self._ai_provider.currentText() or None) if with_narrative else None
 
         def _job():
             text = None
             if with_narrative:
-                text = ai_narrative.generate(project, log=print)
+                text = ai_narrative.generate(project, provider=provider, log=print)
             written = project_report.write_project_report(
                 project, narrative=text, log=print)
             return f"Project report: {written.get('pdf') or written.get('md')}"
@@ -1974,12 +2280,31 @@ class HubWindow(QMainWindow):
         member whose config was never scaffolded is invisible to the members
         table until a Batch Run fails on it.
         """
+        selection = self._selection
+        if self._project is None and self._experiment is None and selection is not None:
+            ## Selected but not loaded: its YAML did not parse. That is
+            ## precisely the problem this button exists to report.
+            reader = (Project if is_project_dir(selection) else
+                      SurvivalExperiment if is_experiment_dir(selection) else None)
+            if reader is not None:
+                try:
+                    reader(selection)
+                except (ProjectError, ValueError) as exc:
+                    self._log.append_line(f"{selection.name}: validation problems:")
+                    self._log.append_line(f"  - {exc}")
+                    self._log.append_line(
+                        "[validate] 1 file(s) checked, 1 problem(s).")
+                    return
         if self._project is None:
             ## A standalone experiment has no Project above it (ADR-0003),
             ## but its one config still deserves the button — this absorbed
             ## the Tools panel's "Validate config".
             if self._experiment is not None:
-                problems = self._experiment.validate()
+                try:
+                    problems = SurvivalExperiment(
+                        self._experiment.directory).validate()
+                except ValueError as exc:         # the file does not parse
+                    problems = [str(exc)]
                 if problems:
                     self._log.append_line(
                         f"{self._experiment.name} config problems:")
@@ -1992,20 +2317,33 @@ class HubWindow(QMainWindow):
             self._warn("No Project selected.")
             return
         checked = 1 + len(self._project.member_dirs())
-        problems = self._project.validate()
+        ## Read fresh: a parse error made since the Project was opened is
+        ## exactly what this button is for, and the loaded copy cannot see it.
+        ## One that escapes as a ValueError is listed, never raised.
+        divergences = []
+        try:
+            project = Project(self._project.directory)
+            problems = project.validate()
+            divergences = project.divergences()
+        except (ProjectError, ValueError) as exc:
+            problems = [str(exc)]
         if problems:
             self._log.append_line("Project validation problems:")
             for problem in problems:
                 self._log.append_line(f"  - {problem}")
         else:
             self._log.append_line("Project validation passed.")
-        for divergence in self._project.divergences():
+        for divergence in divergences:
             self._log.append_line(f"  divergence — {divergence}")
 
         ## Blocked members are a validation result too — a directory holding
         ## data with no config is not a member yet, so nothing above sees it.
-        blocked = [m for m in layout_mod.members_in(self._project.directory)
-                   if m.blocked]
+        try:
+            blocked = [m for m in layout_mod.members_in(self._project.directory)
+                       if m.blocked]
+        except ValueError as exc:                # a member config that will not parse
+            self._log.append_line(f"  - {exc}")
+            blocked = []
         for member in blocked:
             self._log.append_line(f"  blocked — {member.describe()}")
         self._log.append_line(
@@ -2093,7 +2431,7 @@ class HubWindow(QMainWindow):
             return None
         try:
             member = self._project.add_member(name)
-        except (ProjectError, OSError) as exc:
+        except (ProjectError, OSError, ValueError) as exc:
             self._warn(f"Could not create the config for '{name}': {exc}")
             return None
         self._log.append_line(
@@ -2319,7 +2657,12 @@ class HubWindow(QMainWindow):
             list(item.candidates))
         if choice is None:
             return
-        config = cfgmod.load_config(item.directory)
+        try:
+            config = cfgmod.load_config(item.directory)
+        except ValueError as exc:                 # never written over
+            self._warn(f"{item.name}'s config could not be read, so nothing "
+                       f"was written:\n{exc}")
+            return
         config["data_file"] = choice
         cfgmod.save_config(item.directory, config)
         self._log.append_line(f"{item.name}: data_file: {choice}")
@@ -2362,7 +2705,7 @@ class HubWindow(QMainWindow):
             return
         try:
             member = self._project.adopt_directory(chosen)
-        except (ProjectError, OSError) as exc:
+        except (ProjectError, OSError, ValueError) as exc:
             self._warn(str(exc))
             return
         moved = "" if Path(path).resolve() == member.directory else \
@@ -2383,7 +2726,7 @@ class HubWindow(QMainWindow):
         inside = self._project.directory in source.parents
         try:
             member = self._project.adopt_data_file(source)
-        except (ProjectError, OSError) as exc:
+        except (ProjectError, OSError, ValueError) as exc:
             self._warn(str(exc))
             return
         verb = "moved" if inside else "copied"
@@ -2455,22 +2798,33 @@ class HubWindow(QMainWindow):
             self._warn("Load an experiment first.")
             return
         group = self._group_combo.currentText().strip()
-        config = dict(self._experiment.raw_config)
+        ## From disk, not the cached raw_config: writing the copy the
+        ## experiment was loaded with would undo any edit made since — a
+        ## script saved in the Script Editor, say.
+        try:
+            config = cfgmod.load_config(self._experiment.directory)
+        except ValueError as exc:
+            self._warn(str(exc))
+            return
+        inherited = cfgmod.exclusion_group(
+            self._project.defaults if self._project else {})
         if group:
             config["exclusions"] = {"group": group}
+        elif inherited:
+            ## Clearing the key would hand the member straight back to the
+            ## Project Defaults' group — the opposite of "none". An explicit
+            ## empty group overrides it (`exclusions` merges key by key).
+            config["exclusions"] = {"group": ""}
         else:
             config.pop("exclusions", None)
         cfgmod.save_config(self._experiment.directory, config)
-        active = self._experiment.active_focus
-        self._experiment = SurvivalExperiment(
-            self._experiment.directory,
-            defaults=self._project.defaults if self._project else {},
-            project=self._project)
-        self._experiment.active_focus = active
+        self._reload_from_disk()
         self._log.append_line(
             f"Active exclusion group for {self._experiment.name}: "
             f"{group or 'none'} — written to {cfgmod.CONFIG_FILENAME} and "
-            f"stamped on every future run.")
+            f"stamped on every future run"
+            + (f" (overriding the Project default {inherited!r})."
+               if not group and inherited else "."))
         self._refresh_all()
 
     def _action_open_qc_viewer(self) -> None:
@@ -2479,10 +2833,24 @@ class HubWindow(QMainWindow):
             return
         from .qc_viewer import QcViewerWindow
 
+        ## The loaded experiment itself, so the viewer reads the same config
+        ## and the Project's defaults rather than re-deriving them.
         viewer = QcViewerWindow(str(self._experiment.directory),
-                                focus=self._experiment.active())
+                                focus=self._experiment.active(),
+                                experiment=self._experiment)
+        ## The viewer writes the groups the Active group picker lists: re-read
+        ## after every save (it can save while staying open) and once more
+        ## when it closes. Without either, a group saved there was missing
+        ## here until something else happened to refresh the Hub.
+        viewer.exclusionsSaved.connect(self._on_exclusions_saved)
+        _CloseWatcher(viewer, self._refresh_all)
         viewer.show()
         self._qc_window = viewer
+
+    def _on_exclusions_saved(self, group: str) -> None:
+        self._log.append_line(
+            f"Exclusion group {group!r} saved in the Chamber QC viewer.")
+        self._refresh_all()
 
     def _action_render_figures(self) -> None:
         """Render every member's curated Publication Figures.
@@ -2563,7 +2931,13 @@ class HubWindow(QMainWindow):
             return
         from .plot_editor import PlotEditorWindow
 
-        editor = PlotEditorWindow(subject)
+        try:
+            editor = PlotEditorWindow(subject)
+        except (ValueError, ExperimentError) as exc:
+            ## A plot_specs.yaml (or config) that will not parse is the
+            ## user's file to fix — say which, rather than open nothing.
+            self._warn(f"Cannot open the Plot Editor on {subject.name}: {exc}")
+            return
         editor.show()
         self._plot_editor = editor
         self._log.append_line(f"Plot Editor: {subject.name}")
@@ -2576,12 +2950,11 @@ class HubWindow(QMainWindow):
 
         experiment = self._experiment
         name = self._scripts_combo.currentText()
-        steps = None
-        for script in experiment.scripts():
-            if script.get("name") == name:
-                steps = list(script.get("steps") or [])
-        if steps is None:
-            steps = project_actions.BUILTIN_EXPERIMENT_SCRIPTS.get(name)
+        ## The resolver run_in_experiments uses — central, then the member's
+        ## own, then the built-ins — so a name means the same recipe here as
+        ## in a Batch Run.
+        steps = project_actions.resolve_experiment_script(
+            experiment, experiment.project, name)
         if steps is None:
             self._warn(f"No Experiment Script named {name!r}.")
             return
@@ -2599,16 +2972,67 @@ class HubWindow(QMainWindow):
 
         self._spawn(f"Experiment script: {name}", _job)
 
-    def _action_open_script_editor(self) -> None:
+    def _action_open_script_editor(self, *, project_level: bool = False) -> None:
+        """Open the Script Editor — on ``project.yaml`` from the Project's
+        Scripts card, on the loaded experiment from the Experiment scripts
+        card.
+
+        The Project card's button used to open whichever experiment was
+        loaded, so "Edit scripts…" under the Project Scripts it lists landed
+        on a member's survival_config.yaml instead.
+        """
         from ..script_editor.window import ScriptEditorWindow
 
-        target = self._experiment.directory if self._experiment else self._selection
+        if project_level:
+            if self._project is None:
+                self._warn("Open a Project first — Project Scripts live in its "
+                           "project.yaml.")
+                return
+            target = self._project.directory
+        else:
+            target = self._experiment.directory if self._experiment else self._selection
         if target is None:
             self._warn("Open a directory first.")
             return
-        editor = ScriptEditorWindow(str(target))
+        try:
+            editor = ScriptEditorWindow(str(target))
+        except ValueError as exc:                 # a YAML the editor cannot parse
+            self._warn(str(exc))
+            return
+        ## The Hub holds the configs it runs in memory; without this it went
+        ## on running the scripts as they were before the save, until the
+        ## experiment was loaded again.
+        editor.scriptsSaved.connect(self._on_scripts_saved)
         editor.show()
         self._script_editor = editor
+
+    def _on_scripts_saved(self, path: str) -> None:
+        """The Script Editor wrote *path*: re-read the Project and the loaded
+        experiment from disk, then refresh everything that lists scripts."""
+        self._log.append_line(f"Scripts saved to {path} — reloaded.")
+        self._reload_from_disk()
+        self._refresh_all()
+
+    def _reload_from_disk(self) -> None:
+        """Rebuild the loaded Project and experiment from their files.
+
+        Both cache their YAML when constructed (``Project.config``, the
+        experiment's ``raw_config``), so anything that writes a config behind
+        their backs — a script save, a group set here — must swap them for
+        fresh ones. The Active Focus is UI state and survives the swap.
+        """
+        active = self._experiment.active_focus if self._experiment else None
+        try:
+            if self._project is not None:
+                self._project = Project(self._project.directory)
+            if self._experiment is not None:
+                self._experiment = SurvivalExperiment(
+                    self._experiment.directory,
+                    defaults=self._project.defaults if self._project else {},
+                    project=self._project)
+                self._experiment.active_focus = active
+        except (ProjectError, ValueError) as exc:
+            self._warn(f"Could not re-read the configuration:\n{exc}")
 
     def _action_ai_narrative(self) -> None:
         if self._project is None:
@@ -2620,6 +3044,8 @@ class HubWindow(QMainWindow):
         provider = self._ai_provider.currentText() or None
 
         def _job():
+            ## Saved as it is written (beside the Project Report), so the
+            ## text outlives the log — until a re-run deletes it.
             text = ai_narrative.generate(project, provider=provider, log=print)
             for name, paragraph in text.items():
                 print(f"\n[{name}]\n{paragraph}")
@@ -2658,11 +3084,58 @@ class HubWindow(QMainWindow):
         self._restyle_cards()
 
 
+class _ExceptionRelay(QObject):
+    """Carries an uncaught exception's text to the Hub's log.
+
+    A signal, because ``sys.excepthook`` runs in whatever thread raised: the
+    relay lives in the GUI thread, so an emit from elsewhere is queued there
+    rather than touching a widget off-thread.
+    """
+
+    raised = pyqtSignal(str)
+
+
+def install_excepthook(window: HubWindow) -> None:
+    """Log uncaught exceptions — to stderr and the Hub's Output tab — instead
+    of losing the app to them.
+
+    PyQt6 treats an exception escaping a slot as fatal and aborts the process
+    when ``sys.excepthook`` is the default, so one unexpected error in a
+    button handler (a YAML edited into a shape nothing anticipated, say) took
+    every open window down with it. The handler that raised is abandoned; the
+    Hub stays up, and the traceback is in the log for the bug report.
+    """
+    import traceback
+
+    relay = _ExceptionRelay(window)
+    relay.raised.connect(window._log.append_line)
+
+    def _hook(exc_type, exc, tb) -> None:
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc, tb)
+            return
+        text = "".join(traceback.format_exception(exc_type, exc, tb)).rstrip()
+        try:
+            stream = sys.__stderr__ or sys.stderr
+            stream.write(text + "\n")
+            stream.flush()
+        except Exception:  # noqa: BLE001 - no console (pythonw) is fine
+            pass
+        try:
+            relay.raised.emit("✘ Unexpected error — the action was abandoned, "
+                              "the Hub carries on:\n" + text)
+        except RuntimeError:                      # the window is already gone
+            pass
+
+    sys.excepthook = _hook
+
+
 def main() -> None:
     app = QApplication(sys.argv)
     apply_theme(app, ui_settings.get("theme", "auto"))
     initial = sys.argv[1] if len(sys.argv) > 1 else None
     window = HubWindow(initial)
+    install_excepthook(window)
     window.show()
     sys.exit(app.exec())
 

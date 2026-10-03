@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..help.window import with_help
 from ..ui import Category, icon
 from .actions import ACTIONS
 
@@ -28,6 +29,7 @@ class _StepCard(QFrame):
         on_select,
         on_move,
         on_delete,
+        registry: dict | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -36,10 +38,18 @@ class _StepCard(QFrame):
         self._step = step
         self._on_select = on_select
 
-        action = ACTIONS.get(step.get("action", ""))
+        ## Looked up in the registry of the level being edited: a project
+        ## step is not in the experiment registry (it showed as a raw key in
+        ## neutral grey), and one key in both — render_publication_figures —
+        ## took the experiment action's title.
+        key = step.get("action", "")
+        action = (ACTIONS if registry is None else registry).get(key)
         cat: Category = action.category if action else Category.NEUTRAL
         ic_name = action.icon_name if action else "play"
-        title = action.title if action else step.get("action", "(unknown)")
+        title = action.title if action else key or "(unknown)"
+        if action is None:
+            self.setToolTip(f"{key!r} is not an action at this level — the "
+                            "script will refuse to start.")
 
         self.setStyleSheet(
             f"QFrame {{ border: 1px solid palette(mid); border-radius: 6px;"
@@ -108,12 +118,17 @@ class Canvas(QWidget):
     stepsChanged = pyqtSignal(list)
     stepSelected = pyqtSignal(int, dict)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None,
+                 registry: dict | None = None) -> None:
         super().__init__(parent)
+        #: The actions of the level being edited — what a card's title, icon
+        #: and colour come from. ``None`` falls back to every experiment
+        #: action.
+        self._registry = registry
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 8)
         outer.setSpacing(6)
-        outer.addWidget(QLabel("<b>Steps</b>"))
+        outer.addWidget(with_help(QLabel("<b>Steps</b>"), "script-editor"))
 
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
@@ -128,6 +143,11 @@ class Canvas(QWidget):
 
         self._steps: list[dict] = []
         self._selected_idx = -1
+
+    def set_registry(self, registry: dict | None) -> None:
+        """Switch the registry cards are drawn from (the level changed)."""
+        self._registry = registry
+        self._rebuild()
 
     def set_steps(self, steps: list[dict], keep_selection: int | None = None) -> None:
         self._steps = list(steps)
@@ -158,6 +178,7 @@ class Canvas(QWidget):
                 on_select=self._select,
                 on_move=self._move,
                 on_delete=self._delete,
+                registry=self._registry,
                 parent=self._host,
             )
             self._host_lay.insertWidget(i, card)

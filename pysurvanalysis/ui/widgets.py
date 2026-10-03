@@ -284,6 +284,14 @@ class Card(QFrame):
     def set_title(self, title: str) -> None:
         self._title_lbl.setText(title)
 
+    def set_help(self, topic: str) -> None:
+        """Put a ``?`` at the right of the title row, opening the manual at
+        *topic* — the page for everything this card holds."""
+        from ..help.window import HelpButton
+
+        self.help_button = HelpButton(topic, self)
+        self._title_row.addWidget(self.help_button, 0, Qt.AlignmentFlag.AlignVCenter)
+
     def add_section_label(self, text: str) -> None:
         lbl = QLabel(text, self)
         lbl.setObjectName("PsurvSectionDivider")

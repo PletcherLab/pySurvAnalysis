@@ -30,6 +30,17 @@ class ProjectError(RuntimeError):
     """A problem that prevents a Project being loaded or run."""
 
 
+class ProjectConfigError(ProjectError, ValueError):
+    """``project.yaml`` cannot be read — not valid YAML, or not a mapping.
+
+    Both a :class:`ProjectError`, so every place that already reports a
+    Project that will not load reports this too, and the ``ValueError``
+    :func:`config.read_yaml` raised. Unlike a broken member config (listed
+    as that member's problem), a Project cannot load around it: its
+    defaults would be unknown, and a save would overwrite the file.
+    """
+
+
 @dataclass(frozen=True)
 class Divergence:
     """One way in which Member Experiments differ.
@@ -77,7 +88,10 @@ class Project:
                 f"{self.directory} is not a Project — no {cfgmod.PROJECT_FILENAME}. "
                 f"Create one with the Hub's Create/Load card."
             )
-        self.config = cfgmod.read_yaml(path)
+        try:
+            self.config = cfgmod.read_yaml(path)
+        except ValueError as exc:
+            raise ProjectConfigError(str(exc)) from exc
         self._members: list[SurvivalExperiment] | None = None
 
     # ── identity ───────────────────────────────────────────────────────────
@@ -116,7 +130,8 @@ class Project:
 
     @property
     def type_key(self) -> str | None:
-        """The Experiment Type every member must share (``None`` = Custom)."""
+        """The Experiment Type every member must share, as written in
+        ``defaults:`` (``None`` = not stated, which is Standard Lifespan)."""
         return self.defaults.get("experiment_type")
 
     @property
@@ -282,10 +297,16 @@ class Project:
         groups: dict[str, str | None] = {}
         units: dict[str, str] = {}
         for m in members:
-            censoring[m.name] = m.type.resolve_assume_censored(m.config)
+            if m.config_error:
+                continue        # its settings are unknown; validate() lists it
+            try:
+                exp_type = m.type
+            except ValueError:
+                continue        # an unknown type: validate() lists it
+            censoring[m.name] = exp_type.resolve_assume_censored(m.config)
             groups[m.name] = m.exclusion_group
             units[m.name] = str((m.config.get("global") or {}).get("time_unit")
-                                or m.type.default_global.get("time_unit", ""))
+                                or exp_type.default_global.get("time_unit", ""))
 
         if len(set(units.values())) > 1:
             out.append(Divergence(

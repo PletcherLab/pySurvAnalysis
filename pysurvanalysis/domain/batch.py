@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from . import config as cfgmod
 from . import layout
@@ -311,8 +311,17 @@ def project_directory(root: Path | str, key: str) -> Path:
     resolver and keys also arrive from ``batch.yaml``, so one that escapes the
     Batch is refused rather than resolved.
     """
-    parts = [part for part in str(key).split("/") if part not in ("", ".")]
-    if any(part == ".." for part in parts) or os.path.isabs(str(key)):
+    text = str(key)
+    ## A key is relative by definition, so ANY anchor refuses it — on either
+    ## platform's rules. ``os.path.isabs("/etc")`` is False on Windows
+    ## (Python 3.13: no drive), and ``C:foo`` is drive-relative rather than
+    ## absolute, yet joinpath would follow both out of the Batch.
+    rooted = (text.startswith(("/", "\\"))
+              or PurePosixPath(text).is_absolute()
+              or bool(PureWindowsPath(text).anchor))
+    parts = [part for part in text.replace("\\", "/").split("/")
+             if part not in ("", ".")]
+    if rooted or any(part == ".." for part in parts):
         raise ValueError(f"{key!r} is not a project in this batch")
     return Path(root).resolve().joinpath(*parts)
 
@@ -407,8 +416,20 @@ class Batch:
 
     def __init__(self, directory: str | Path):
         self.directory = Path(directory).resolve()
-        self.config = cfgmod.read_yaml(self.directory / cfgmod.BATCH_FILENAME)
+        #: Why ``batch.yaml`` could not be read, or ``None``. A file that is
+        #: not valid YAML still lets the Batch be listed — its Projects are
+        #: found by walking, not from the file — but nothing runs or writes
+        #: under it: its designation is unknown, and a write would replace it.
+        self.config_error: str | None = None
+        self._read_config()
         self._found: dict | None = None
+
+    def _read_config(self) -> None:
+        try:
+            self.config = cfgmod.read_yaml(self.directory / cfgmod.BATCH_FILENAME)
+            self.config_error = None
+        except ValueError as exc:
+            self.config, self.config_error = {}, str(exc)
 
     @property
     def name(self) -> str:
@@ -427,6 +448,9 @@ class Batch:
         return self._found
 
     def rescan(self) -> dict:
+        """Walk again, and re-read ``batch.yaml`` — both may have changed
+        outside the app (a designation edited by hand, a file fixed)."""
+        self._read_config()
         self._found = None
         return self.found()
 
@@ -466,7 +490,36 @@ class Batch:
         return cfgmod.scripts_of(self.config, "project_scripts")
 
     def save(self) -> Path:
+        if self.config_error:
+            raise ValueError(f"{self.config_error} — fix {cfgmod.BATCH_FILENAME} "
+                             f"before changing it here.")
         return cfgmod.write_yaml(self.config_path, self.config)
+
+    def designate(self, name: str | None) -> bool:
+        """Make *name* the script every Project runs, or (``None``) go back to
+        each Project's own ``batch`` script. Returns whether ``batch.yaml``
+        was written.
+
+        No designation is the *absence* of the ``script:`` key, never a value
+        (ADR-0007): choosing "each project's own" removes it, and when no
+        ``batch.yaml`` exists nothing is written — the file still appears only
+        once someone deliberately designates one script for all. Anything else
+        in the file (the central ``project_scripts:``) is carried through.
+        """
+        name = str(name).strip() if name else None
+        if self.config_error:
+            raise ValueError(f"{self.config_error} — fix {cfgmod.BATCH_FILENAME} "
+                             f"before designating a script here.")
+        if (name or None) == self.designated_script:
+            return False
+        if name:
+            self.config["script"] = name
+        else:
+            self.config.pop("script", None)
+            if not self.config_path.is_file():
+                return False
+        self.save()
+        return True
 
     # ── running ────────────────────────────────────────────────────────────
 
@@ -493,6 +546,11 @@ class Batch:
         from ..script_editor import project_actions
 
         emit = log or (lambda _m: None)
+        if self.config_error:
+            ## Its designation and central scripts are unknown: running would
+            ## run a guess in every Project.
+            raise ValueError(f"{self.config_error} — the batch cannot run until "
+                             f"{cfgmod.BATCH_FILENAME} is fixed.")
         wanted = script_name or self.designated_script
         result = BatchResult()
 

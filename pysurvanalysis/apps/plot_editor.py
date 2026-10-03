@@ -1,11 +1,15 @@
-"""The Plot Editor — curate Publication Figures for one Experiment Directory.
+"""The Plot Editor — curate Publication Figures for a Project (or a standalone
+Experiment Directory).
 
-Experiment-level, not project-level: with no pooling there is no pooled figure,
-so figures belong to a member and the editor opens one (ADR-0005). Specs are
-saved into the experiment's ``plot_specs.yaml``; Styles are saved up into the
-Project's, where every member's figures share them.
+It *opens on* one member, because a preview needs that member's data and its
+Active Focus; what it edits and saves is the container's curation — one
+``plot_specs.yaml`` at the Project (or the standalone directory), holding each
+saved figure's Spec and its own Style (ADR-0005 as amended). Every member
+renders with it.
 
-Presentation only — it never touches ``survival_config.yaml``.
+Presentation only — it never reruns an analysis. The one thing it writes into
+``survival_config.yaml`` is the Active Focus's per-curve ``colours:``, which
+belong to the Focus rather than to any figure (ADR-0005, third amendment).
 """
 
 from __future__ import annotations
@@ -43,6 +47,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .. import pubfigures as pf
+from ..help.window import HelpButton, install_f1
 from ..domain import Project, SurvivalExperiment, is_project_dir
 from ..ui import ActionButton, Card, Category, TopBar, apply_theme, icon
 from ..ui import settings as ui_settings
@@ -62,18 +67,40 @@ class ColorButton(QPushButton):
     legitimately not colours: full transparency stores ``"none"``
     (matplotlib's transparent, which is how a hollow point is asked for), and
     partial alpha stores an ``#rrggbbaa`` hex. Both render.
+
+    The third value, ``""`` — *auto_text*: the curve's colour, the theme's
+    fill — is not a colour the dialog can return, so once a swatch had been
+    picked there was no way back to it. A right-click offers it.
     """
 
     changed = pyqtSignal()
 
     def __init__(self, color: str = "#4C72B0", parent=None,
-                 auto_text: str = "auto") -> None:
+                 auto_text: str = "auto", resettable: bool = True) -> None:
         super().__init__(parent)
         self.setFixedSize(44, 22)
         self._auto_text = auto_text
         self._color = ""
         self.set_color(color)
         self.clicked.connect(self._pick)
+        if resettable:
+            self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            self.customContextMenuRequested.connect(self._menu)
+
+    def reset(self) -> None:
+        """Back to *auto_text* — the value no colour pick can produce."""
+        if self._color != "":
+            self.set_color("")
+            self.changed.emit()
+
+    def _menu(self, pos) -> None:
+        from PyQt6.QtWidgets import QMenu
+
+        menu = QMenu(self)
+        action = menu.addAction(f"Use {self._auto_text}")
+        action.setEnabled(self._color != "")
+        action.triggered.connect(self.reset)
+        menu.exec(self.mapToGlobal(pos))
 
     def color(self) -> str:
         return self._color
@@ -254,8 +281,14 @@ class PlotEditorWindow(QMainWindow):
             style.name = plot_id
             self._plot_styles[plot_id] = style
         self._lifetables = None
+        ## The Headline Figure, under the id the editor knows it by: the
+        ## type's headline is km_risk_table, which a Publication Figure folds
+        ## into km_curves (the at-risk band is a Style toggle there) — looked
+        ## up raw it never matched, and the editor opened on whichever spec
+        ## happened to come first.
         headline = ("km_faceted" if "km_faceted" in self._specs
                     else experiment.type.headline_plot_id)
+        headline = pf._SPEC_ALIASES.get(headline, headline)
         self._current_id = (headline if headline in self._specs
                             else next(iter(self._specs), None))
 
@@ -265,6 +298,7 @@ class PlotEditorWindow(QMainWindow):
         self._resize_timer.timeout.connect(self._refresh_preview)
 
         self._build_ui()
+        install_f1(self, lambda: "plot-editor")
         self._load_spec_into_form()
         self._sync_supported_controls()
         self._refresh_preview()
@@ -297,6 +331,7 @@ class PlotEditorWindow(QMainWindow):
         export.clicked.connect(self._export)
         for btn in (save_spec, export):
             bar.add_right(btn)
+        bar.add_right(HelpButton("publication-figures"))
         outer.addWidget(bar)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -332,8 +367,10 @@ class PlotEditorWindow(QMainWindow):
 
     def _build_spec_card(self) -> Card:
         card = Card("Figure", Category.PLOTS, icon_name="plot",
-                    subtitle="Content decisions — saved to this experiment's "
-                             "plot_specs.yaml.")
+                    subtitle="Content decisions — saved to the Project's "
+                             "plot_specs.yaml (a standalone experiment's "
+                             "own), shared by every member.")
+        card.set_help("plot-editor-figure")
         form = QFormLayout()
 
         self._plot_combo = QComboBox()
@@ -415,15 +452,17 @@ class PlotEditorWindow(QMainWindow):
             "plot_specs.yaml — over this figure's. Each figure owns its "
             "style; this is how a shared look is applied deliberately.")
         copy_btn.clicked.connect(self._copy_style_from)
-        form.addRow("Style:", copy_btn)
+        form.addRow("Style:", _row(copy_btn, HelpButton("publication-figures")))
 
         card.add_body(form)
         return card
 
     def _build_canvas_card(self) -> Card:
         card = Card("Canvas & type", Category.PLOTS, icon_name="config",
-                    subtitle="The shared look — saved up to the Project so "
-                             "every member's figures match.")
+                    subtitle="This figure's look — saved with it in the "
+                             "Project's plot_specs.yaml, so every member's "
+                             "copy matches.")
+        card.set_help("plot-editor-canvas")
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
@@ -467,6 +506,7 @@ class PlotEditorWindow(QMainWindow):
         card = Card("Curves & points", Category.PLOTS, icon_name="km",
                     subtitle="The step curve itself, its markers, its censor "
                              "ticks and its confidence band.")
+        card.set_help("plot-editor-curves")
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
@@ -507,7 +547,8 @@ class PlotEditorWindow(QMainWindow):
         self._point_fill = ColorButton("", auto_text="curve")
         self._point_fill.setToolTip(
             "The marker's interior. 'curve' follows the series colour; a fully "
-            "transparent pick gives a hollow marker.")
+            "transparent pick gives a hollow marker. Right-click to return "
+            "to 'curve'.")
         form.addRow("Opacity / fill:", _row(self._point_alpha,
                                             self._point_fill))
 
@@ -517,6 +558,9 @@ class PlotEditorWindow(QMainWindow):
             "drawn solid in the curve colour. Only the filled shapes can show "
             "one; a stroke on '+' or 'x' is just a thicker mark.")
         self._point_stroke_color = ColorButton("#000000", auto_text="curve")
+        self._point_stroke_color.setToolTip(
+            "The outline's colour. Right-click to return to 'curve' — the "
+            "series' own colour.")
         form.addRow("Outline:", _row(self._point_stroke,
                                      self._point_stroke_color))
 
@@ -543,6 +587,7 @@ class PlotEditorWindow(QMainWindow):
         card = Card("Panels & legend", Category.PLOTS, icon_name="plots",
                     subtitle="Backgrounds, borders, facet strips, gridlines "
                              "and the at-risk band.")
+        card.set_help("plot-editor-panels")
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
@@ -586,12 +631,13 @@ class PlotEditorWindow(QMainWindow):
         """One swatch per curve in the current figure, plus the fallback cycle.
 
         Rebuilt whenever the figure changes, because the curves are a property
-        of the data and the Spec's treatment list — not of the Style, which is
-        shared and may be used by a member with different treatments.
+        of the data, the Focus and the Spec's narrowing — not of the Style,
+        which every member renders with, whatever its treatments.
         """
         card = Card("Colours", Category.PLOTS, icon_name="figures",
                     subtitle="Per-curve assignments, then the cycle anything "
                              "unassigned falls back to.")
+        card.set_help("plot-editor-colours")
         self._series_form = QFormLayout()
         self._series_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         self._series_swatches: dict[str, ColorButton] = {}
@@ -663,15 +709,15 @@ class PlotEditorWindow(QMainWindow):
             ## on the swatch so harvest can tell "the user picked this" from
             ## "the cycle happened to give this" — without it, opening the
             ## editor and touching anything would pin every curve's colour
-            ## into the shared Style and the cycle would stop meaning
-            ## anything.
+            ## into the Focus and the cycle would stop meaning anything.
             auto = cycle[i % len(cycle)] if cycle else pf.DEFAULT_PALETTE[0]
             ## The Focus's colour first; a legacy Style assignment (by the
             ## shown label) only where the Focus has none.
             current = (self._focus_colours.get(label)
                        or style.palette.get(shown.get(label, label))
                        or style.palette.get(label) or auto)
-            swatch = ColorButton(current)
+            swatch = ColorButton(current, auto_text="cycle")
+            swatch.setToolTip("Right-click to return this curve to the cycle.")
             swatch.setProperty("auto_colour", auto)
             swatch.changed.connect(self._refresh_preview)
             self._series_swatches[label] = swatch
@@ -687,7 +733,8 @@ class PlotEditorWindow(QMainWindow):
         self._cycle_swatches = []
         cycle = list(style.palette_cycle or pf.DEFAULT_PALETTE)
         for colour in cycle:
-            swatch = ColorButton(colour)
+            ## Not resettable: a cycle entry has no "auto" to fall back to.
+            swatch = ColorButton(colour, resettable=False)
             swatch.setFixedSize(24, 20)
             swatch.changed.connect(self._refresh_preview)
             self._cycle_swatches.append(swatch)
@@ -894,22 +941,30 @@ class PlotEditorWindow(QMainWindow):
         A censor tick on a hazard curve or an at-risk band under a forest
         plot is not a setting anyone wants greyed-in-but-ignored: the honest
         control is one that says "not for this figure" by being disabled.
-        The values are left alone — they still belong to the shared Style,
-        and another figure uses them.
+        The values are left alone — they are still part of this figure's
+        Style, and *Copy style from…* carries them to a figure that uses them.
         """
         kind = pf.kind_for(self.spec or self._current_id or "km_curves")
-        groups = {
-            "ci": (self._ci_band, self._ci_alpha),
-            "censor": (self._censor_ticks, self._censor_shape,
-                       self._censor_size, self._censor_color),
-            "risk": (self._risk_table, self._risk_font_size,
-                     self._risk_row_height, self._risk_times),
-            "points": (self._show_points, self._point_at, self._point_shape,
-                       self._point_size, self._point_alpha, self._point_fill,
-                       self._point_stroke, self._point_stroke_color),
-        }
-        for feature, widgets in groups.items():
-            enabled = feature in kind.supports
+        ## Each group lists the features that make it mean something. The
+        ## band opacity is also the distribution's density fill, and a forest
+        ## or interaction marker — always drawn, since it IS the estimate —
+        ## takes its shape, size, fill and outline from the point controls;
+        ## greying those there hid settings the figure was using.
+        groups = (
+            ((pf._CI,), (self._ci_band,)),
+            ((pf._CI, pf._FILL), (self._ci_alpha,)),
+            ((pf._CENSOR,), (self._censor_ticks, self._censor_shape,
+                             self._censor_size, self._censor_color)),
+            ((pf._RISK,), (self._risk_table, self._risk_font_size,
+                           self._risk_row_height, self._risk_times)),
+            ((pf._POINTS,), (self._show_points, self._point_at,
+                             self._point_alpha)),
+            ((pf._POINTS, pf._MARKERS), (self._point_shape, self._point_size,
+                                         self._point_fill, self._point_stroke,
+                                         self._point_stroke_color)),
+        )
+        for features, widgets in groups:
+            enabled = any(f in kind.supports for f in features)
             for widget in widgets:
                 widget.setEnabled(enabled)
         self._facet_by.setEnabled(kind.faceted)
@@ -991,8 +1046,10 @@ class PlotEditorWindow(QMainWindow):
             if frame.empty:
                 self._preview.setText(
                     f"No data for {spec.plot_id} under this Focus.\n"
-                    "A forest needs a saved Cox fit; an interaction plot "
-                    "needs a 2×2 Focus.")
+                    "A forest needs the saved pairwise hazard ratios (log-rank "
+                    "O/E estimates) — run the analysis with Pairwise hazard "
+                    "ratios ticked;\nan interaction plot needs a Focus varying "
+                    "two or more factors, with cells whose survival falls to 0.5.")
                 return
             g = pf.build_ggplot(frame, spec, self._with_focus_colours(style, spec))
             data = pf.render_png_bytes(g, style, dpi=self._preview_dpi(style))

@@ -25,7 +25,8 @@ def test_the_factorial_actions_belong_to_every_experiment():
     registry = actions.registry_for(get_type("standard_lifespan"))
     assert "cox_interaction" in registry
     assert registry["cox_interaction"].requires == "factorial_model"
-    assert registry["cox_interaction"].from_type is False
+    ## Not flagged as a Type Action — the flag itself is gone (nothing set it).
+    assert not getattr(registry["cox_interaction"], "from_type", False)
 
 
 def test_no_type_means_the_general_case():

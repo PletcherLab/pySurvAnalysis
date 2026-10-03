@@ -61,7 +61,7 @@ def _exec_run_in_experiments(params: dict, ctx: ProjectRunContext) -> None:
 
     for member in members:
         prefix = f"  [{member.name}] "
-        steps = _member_script(member, ctx.project, name)
+        steps = resolve_experiment_script(member, ctx.project, name)
         if steps is None:
             ctx.log(f"{prefix}no Experiment Script named {name!r} — skipped.")
             ctx.failures.append(member.name)
@@ -126,7 +126,8 @@ def _exec_project_report(params: dict, ctx: ProjectRunContext) -> None:
     if params.get("with_narrative"):
         from ..ai import narrative as ai_narrative
 
-        narrative = ai_narrative.generate(ctx.project, log=ctx.log)
+        narrative = ai_narrative.generate(ctx.project, log=ctx.log,
+                                          provider=params.get("provider") or None)
     written = project_report.write_project_report(
         ctx.project, formats=formats, narrative=narrative, log=ctx.log)
     if not written:
@@ -134,6 +135,12 @@ def _exec_project_report(params: dict, ctx: ProjectRunContext) -> None:
 
 
 def _exec_generate_ai_narrative(params: dict, ctx: ProjectRunContext) -> None:
+    """Write the AI Narrative and keep it.
+
+    It is saved beside the Project Report (``<project>_narrative.json``) as it
+    is generated — a step whose only product was a count in the log did work
+    nobody could read.
+    """
     from ..ai import narrative as ai_narrative
 
     # Soft-fail by contract: a provider outage logs and the pipeline continues.
@@ -144,7 +151,8 @@ def _exec_generate_ai_narrative(params: dict, ctx: ProjectRunContext) -> None:
         ctx.log(f"AI narrative skipped: {exc}")
         return
     if result:
-        ctx.log(f"AI narrative written for {len(result)} section(s).")
+        ctx.log(f"AI narrative written for {len(result)} section(s) — saved to "
+                f"{ai_narrative.narrative_path(ctx.project).name}.")
 
 
 PROJECT_ACTIONS: dict[str, Action] = {
@@ -201,6 +209,9 @@ PROJECT_ACTIONS: dict[str, Action] = {
             ParamSpec("formats", "list", "Formats", default="pdf,md"),
             ParamSpec("with_narrative", "bool", "Include AI narrative",
                       default=False),
+            ParamSpec("provider", "choice", "Narrative provider", default="",
+                      choices=("", "anthropic", "openai"),
+                      enabled_when="with_narrative"),
         ),
         execute_fn=_exec_project_report,
     ),
@@ -209,7 +220,8 @@ PROJECT_ACTIONS: dict[str, Action] = {
         title="Generate AI narrative",
         description=(
             "Write a per-Focus summary plus a labelled across-Focuses "
-            "paragraph. Summarizes saved numbers; never computes its own."
+            "paragraph, saved as <project>_narrative.json. Summarizes saved "
+            "numbers; never computes its own."
         ),
         category=Category.AI,
         icon_name="ai",
@@ -302,8 +314,9 @@ def default_project_script() -> dict:
                   "unless another script is designated. Analyses every member, "
                   "renders their curated publication figures, then builds the "
                   "project report. Edit or replace it in the Script Editor — a "
-                  "project with no script here cannot be run from the Project "
-                  "card or a Batch Run."),
+                  "project with no script here fails a Batch Run that "
+                  "designates none (the Project card still offers the "
+                  "built-ins)."),
         "steps": [dict(step) for step in BUILTIN_SCRIPTS["Report pipeline"]],
     }
 
@@ -337,12 +350,21 @@ def builtin_names() -> list[str]:
     return list(BUILTIN_SCRIPTS)
 
 
-def _member_script(member, project, name: str) -> list[dict] | None:
-    """Resolve an Experiment Script name: Project's central set, then the
-    member's own, then the shipped default."""
-    for script in project.experiment_scripts():
-        if script.get("name") == name:
-            return list(script.get("steps") or [])
+def resolve_experiment_script(member, project, name: str) -> list[dict] | None:
+    """Resolve an Experiment Script name: the Project's central
+    ``experiment_scripts:``, then the member's own ``scripts:``, then the
+    built-ins (ADR-0007) — ``None`` when it resolves nowhere.
+
+    Central first, so one recipe really does serve every member. The one
+    resolver for every way a script is started — ``run_in_experiments``, the
+    Hub's Experiment scripts card — because two rules meant the same name ran
+    one recipe from the Hub and another in a Batch Run. *project* may be
+    ``None`` for a standalone Experiment Directory.
+    """
+    if project is not None:
+        for script in project.experiment_scripts():
+            if script.get("name") == name:
+                return list(script.get("steps") or [])
     from ..domain import config as cfgmod
 
     for script in cfgmod.scripts_of(member.raw_config, "scripts"):

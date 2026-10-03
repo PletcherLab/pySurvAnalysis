@@ -104,12 +104,13 @@ class DiscoveredDesign:
 
 
 def norm_chamber(value: Any) -> Any:
-    """A chamber id compared the way ``remove_chambers.csv`` stores it."""
-    text = str(value).strip()
-    try:
-        return int(float(text)) if text.replace(".", "", 1).lstrip("-").isdigit() else text
-    except ValueError:
-        return text
+    """A chamber id compared the way the run compares it — one rule
+    (:func:`pysurvanalysis.exclusions.normalize_chamber`) for the file, the
+    loader and this estimate, so the preflight and the run cannot disagree
+    about which chambers an Exclusion Group removes."""
+    from ..exclusions import normalize_chamber
+
+    return normalize_chamber(value)
 
 
 def _unique_in_order(values: Iterable[Any]) -> tuple[str, ...]:
@@ -213,18 +214,24 @@ def _discover_csv(path: Path, opts: dict) -> DiscoveredDesign:
             raw = raw[valid]
         return design_from_frame(raw, factor_cols)
 
-    # Wide: the column mapping's order is the file's order of groups.
+    # Wide: the column mapping's order is the file's order of groups — or,
+    # with no mapping, the order `input.factor_levels` lists them in.
     frame, factors = data_loader.load_experiment(
         path, time_col=time_col, event_col=event_col, csv_format="wide",
         col_mapping=opts.get("col_mapping"), factor_names=opts.get("factor_names"),
+        factor_levels=opts.get("factor_levels"),
     )
     found = design_from_frame(frame, factors)
-    mapping = opts.get("col_mapping") or []
-    if isinstance(mapping, list) and len(factors) == 2:
+    mapping = opts.get("col_mapping")
+    declared = opts.get("factor_levels") if isinstance(opts.get("factor_levels"), dict) else {}
+    if len(factors) == 2 and (isinstance(mapping, list) or declared):
         ordered = {}
         for f, key in zip(factors, ("factor1_level", "factor2_level")):
-            seen = _unique_in_order(item.get(key) for item in mapping
-                                    if isinstance(item, dict))
+            if isinstance(mapping, list):
+                seen = _unique_in_order(item.get(key) for item in mapping
+                                        if isinstance(item, dict))
+            else:
+                seen = _unique_in_order(declared.get(f) or ())
             rest = [lv for lv in found.levels.get(f, ()) if lv not in seen]
             ordered[f] = tuple(lv for lv in seen if lv in found.levels.get(f, ())) + tuple(rest)
         found = DiscoveredDesign(found.factors, ordered, found.cells, found.chamber_cells)
@@ -659,14 +666,23 @@ def apply_focus(frame, focus: Focus):
     ``treatment`` becomes an ordered Categorical over the *populated* labels,
     so every grouping downstream — lifetables, legends, tables — follows the
     Focus's order.
+
+    The frame's ``attrs`` — the loader's ``load_warnings`` among them — are
+    carried across explicitly, so what the loader noticed about the file
+    reaches the report of every Focus cut from it.
     """
+    import copy
+
     import pandas as pd
 
+    attrs = copy.deepcopy(dict(getattr(frame, "attrs", {}) or {}))
     df = frame.copy()
     mask = pd.Series(True, index=df.index)
     for f, levels in focus.factors.items():
         if f not in df.columns:
-            return df.iloc[0:0].copy()
+            empty = df.iloc[0:0].copy()
+            empty.attrs = attrs
+            return empty
         df[f] = df[f].astype(str)
         mask &= df[f].isin(levels)
     df = df[mask].copy()
@@ -680,7 +696,9 @@ def apply_focus(frame, focus: Focus):
     populated = [t for t in focus.implied_labels() if t in set(df["treatment"].astype(str))]
     df["treatment"] = pd.Categorical(df["treatment"].astype(str),
                                      categories=populated, ordered=True)
-    return df.sort_values(["treatment", "time"]).reset_index(drop=True)
+    out = df.sort_values(["treatment", "time"]).reset_index(drop=True)
+    out.attrs = attrs
+    return out
 
 
 def populated_labels(frame) -> list[str]:
@@ -986,26 +1004,125 @@ class FocusOutputs:
 # Out of Date
 # ---------------------------------------------------------------------------
 
-def out_of_date_reasons(focus: Focus, payload: dict, exclusion_group: str | None) -> list[str]:
+def _effective_references(definition: dict) -> dict[str, str]:
+    """Each factor's Reference Level as the model used it — the explicit
+    ``reference:`` when it names one of the levels, else the first level.
+
+    Compared instead of the raw ``reference:`` map, so writing down the
+    default (as the Focus window now does) never reads as a change, and a
+    summary that recorded only explicit references still compares."""
+    factors = definition.get("factors") or {}
+    chosen = definition.get("reference") or {}
+    out: dict[str, str] = {}
+    for f, levels in factors.items():
+        levels = [str(v) for v in (levels or [])]
+        if not levels:
+            continue
+        ref = chosen.get(f) if isinstance(chosen, dict) else None
+        out[f] = str(ref) if ref is not None and str(ref) in levels else levels[0]
+    return out
+
+
+def focus_chambers(focus: Focus, design: DiscoveredDesign | None) -> set[str] | None:
+    """The chambers whose individuals fall inside *focus*, as normalised text
+    ids — ``None`` when the data has no chamber identities (a CSV) or the
+    design is unknown. An exclusion outside this set changes no number of
+    this Focus."""
+    if design is None or not design.chamber_cells:
+        return None
+    return {str(norm_chamber(chamber)) for chamber, cell in design.chamber_cells
+            if focus.contains(dict(zip(design.factors, cell)))}
+
+
+def _chamber_ids(values: Iterable[Any] | None) -> set[str]:
+    return {str(c) for c in (norm_chamber(v) for v in (values or ())) if c is not None}
+
+
+def _listing(ids: Iterable[str], limit: int = 8) -> str:
+    items = sorted(ids, key=lambda s: (not s.lstrip("-").isdigit(),
+                                       int(s) if s.lstrip("-").isdigit() else 0, s))
+    text = ", ".join(items[:limit])
+    return text + (f" and {len(items) - limit} more" if len(items) > limit else "")
+
+
+def out_of_date_reasons(focus: Focus, payload: dict, exclusion_group: str | None,
+                        *, current: dict | None = None,
+                        design: DiscoveredDesign | None = None) -> list[str]:
     """Why saved results no longer describe this Focus (empty = current).
 
     Results with no recorded definition predate Focuses: they cannot vouch for
     any slice, so they are Out of Date by construction.
+
+    Besides the analytic definition and the Exclusion Group's name, *current*
+    — what a run would use now — is compared with what the Run Summary
+    recorded, key by key and only where the summary recorded it (older ones
+    did not, and a missing record is not evidence of a change):
+
+    ``data_sha256``
+        the data file's contents — an edited workbook changes every number;
+    ``excluded_chambers``
+        the chambers actually removed, within this Focus's chambers (*design*
+        says which those are) — editing a group's rows changes the numbers
+        as surely as switching groups;
+    ``assume_censored``
+        the censoring policy (``None`` = not applicable, e.g. a CSV);
+    ``omit``
+        ``{"analyses": [...], "plots": [...]}`` — what the run left out.
     """
     reasons: list[str] = []
-    recorded = (payload or {}).get("focus") or {}
+    payload = payload or {}
+    recorded = payload.get("focus") or {}
     definition = recorded.get("definition")
     if not definition:
         return ["the saved results predate Focuses and record no definition"]
-    current = focus.analytic_definition()
-    if definition.get("factors") != current["factors"]:
+    now_definition = focus.analytic_definition()
+    if definition.get("factors") != now_definition["factors"]:
         reasons.append("the Focus's factors or levels changed")
-    elif definition.get("reference") != current["reference"]:
+    elif _effective_references(definition) != _effective_references(now_definition):
         reasons.append("a Reference Level changed")
-    analysed_group = (payload or {}).get("exclusion_group")
+    analysed_group = payload.get("exclusion_group")
     if (analysed_group or None) != (exclusion_group or None):
         reasons.append(f"analysed under exclusion group {analysed_group or 'none'!r}, "
                        f"config now asks for {exclusion_group or 'none'!r}")
+    if not current:
+        return reasons
+
+    then_sha, now_sha = payload.get("data_sha256"), current.get("data_sha256")
+    if then_sha and now_sha and then_sha != now_sha:
+        reasons.append("the data file's contents changed since the analysis")
+
+    if "excluded_chambers" in payload and current.get("excluded_chambers") is not None:
+        scope = focus_chambers(focus, design)
+        if scope is not None:
+            then = _chamber_ids(payload.get("excluded_chambers")) & scope
+            now = _chamber_ids(current.get("excluded_chambers")) & scope
+            if then != now:
+                parts = []
+                if now - then:
+                    parts.append(f"now also excludes chamber(s) {_listing(now - then)}")
+                if then - now:
+                    parts.append(f"no longer excludes {_listing(then - now)}")
+                reasons.append("the excluded chambers changed — "
+                               + "; ".join(parts))
+
+    then_cens, now_cens = payload.get("assume_censored"), current.get("assume_censored")
+    if then_cens is not None and now_cens is not None and bool(then_cens) != bool(now_cens):
+        reasons.append(f"analysed with assumed censoring "
+                       f"{'on' if then_cens else 'off'}, config now has it "
+                       f"{'on' if now_cens else 'off'}")
+
+    then_omit, now_omit = payload.get("omit"), current.get("omit")
+    if isinstance(then_omit, dict) and isinstance(now_omit, dict):
+        for kind in ("analyses", "plots"):
+            then = {str(i) for i in then_omit.get(kind) or []}
+            now = {str(i) for i in now_omit.get(kind) or []}
+            if then != now:
+                parts = []
+                if now - then:
+                    parts.append(f"now leaves out {', '.join(sorted(now - then))}")
+                if then - now:
+                    parts.append(f"now includes {', '.join(sorted(then - now))}")
+                reasons.append(f"the {kind} selection changed — " + "; ".join(parts))
     return reasons
 
 
@@ -1110,12 +1227,17 @@ def focus_from_defined_plot(name: str, labels: list[str],
 # ---------------------------------------------------------------------------
 
 def copy_check(focuses: Iterable[Focus], design: DiscoveredDesign,
-               existing: Iterable[str] = ()) -> tuple[list[Focus], list[str]]:
+               existing: Iterable[str] = (),
+               excluded: Iterable[Any] = ()) -> tuple[list[Focus], list[str]]:
     """Which of *focuses* can be written into a member with *design*.
 
     Validated before anything is written: a Focus that would be Blocked in the
-    receiving member is reported, not copied.
+    receiving member is reported, not copied — for either reason a Focus is
+    blocked: a factor or level this member's data lacks (*stale*), or a cell
+    the data holds but the receiving member's active exclusions (*excluded*,
+    its chamber ids) empty.
     """
+    excluded = list(excluded or ())
     taken = {slugify(n) for n in existing}
     ok: list[Focus] = []
     rejected: list[str] = []
@@ -1123,7 +1245,8 @@ def copy_check(focuses: Iterable[Focus], design: DiscoveredDesign,
         if focus.slug in taken:
             rejected.append(f"{focus.name}: a Focus of that name already exists here")
             continue
-        reasons = stale_reasons(focus, design)
+        reasons = block_reasons(focus, design,
+                                labels_after_exclusion(focus, design, excluded))
         if reasons:
             rejected.append(f"{focus.name}: {reasons[0]}")
             continue

@@ -79,11 +79,12 @@ def _require_data(ctx, action: str):
         raise RuntimeError(f"{action}: no Focus — this action runs under one.")
 
 
-def _time_label(ctx) -> str:
-    exp = getattr(ctx, "experiment", None)
-    if exp is None:
-        return "Age"
-    return exp.type.resolve_time_label(exp.config)
+def _figure_options(ctx) -> dict:
+    """Time label, colours and display names — the same keywords the Plot
+    Set draws with, so a script step's figure matches the run's."""
+    from ..plot_registry import figure_options
+
+    return figure_options(getattr(ctx, "experiment", None), getattr(ctx, "focus", None))
 
 
 def _exec_faceted_km(params: dict, ctx) -> None:
@@ -94,7 +95,7 @@ def _exec_faceted_km(params: dict, ctx) -> None:
            else lifetable.compute_lifetables(ctx.data))
     fig = plotting.plot_km_faceted(
         lts, factor_levels(ctx.focus), show_ci=bool(params.get("show_ci", False)),
-        time_label=_time_label(ctx),
+        **_figure_options(ctx),
     )
     ctx.figure(f"Faceted KM — {ctx.focus.name}", fig)
     ctx.log("Faceted KM rendered.")
@@ -106,7 +107,7 @@ def _exec_interaction_plot(params: dict, ctx) -> None:
     _require_data(ctx, "interaction_plot")
     fig = plotting.plot_lifespan_interaction(
         ctx.data, factor_levels(ctx.focus), metric=str(params.get("metric", "median")),
-        time_label=_time_label(ctx),
+        **_figure_options(ctx),
     )
     ctx.figure(f"Lifespan interaction — {ctx.focus.name}", fig)
     ctx.log("Interaction plot rendered.")
@@ -142,20 +143,38 @@ def _exec_rmst_interaction(params: dict, ctx) -> None:
 
 
 def _log_factorial(ctx, result: dict[str, Any], title: str) -> None:
-    ref = ", ".join(f"{f} = {ctx.focus.reference_level(f)}"
-                    for f in ctx.focus.varying_factors)
+    names = list(ctx.focus.varying_factors)
+    ref = ", ".join(f"{f} = {ctx.focus.reference_level(f)}" for f in names)
     ctx.log(f"{title}: {result.get('formula', '')}  (reference: {ref})")
+    if result.get("tau") is not None:
+        ctx.log(f"  Restriction time τ = {result['tau']:.4g}")
     lr = result.get("lr_interaction") or {}
     if lr:
+        stat = next((lr[k] for k in ("statistic", "lr_stat", "chi2")
+                     if lr.get(k) is not None), float("nan"))
         ctx.log(
-            f"  Interaction LR test: chi2={lr.get('statistic', float('nan')):.3f}, "
+            f"  Interaction LR test: chi2={stat:.3f}, "
             f"df={lr.get('df', '?')}, p={lr.get('p_value', float('nan')):.4g}"
         )
     coefs = result.get("coefficients")
     if coefs is not None and len(coefs):
         ctx.log(coefs.to_string(index=False))
+    for warning in result.get("warnings") or []:
+        ctx.log(f"  Warning: {warning}")
     if getattr(ctx, "result", None) is not None:
-        ctx.result.cox_analyses.append(result)
+        ## Shaped like the run's own battery entry, and REPLACING the model
+        ## of the same title: a `cox_interaction` step after `run_analysis`
+        ## re-fits the model the run already holds, and appending it would
+        ## put the same model in a later report twice.
+        result.setdefault("title", title)
+        result["reference"] = {f: ctx.focus.reference_level(f) for f in names}
+        models = ctx.result.cox_analyses
+        for i, existing in enumerate(models):
+            if (existing.get("title") or existing.get("model_type")) == result["title"]:
+                models[i] = result
+                break
+        else:
+            models.append(result)
 
 
 FACTORIAL_ACTIONS: dict[str, Action] = {

@@ -41,6 +41,7 @@ from PyQt6.QtWidgets import (
 
 from ..domain import Project, ProjectError, config as cfgmod, layout as layout_mod
 from ..domain.batch import discover
+from ..help.window import HelpButton, install_f1, with_help
 from ..ui import Category, icon
 
 #: Roles on a tree row: which Project key, which member directory, and (for a
@@ -98,7 +99,8 @@ class BatchPreflightDialog(QDialog):
         self._heading = QLabel("")
         self._heading.setWordWrap(True)
         self._heading.setStyleSheet("font-weight: 600;")
-        outer.addWidget(self._heading)
+        outer.addWidget(with_help(self._heading, "batch-panel"))
+        install_f1(self, lambda: "preflight")
 
         self._tree = QTreeWidget()
         self._tree.setColumnCount(3)
@@ -142,6 +144,7 @@ class BatchPreflightDialog(QDialog):
         btn_rescan.clicked.connect(self.reload)
         actions.addWidget(btn_rescan)
         actions.addStretch(1)
+        actions.addWidget(HelpButton("preflight"), 0, Qt.AlignmentFlag.AlignVCenter)
         outer.addLayout(actions)
 
         self._note = QLabel("")
@@ -239,20 +242,38 @@ class BatchPreflightDialog(QDialog):
         self._sync_fix_button()
 
     def _wanted(self, entry) -> bool:
-        """Whether *entry* starts checked.
+        """Whether *entry* is checked.
 
-        A Project with nothing the run can use starts unchecked — it can only
-        produce a failure. Everything else starts checked, unless the caller
-        passed the Batch table's own column (first open) or the user has since
-        said otherwise.
+        What the user said wins, on every rebuild; otherwise a Project starts
+        checked exactly when it can run — one with nothing usable can only
+        produce a failure, and one repaired here joins the run.
+
+        The Batch table's column (*checked*) is read on the first build only,
+        and turned into what the user said there: the table checks a runnable
+        Project unless someone unchecks it, so a runnable row arriving
+        unchecked (or an unrunnable one arriving checked) is the user's own
+        act. Recording it as one is what keeps it after a Fix or a Rescan —
+        when this was a first-build special case, the second build fell back
+        to "runnable" and re-checked the Projects the user had unchecked.
         """
+        if not self._seeded and self._preferred is not None:
+            in_table = entry.key in self._preferred
+            if in_table != entry.runnable:
+                (self._user_checked if in_table
+                 else self._user_unchecked).add(entry.key)
         if entry.key in self._user_unchecked:
             return False
         if entry.key in self._user_checked:
             return True
-        if not self._seeded and self._preferred is not None:
-            return entry.key in self._preferred and entry.runnable
         return entry.runnable
+
+    @property
+    def user_choices(self) -> dict[str, bool]:
+        """``{key: checked}`` for every Project whose box the user decided —
+        here or, before this dialog opened, in the Batch table."""
+        choices = {key: True for key in self._user_checked}
+        choices.update({key: False for key in self._user_unchecked})
+        return choices
 
     def _on_item_changed(self, item, column) -> None:
         if self._loading or column != 0 or item.parent() is not None:
@@ -355,9 +376,15 @@ class BatchPreflightDialog(QDialog):
                 f"{repaired.describe()}\n\nIts saved results will then be "
                 f"out of date until it is re-run.")
             if resp == QMessageBox.StandardButton.Yes:
-                exp.repair_focus(picked[2])
-                self._log(f"[preflight] {picked[1].name}: Focus {picked[2]!r} "
-                          f"repaired — {repaired.describe()}")
+                try:
+                    exp.repair_focus(picked[2])
+                except (RuntimeError, ValueError, OSError) as exc:
+                    ## A config that cannot be read refuses every write.
+                    self._log(f"[preflight] {picked[1].name}: {exc}")
+                    QMessageBox.warning(self, "Repair Focus", str(exc))
+                else:
+                    self._log(f"[preflight] {picked[1].name}: Focus {picked[2]!r} "
+                              f"repaired — {repaired.describe()}")
             self.reload()
             return
         key, member = self._selected_member()
@@ -398,7 +425,7 @@ class BatchPreflightDialog(QDialog):
         try:
             project = Project(self._root / key if key else self._root)
             project.add_member(member.name)
-        except (ProjectError, OSError) as exc:
+        except (ProjectError, OSError, ValueError) as exc:
             self._log(f"[preflight] {key}/{member.name}: {exc}")
             QMessageBox.warning(self, "Could not scaffold a config", str(exc))
             return False
@@ -420,7 +447,14 @@ class BatchPreflightDialog(QDialog):
             "The experiment's data file:", list(member.candidates), 0, False)
         if not ok or not choice:
             return
-        config = cfgmod.load_config(member.directory)
+        ## Never written over a config that does not parse — the write would
+        ## replace the user's file with this one key.
+        try:
+            config = cfgmod.load_config(member.directory)
+        except ValueError as exc:
+            self._log(f"[preflight] {member.name}: {exc}")
+            QMessageBox.warning(self, "Could not name the data file", str(exc))
+            return
         config["data_file"] = choice
         cfgmod.save_config(member.directory, config)
         self._log(f"[preflight] {member.name}: data_file: {choice}")

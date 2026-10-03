@@ -9,10 +9,22 @@ only cross-Focus synthesis anywhere in the app (ADR-0001, ADR-0011).
 
 Only Focuses whose saved results are current are summarized: an Out of Date
 Focus's numbers describe a slice its config no longer declares.
+
+The narrative is **a derivative of a run**, and is saved as one: every
+generation writes ``<project>/<project>_narrative.json``, each paragraph
+stamped with the Run Summary it was written from. Re-running a Focus's
+analysis rewrites that summary, so the paragraph no longer matches and is
+deleted the next time the file is read — and so is the across-Focuses
+paragraph, which was written from it. What :func:`load` returns is therefore
+never prose about numbers the folder no longer holds.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from .base import ProviderError, load_dotenv_if_present
@@ -57,6 +69,20 @@ def get_provider(name: str | None = None):
 # Digests — the only thing a provider ever sees
 # ---------------------------------------------------------------------------
 
+def lr_statistic(lr: dict):
+    """The likelihood-ratio χ² of a factorial model's interaction test.
+
+    Read ``statistic`` first, then ``lr_stat`` (what Run Summaries written
+    before the key was settled carry), then ``chi2`` — one rule, so a saved
+    summary of any age gives the narrative its number instead of ``None``.
+    """
+    for key in ("statistic", "lr_stat", "chi2"):
+        value = (lr or {}).get(key)
+        if value is not None:
+            return value
+    return None
+
+
 def member_digest(saved) -> str:
     """A compact text rendering of one member's saved numbers."""
     lines: list[str] = []
@@ -87,6 +113,13 @@ def member_digest(saved) -> str:
         lines.append("Median survival by treatment:")
         lines.append(median.to_string(index=False))
 
+    ## The type's prompt asks for mean lifespan; without the table the model
+    ## could only say the analysis does not report it.
+    mean = getattr(saved, "mean_surv", None)
+    if mean is not None and len(mean):
+        lines.append("Mean survival (restricted mean) by treatment:")
+        lines.append(mean.to_string(index=False))
+
     omnibus = saved.omnibus_lr
     if omnibus:
         lines.append(
@@ -109,7 +142,7 @@ def member_digest(saved) -> str:
                      f"{model.get('formula')}{ref_text}")
         lr = model.get("lr_interaction") or {}
         if lr:
-            lines.append(f"  interaction LR test: chi2={lr.get('statistic')}, "
+            lines.append(f"  interaction LR test: chi2={lr_statistic(lr)}, "
                          f"df={lr.get('df')}, p={lr.get('p_value')}")
         coefs = model.get("coefficients")
         if coefs is not None and len(coefs):
@@ -150,8 +183,12 @@ def _across_prompt(question: str, summaries: dict[str, str]) -> str:
 # ---------------------------------------------------------------------------
 
 def generate(project, provider: Any = None, log=None,
-             include_across: bool = True) -> dict[str, str]:
+             include_across: bool = True, save: bool = True) -> dict[str, str]:
     """Narrative for a Project: ``{"<member> · <focus>": text, "__across__": text}``.
+
+    *provider* is a provider object, a provider name (``"anthropic"``,
+    ``"openai"``), or ``None`` for the first configured one. Whatever was
+    written is saved (see :func:`save`) unless *save* is False.
 
     Soft-fails throughout — a provider outage costs you the narrative, never
     the report.
@@ -167,6 +204,8 @@ def generate(project, provider: Any = None, log=None,
         return {}
 
     out: dict[str, str] = {}
+    #: key → (member, focus, run stamp): what each paragraph was written from.
+    sources: dict[str, tuple[str, str, str | None]] = {}
     for member in project.members():
         statuses = {fs.name: fs for fs in member.status(check_blocked=False).focuses}
         for focus in member.focuses():
@@ -177,6 +216,9 @@ def generate(project, provider: Any = None, log=None,
             if not saved.exists:
                 continue
             key = section_key(member.name, focus.name)
+            ## Stamped before the provider is asked: the paragraph describes
+            ## the run whose numbers went into the digest.
+            stamp = run_stamp(member, focus)
             try:
                 text = provider.complete(
                     SYSTEM,
@@ -187,6 +229,7 @@ def generate(project, provider: Any = None, log=None,
                 emit(f"  [{key}] narrative skipped: {exc}")
                 continue
             out[key] = text
+            sources[key] = (member.name, focus.name, stamp)
             emit(f"  [{key}] narrative written ({len(text.split())} words).")
 
     if include_across and len(out) > 1:
@@ -196,4 +239,108 @@ def generate(project, provider: Any = None, log=None,
             emit("  across-Focuses paragraph written.")
         except ProviderError as exc:
             emit(f"  across-Focuses paragraph skipped: {exc}")
+    if save and out:
+        path = _save(project, out, sources, provider)
+        emit(f"  narrative saved to {path.name}.")
     return out
+
+
+# ---------------------------------------------------------------------------
+# The saved narrative — a derivative of the runs it summarizes
+# ---------------------------------------------------------------------------
+
+def narrative_path(project) -> Path:
+    """``<project>/<project>_narrative.json``, beside the Project Report it
+    is written for and named the same way."""
+    directory = Path(project.directory)
+    return directory / f"{directory.name}_narrative.json"
+
+
+def run_stamp(member, focus) -> str | None:
+    """What identifies the run a paragraph summarizes: the sha256 of that
+    Focus's Run Summary. Every analysis rewrites the summary, so a re-run —
+    even one that happens to reproduce the same numbers — breaks the match."""
+    path = member.outputs(focus).summary
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _save(project, out: dict[str, str], sources: dict, provider) -> Path:
+    payload = {
+        "written_at": datetime.now().isoformat(timespec="seconds"),
+        "provider": getattr(provider, "name", None),
+        "model": getattr(provider, "model", None),
+        "sections": {
+            key: {"member": sources[key][0], "focus": sources[key][1],
+                  "run": sources[key][2], "text": text}
+            for key, text in out.items() if key in sources
+        },
+    }
+    if ACROSS_KEY in out:
+        ## Written from every paragraph above, so it is only as current as
+        ## all of them.
+        payload["across"] = {"text": out[ACROSS_KEY],
+                             "runs": {k: sources[k][2] for k in sources}}
+    path = narrative_path(project)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False),
+                    encoding="utf-8")
+    return path
+
+
+def load(project) -> dict[str, str]:
+    """The saved narrative, as :func:`generate` returns it — current parts only.
+
+    A paragraph whose Focus has been re-analysed since it was written no
+    longer matches its Run Summary and is **deleted** from the file, with the
+    across-Focuses paragraph, which was written from it; the file goes when
+    nothing is left. A paragraph whose Focus is merely Out of Date is kept on
+    disk but not returned — its run is intact, the config just no longer
+    describes it, exactly as the report treats the results themselves.
+    """
+    path = narrative_path(project)
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    sections = payload.get("sections") or {}
+    members = {m.name: m for m in project.members()}
+
+    kept: dict[str, dict] = {}
+    current: dict[str, str] = {}
+    for key, entry in sections.items():
+        member = members.get(entry.get("member"))
+        if member is None:
+            continue
+        try:
+            focus = member.focus(entry.get("focus"))
+        except Exception:  # noqa: BLE001 - a Focus renamed or deleted since
+            continue
+        stamp = entry.get("run")
+        if stamp is None or run_stamp(member, focus) != stamp:
+            continue                           # re-run since: deleted
+        kept[key] = entry
+        status = member.focus_status(focus, check_blocked=False)
+        if status.analyzed and not status.out_of_date:
+            current[key] = str(entry.get("text") or "")
+
+    across = payload.get("across") or None
+    if across is not None and any(kept.get(k, {}).get("run") != stamp
+                                  for k, stamp in (across.get("runs") or {}).items()):
+        across = None
+    if across is not None and set(current) >= set(across.get("runs") or {}):
+        current[ACROSS_KEY] = str(across.get("text") or "")
+
+    if kept != sections or across != payload.get("across"):
+        if kept:
+            payload["sections"] = kept
+            if across is None:
+                payload.pop("across", None)
+            path.write_text(json.dumps(payload, indent=2, ensure_ascii=False),
+                            encoding="utf-8")
+        else:
+            path.unlink(missing_ok=True)
+    return current

@@ -49,7 +49,8 @@ def _add_run_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--factor-names", nargs=2, default=None, metavar=("F1", "F2"),
                    help="CSV wide: two factor names.")
     p.add_argument("--exclusion-group", default=None,
-                   help="Apply this exclusion group (overrides the config's).")
+                   help="Also exclude this group's chambers, on top of the "
+                        "config's active group (which is still applied).")
     p.add_argument("--figures", action="store_true",
                    help="Also render the Publication Figures.")
 
@@ -275,7 +276,14 @@ def main() -> None:
         "upgrade": _cmd_upgrade,
     }
     if args.cmd in handlers:
-        sys.exit(handlers[args.cmd](args))
+        try:
+            sys.exit(handlers[args.cmd](args))
+        except ValueError as exc:
+            ## A config that will not parse (ConfigSyntaxError, a broken
+            ## project.yaml) is the user's file to fix, not a crash: say which
+            ## file and line, without a traceback.
+            print(f"error: {exc}", file=sys.stderr)
+            sys.exit(2)
     if args.cmd is None:
         args = argparse.Namespace(path=None)
     sys.exit(_cmd_hub(args))

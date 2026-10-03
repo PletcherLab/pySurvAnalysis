@@ -7,8 +7,10 @@ imported — and validated — without matplotlib, and adding a figure to a type
 one tuple entry rather than a pipeline edit.
 
 Every builder takes the :class:`~pysurvanalysis.pipeline.AnalysisResult` and
-returns a matplotlib Figure. When the slice cannot support a figure — too few
-treatments for a forest plot, a Focus that is not a 2×2 — the builder raises
+returns a matplotlib Figure, drawn with the run's time label and its Focus's
+order, display names and colours (:func:`figure_options`). When the slice
+cannot support a figure — too few treatments for a forest plot, a Focus that
+does not cross two factors — the builder raises
 :class:`~pysurvanalysis.domain.focus.NotApplicable` with the reason, and the
 run records it where the reader will see it: one fewer figure is a fact to
 state, not a gap to leave.
@@ -32,11 +34,28 @@ class PlotBuilder:
     caption: str = ""
 
 
-def _time_label(result) -> str:
-    exp = getattr(result, "experiment", None)
-    if exp is not None:
-        return exp.type.resolve_time_label(exp.config)
-    return "Age (hours)"
+def figure_options(experiment=None, focus=None) -> dict:
+    """The keywords every :mod:`plotting` figure takes from its context: the
+    Experiment Type's time label, and the Focus's colours and display names.
+
+    One function so the Plot Set, the Defined Plots and the script actions
+    (``figure_options(ctx.experiment, ctx.focus)``) draw a Focus the same
+    way. With no experiment the label is the direct-mode default.
+    """
+    if experiment is not None:
+        time_label = experiment.type.resolve_time_label(experiment.config)
+    else:
+        time_label = "Age (hours)"
+    return {
+        "time_label": time_label,
+        "colours": dict(getattr(focus, "colours", None) or {}),
+        "display_names": dict(getattr(focus, "display_names", None) or {}),
+    }
+
+
+def _options(result) -> dict:
+    return figure_options(getattr(result, "experiment", None),
+                          getattr(result, "focus", None))
 
 
 def _focus_levels(result) -> dict[str, list]:
@@ -55,11 +74,11 @@ def _focus_levels(result) -> dict[str, list]:
 
 
 def _km(result):
-    return plotting.plot_km_curves(result.lifetables)
+    return plotting.plot_km_curves(result.lifetables, **_options(result))
 
 
 def _km_risk(result):
-    return plotting.plot_km_with_risk_table(result.lifetables)
+    return plotting.plot_km_with_risk_table(result.lifetables, **_options(result))
 
 
 def _forest(result):
@@ -67,41 +86,51 @@ def _forest(result):
         from .domain.focus import NotApplicable
 
         raise NotApplicable("fewer than two treatments to compare")
-    return plotting.plot_hazard_ratio_forest(result.hazard_ratios)
+    return plotting.plot_hazard_ratio_forest(
+        result.hazard_ratios, display_names=_options(result)["display_names"])
 
 
 def _faceted(result):
     return plotting.plot_km_faceted(
-        result.lifetables, _focus_levels(result), time_label=_time_label(result),
-    )
+        result.lifetables, _focus_levels(result), **_options(result))
 
 
 def _interaction(result):
     return plotting.plot_lifespan_interaction(
-        result.individual_data, _focus_levels(result), time_label=_time_label(result),
-    )
+        result.individual_data, _focus_levels(result), **_options(result))
+
+
+def _smoothed(result):
+    ## The shared bandwidth, named rather than left to the default, so the
+    ## Plot Set figure is visibly the one the Publication Figure and the
+    ## script action also draw.
+    return plotting.plot_smoothed_hazard(
+        result.lifetables, sigma=plotting.SMOOTHED_HAZARD_SIGMA, **_options(result))
+
+
+def _lifetable_figure(draw: Callable) -> Callable:
+    return lambda result: draw(result.lifetables, **_options(result))
 
 
 _BUILDERS: dict[str, tuple[str, Callable]] = {
     "km_curves":             ("kaplan_meier.png", _km),
     "km_risk_table":         ("km_with_risk_table.png", _km_risk),
     "nelson_aalen":          ("nelson_aalen.png",
-                              lambda r: plotting.plot_nelson_aalen(r.lifetables)),
+                              _lifetable_figure(plotting.plot_nelson_aalen)),
     "log_log":               ("log_log_diagnostic.png",
-                              lambda r: plotting.plot_log_log(r.lifetables)),
+                              _lifetable_figure(plotting.plot_log_log)),
     "cumulative_events":     ("cumulative_events.png",
-                              lambda r: plotting.plot_cumulative_events(r.lifetables)),
+                              _lifetable_figure(plotting.plot_cumulative_events)),
     "hazard":                ("hazard_rate.png",
-                              lambda r: plotting.plot_hazard(r.lifetables)),
-    "smoothed_hazard":       ("smoothed_hazard.png",
-                              lambda r: plotting.plot_smoothed_hazard(r.lifetables)),
+                              _lifetable_figure(plotting.plot_hazard)),
+    "smoothed_hazard":       ("smoothed_hazard.png", _smoothed),
     "mortality":             ("mortality_qx.png",
-                              lambda r: plotting.plot_mortality(r.lifetables)),
+                              _lifetable_figure(plotting.plot_mortality)),
     "number_at_risk":        ("number_at_risk.png",
-                              lambda r: plotting.plot_number_at_risk(r.lifetables)),
+                              _lifetable_figure(plotting.plot_number_at_risk)),
     "survival_distribution": ("survival_distribution.png",
                               lambda r: plotting.plot_survival_distribution(
-                                  r.individual_data)),
+                                  r.individual_data, **_options(r))),
     "hazard_ratio_forest":   ("hazard_ratio_forest.png", _forest),
     "km_faceted":            ("km_faceted.png", _faceted),
     "interaction_lifespan":  ("interaction_lifespan.png", _interaction),

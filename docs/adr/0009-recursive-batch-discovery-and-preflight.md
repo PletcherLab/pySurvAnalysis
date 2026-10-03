@@ -98,7 +98,10 @@ it reaches, and until now nothing stated that list before it started.
   derived from what the user actually said plus what the Project can do *now*,
   never from the previous check column: scaffolding a config is what *makes* a
   Project runnable, so re-deriving "unchecked" from the pre-repair state would
-  exclude the very Project the user had just fixed.
+  exclude the very Project the user had just fixed. The Hub's Batch table
+  follows the same rule — it records only the boxes the user ticked or
+  unticked, and the preflight reads them as explicit choices on every rebuild,
+  so a Fix or Rescan never re-checks a Project the user left out.
 
 - **Scaffolding goes through the Project's own path.** The preflight calls
   `Project.add_member`, so a repaired member inherits the Project Defaults. A

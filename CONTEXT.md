@@ -203,7 +203,11 @@ experiment
 **Reference Level**:
 A factor's Cox dummy-coding baseline and the baseline in the report's prose,
 named per factor in a **Focus**'s `reference:` key and defaulting to the first
-level listed when that key is absent. Declaring it separately from level order
+level listed when that key is absent. The Focus window always writes it down,
+so reordering levels there can never silently move the baseline; a hand-written
+Focus without the key still means the first level, and the two are the same
+analysis — Out of Date compares the level the model uses, not whether the key
+was written. Declaring it separately from level order
 keeps a presentation choice from silently rewriting the statistics: the order
 governs legends, facets and plot cells, while the Reference Level governs the
 sign of every coefficient, the interaction term included — so densities may
@@ -403,14 +407,18 @@ because you decide what to exclude before you analyse it — as sub-tiles in
 its panel: all five wait on the same loaded experiment, and five dimmed
 ribbon chips said that five times over. A sub-tile opens the panel it
 always had, anchored under the Experiment tile; the Experiment tile itself is
-the one tile that is disabled (not merely dimmed) with nothing loaded, since
-its panel holds no fixer control, only the four gates. Above the five
+the one tile that refuses to open with nothing loaded — it is dimmed, and a
+click says where to load one instead — since its panel holds no fixer
+control, only the gates. Above the five
 sub-tiles sits the **Active Focus** selector — a scope the sub-tiles act on,
 not a sixth destination — with New… and Edit… opening the Focus window and a
-shape line (`2 factors · 4 treatments · N=409 · 2×2`) showing, before anything
-runs, whether the Factorial Battery will be offered. The status readout carries
+shape line (`Genotype: wt, mut (reference wt) × Diet: AL, DR (reference AL) ·
+shape 2×2 · offers a comparison between treatments; …; the Factorial
+Battery`) showing, before anything runs, which conditional analyses the
+Focus is offered and which its data cannot compute. The status readout carries
 a Focus row, since "which experiment" without "which Focus" is now half an
-answer. All controls live in a tile's anchored panel, one open at a time.
+answer; its rows run Selection, Project, Experiment, Focus, then the Project's
+question, and whatever does not fit goes to its tooltip. All controls live in a tile's anchored panel, one open at a time.
 The Analyze and Plots panels are each a checkbox per item of the loaded
 **Experiment Type**'s **Analysis Set** or **Plot Set** the Active Focus is
 offered, over one button — Run analysis, Generate plots; an unticked box is
@@ -431,8 +439,9 @@ A script action contributed by an Experiment Type rather than by the core.
 Until ADR-0012 each was also a Hub button; the Hub now offers the type's
 Analysis Set and Plot Set as checkboxes instead. The action registry at each level is
 *core ∪ type ∪ what the active Focus Shape admits* — `cox_interaction` and
-`interaction_plot` are in the registry when the Focus is 2×2 and absent when
-it is not (ADR-0011). A script step naming an action outside that union is a
+`interaction_plot` are always in the registry, so a script naming them is
+valid; whether they apply is decided per Focus at run time, and a Focus
+they do not suit records them as **Not Applicable** (ADR-0011). A script step naming an action outside that union is a
 hard error: the script refuses to start, and in a Batch Run that
 Project is logged, counted as a failure, and the Batch continues.
 _Avoid_: plugin, extension, custom action
@@ -489,7 +498,10 @@ One execution of a designated Project Script in every **checked** Project of a
 Batch, continue-on-error with per-Project log prefixes. The checked set is
 confirmed in the **Batch Preflight** and nothing outside it is touched.
 `batch.yaml` holds the designation and a central `project_scripts:` section.
-**No designation means each Project runs its own `batch` script** — resolution
+The Hub's script picker writes the designation (`script:`), and its default
+entry — each Project's own — removes it rather than create the file; a
+`batch.yaml` that will not parse lists the Batch but refuses to run or be
+written. **No designation means each Project runs its own `batch` script** — resolution
 for a named one is central `project_scripts:`, then the Project's own
 `scripts:`, then the built-ins; a name that resolves nowhere fails that
 Project, and the run continues. The summary carries a usable/total member
@@ -507,8 +519,8 @@ _Avoid_: combined report, pooled report
 
 **Focus Inventory**:
 The Project Report's table of every Focus in every Member Experiment, one row
-each: member, Focus name, factors and ordered levels, Reference Levels, N,
-deaths, % censored, and state — analysed, not analysed, **Out of Date**,
+each: member, Focus name, the slice it takes (factors, ordered levels and
+Reference Levels, in one line), N, deaths, % censored, treatments, and state — analysed, not analysed, **Out of Date**,
 **Blocked** — plus any **Not Applicable** actions. It replaced the Member
 Inventory when the Focus became the unit of analysis, and it absorbed design
 divergence from the Divergence Note: with members rarely sharing factors,
@@ -532,12 +544,19 @@ An optional, AI-written summary attached to a report: one paragraph per
 **Focus** from that Focus's own numbers, plus a closing qualitative
 "across Focuses" paragraph on agreement and disagreement, captioned as
 non-statistical. The AI *summarizes* the pipeline's analysis; it never performs
-its own, and no numbers are ever combined. A derivative of a run — re-running
-the analysis deletes it.
+its own, and no numbers are ever combined. Saved beside the Project as
+`<project>_narrative.json`, each paragraph stamped with the Run Summary it
+summarised; a derivative of a run — re-running a Focus's analysis retires that
+Focus's paragraph and the across-Focuses one, which are never shown again.
 _Avoid_: AI analysis, AI interpretation, meta-analysis
 
 **Exclusion Group**:
-A named set of chambers removed from analysis, stored in `qc/remove_chambers.csv`.
+A named set of chambers removed from analysis, stored in `qc/remove_chambers.csv`
+(a legacy root-level `remove_chambers.csv` is still read, and its groups move
+into `qc/` on the first save). A member opts out of a group its Project
+Defaults name with an explicit `exclusions: {group: ''}`; a script step that
+excludes more on top (`apply_exclusions`) stamps the run with both names
+(`base + extra`), so those results read as Out of Date against the config.
 The **active** group is configuration (`exclusions: {group: ...}` in
 `survival_config.yaml`), not UI state, and its name is stamped on every report
 and Run Summary — so the same input and config always give the same result.
@@ -584,7 +603,9 @@ _Avoid_: migration (overloaded), conversion
 `analysis/<focus>/run_summary_<focus>.json` — the small record of one analysis
 run under one **Focus** (counts, the Focus's **analytic definition** — its
 factors, their ordered levels and its Reference Levels — the Exclusion Group
-and how many chambers it actually removed, the figures
+and which chambers it actually removed — the stamp is `base + extra` when a
+script excluded more — the data file's content hash, the censoring policy, the
+`omit:` selection, the figures
 written, any **Not Applicable** actions and why, the omnibus test, and each
 factorial model's headline numbers). One per Focus, never one per directory: that is what keeps analysing a second
 Focus from overwriting the first. Recording the definition is what lets the Hub
@@ -595,10 +616,13 @@ re-analysing, which is what makes a bound Project Report cheap and what makes
 _Avoid_: cache, manifest
 
 **Out of Date**:
-A Focus whose saved results were produced under a different analytic
-definition — factors, levels or Reference Levels — or a different Exclusion
-Group than its config now declares, found by comparing the Run Summary's
-recorded definition with the declared one. Its report section says the results
+A Focus whose saved results no longer describe what a run would now produce:
+a different analytic definition — factors, levels or the Reference Level the
+model uses — a different Exclusion Group or a different set of chambers
+removed from the Focus's own cells, a changed data file (compared by content,
+not date), a changed censoring policy, or a changed `omit:` selection. Found
+by comparing what the Run Summary recorded with the current config and file;
+a summary written before a field was recorded is not judged on it. Its report section says the results
 predate a change and need a re-run, and presents none of them: the report never
 silently analyses on the user's behalf, and by the same rule never silently
 presents results for something they no longer describe. Display names and

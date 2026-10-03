@@ -11,14 +11,49 @@ event time:
     hx          — estimate of instantaneous hazard, adjusted for interval width
     km_lx       — Kaplan-Meier estimate of survivorship
     se_km       — Greenwood standard error of KM estimate
-    km_ci_lo    — 95% CI lower bound for KM
+    km_ci_lo    — 95% CI lower bound for KM (log-log / exponential Greenwood)
     km_ci_hi    — 95% CI upper bound for KM
+
+Treatments come out in display order (:func:`statistics.treatment_order`),
+never alphabetically, so every table built from a lifetable lists them the way
+the Focus declares them.
+
+Areas under the KM curve (mean survival, RMST) integrate the **step
+function** exactly up to the restriction time τ. The curve is flat between
+event times, so joining its points with straight lines (trapezoids) cuts a
+corner off every step and understates the area, and stopping at the last time
+before τ drops the final strip.
 """
 
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+
+from .statistics import treatment_groups, treatment_order
+
+#: The two-sided 95% normal quantile — lifelines' exact value, so the KM band
+#: and the median's interval match it to the last digit.
+_Z95 = 1.959963984540054
+
+
+def _loglog_band(surv: float, greenwood_sum: float) -> tuple[float, float]:
+    """The 95% log-log ("exponential Greenwood") interval for one KM value.
+
+    Built on log(−log S), so it always lies inside [0, 1] and is asymmetric
+    where S is near either end — unlike S ± 1.96·SE, which crosses 0 and 1 and
+    has to be clipped there exactly where the tail is read. lifelines'
+    ``KaplanMeierFitter`` uses the same interval.
+    """
+    if surv >= 1.0:
+        return 1.0, 1.0
+    if surv <= 0.0:
+        return 0.0, 0.0
+    v = np.log(surv)
+    spread = _Z95 * np.sqrt(greenwood_sum) / v      # v < 0, so spread <= 0
+    lo = float(np.exp(-np.exp(np.log(-v) - spread)))
+    hi = float(np.exp(-np.exp(np.log(-v) + spread)))
+    return lo, hi
 
 
 def _lifetable_one_treatment(df: pd.DataFrame) -> pd.DataFrame:
@@ -60,11 +95,13 @@ def _lifetable_one_treatment(df: pd.DataFrame) -> pd.DataFrame:
 
         cum_surv *= px
 
-        # Greenwood's formula for SE of KM
+        # Greenwood's formula for SE of KM. A step where everyone at risk
+        # dies (n == d) takes S to 0 and adds nothing — lifelines does the same.
         if n_at_risk > 0 and d > 0 and n_at_risk != d:
             greenwood_sum += d / (n_at_risk * (n_at_risk - d))
 
         se_km = cum_surv * np.sqrt(greenwood_sum) if greenwood_sum > 0 else 0.0
+        km_ci_lo, km_ci_hi = _loglog_band(cum_surv, greenwood_sum)
 
         # Hazard estimate (adjusted for interval width)
         # Using actuarial approximation: hx = 2*qx / ((1+px)*dt)
@@ -93,8 +130,8 @@ def _lifetable_one_treatment(df: pd.DataFrame) -> pd.DataFrame:
             "hx": hx,
             "km_lx": cum_surv,
             "se_km": se_km,
-            "km_ci_lo": max(0.0, cum_surv - 1.96 * se_km),
-            "km_ci_hi": min(1.0, cum_surv + 1.96 * se_km),
+            "km_ci_lo": km_ci_lo,
+            "km_ci_hi": km_ci_hi,
             "na_H": na_H,
             "na_se": na_se,
             "na_ci_lo": na_ci_lo,
@@ -117,10 +154,12 @@ def compute_lifetables(individual_data: pd.DataFrame) -> pd.DataFrame:
 
     Returns
     -------
-    DataFrame with a ``treatment`` column and all lifetable columns.
+    DataFrame with a ``treatment`` column and all lifetable columns, the
+    treatments in display order (so :func:`statistics.treatment_order` of the
+    result — first appearance — is the Focus's order too).
     """
     parts = []
-    for treatment, grp in individual_data.groupby("treatment"):
+    for treatment, grp in treatment_groups(individual_data):
         lt = _lifetable_one_treatment(grp)
         lt.insert(0, "treatment", treatment)
         parts.append(lt)
@@ -145,7 +184,12 @@ def compute_lifetables_per_chamber(individual_data: pd.DataFrame) -> pd.DataFram
             columns=["treatment", "chamber", "time", "km_lx", "n_at_risk", "n_deaths"]
         )
     parts = []
-    for (treatment, chamber), grp in individual_data.groupby(["treatment", "chamber"]):
+    ## observed=True: a categorical treatment would otherwise pair every
+    ## treatment with every chamber, almost all of them empty.
+    order = {t: i for i, t in enumerate(treatment_order(individual_data))}
+    groups = sorted(individual_data.groupby(["treatment", "chamber"], observed=True),
+                    key=lambda item: order.get(str(item[0][0]), len(order)))
+    for (treatment, chamber), grp in groups:
         if len(grp) == 0:
             continue
         lt = _lifetable_one_treatment(grp)
@@ -159,84 +203,144 @@ def compute_lifetables_per_chamber(individual_data: pd.DataFrame) -> pd.DataFram
     return pd.concat(parts, ignore_index=True)
 
 
-def median_survival(lifetable: pd.DataFrame) -> pd.DataFrame:
-    """Extract median survival time for each treatment.
+def _first_at_or_below(lt: pd.DataFrame, column: str, q: float) -> float:
+    """The first time *column* of one treatment's lifetable is ≤ *q* — NaN
+    when it never gets there (the quantile is "not reached")."""
+    below = lt.loc[lt[column] <= q, "time"]
+    return float(below.iloc[0]) if len(below) else np.nan
 
-    Returns a DataFrame with treatment, median_time, and the 95% CI bounds
-    for the time at which KM crosses 0.5.
+
+def _median_with_ci(lt: pd.DataFrame) -> tuple[float, float, float]:
+    """``(median, lower, upper)`` from one treatment's lifetable.
+
+    The median is the first time KM ≤ 0.5. Its 95% interval is read off the
+    KM band the same way — inverting the pointwise interval, as R's
+    ``survfit`` and lifelines' ``median_survival_times(confidence_interval_)``
+    do: the lower bound is where the band's lower edge first reaches 0.5, the
+    upper where its upper edge does — NaN when that edge never gets there.
+    """
+    if lt is None or not len(lt):
+        return np.nan, np.nan, np.nan
+    return (_first_at_or_below(lt, "km_lx", 0.5),
+            _first_at_or_below(lt, "km_ci_lo", 0.5),
+            _first_at_or_below(lt, "km_ci_hi", 0.5))
+
+
+def km_median_ci(data: pd.DataFrame) -> dict:
+    """The KM median and its 95% interval for ONE group of individuals.
+
+    *data* needs ``time`` and ``event``; it is one treatment (or one cell of a
+    figure). Returns ``{"median", "ci_lo", "ci_hi"}``, each NaN when not
+    reached — the same numbers the Median survival table reports.
+    """
+    if data is None or not len(data):
+        return {"median": np.nan, "ci_lo": np.nan, "ci_hi": np.nan}
+    median, lo, hi = _median_with_ci(_lifetable_one_treatment(data))
+    return {"median": median, "ci_lo": lo, "ci_hi": hi}
+
+
+def median_survival(lifetable: pd.DataFrame) -> pd.DataFrame:
+    """Extract median survival time for each treatment, with its 95% CI.
+
+    Columns: ``treatment``, ``median_survival``, ``median_ci_lo``,
+    ``median_ci_hi`` — the times at which the KM curve and its log-log band
+    first reach 0.5 (see :func:`_median_with_ci`). NaN means not reached.
     """
     results = []
-    for treatment, grp in lifetable.groupby("treatment"):
-        below = grp[grp["km_lx"] <= 0.5]
-        if len(below) > 0:
-            median_t = below["time"].iloc[0]
-        else:
-            median_t = np.nan
-        results.append({"treatment": treatment, "median_survival": median_t})
-    return pd.DataFrame(results)
+    for treatment, grp in treatment_groups(lifetable):
+        median_t, lo, hi = _median_with_ci(grp)
+        results.append({"treatment": treatment, "median_survival": median_t,
+                        "median_ci_lo": lo, "median_ci_hi": hi})
+    return pd.DataFrame(results, columns=["treatment", "median_survival",
+                                          "median_ci_lo", "median_ci_hi"])
+
+
+def _km_survival(time, event) -> tuple[np.ndarray, np.ndarray]:
+    """Distinct times and the KM survivorship from each onward — the bare
+    curve, vectorised, for callers that need it many times over (the RMST
+    jackknife refits it once per individual)."""
+    t = np.asarray(time, dtype=float)
+    e = np.asarray(event, dtype=float)
+    if not len(t):
+        return np.array([]), np.array([])
+    uniq, inv = np.unique(t, return_inverse=True)
+    deaths = np.bincount(inv, weights=e, minlength=len(uniq))
+    removed = np.bincount(inv, minlength=len(uniq))
+    at_risk = len(t) - np.concatenate([[0], np.cumsum(removed)[:-1]])
+    return uniq, np.cumprod(1.0 - deaths / at_risk)
+
+
+def _step_area(times, surv, tau: float) -> float:
+    """∫₀^τ S(t) dt for the KM step function — exact.
+
+    S is 1 on [0, t₁) and ``surv[i]`` on [tᵢ, tᵢ₊₁); past the last time it
+    stays at its last value (lifelines' ``predict`` does the same), though
+    the common-τ rule never asks for that.
+    """
+    times = np.asarray(times, dtype=float)
+    surv = np.asarray(surv, dtype=float)
+    keep = times < tau
+    starts = np.concatenate([[0.0], times[keep]])
+    levels = np.concatenate([[1.0], surv[keep]])
+    ends = np.append(starts[1:], tau)
+    return float(np.sum(levels * np.clip(ends - starts, 0.0, None)))
+
+
+def km_rmst(data: pd.DataFrame, tau: float) -> float:
+    """Restricted mean survival time of ONE group up to *tau*: the exact area
+    under its KM step function (lifelines' ``restricted_mean_survival_time``
+    of a fitted ``KaplanMeierFitter`` gives the same number)."""
+    if data is None or not len(data) or tau is None or not np.isfinite(tau):
+        return np.nan
+    times, surv = _km_survival(data["time"], data["event"])
+    return _step_area(times, surv, float(tau))
+
+
+def common_tau(individual_data: pd.DataFrame) -> float:
+    """The common restriction time: the smallest of the treatments' last
+    observed times (death or censoring).
+
+    Every treatment is followed at least that long, so every RMST compared
+    against another is the area over the same window — comparing areas over
+    different windows would credit a treatment for being watched longer.
+    """
+    groups = treatment_groups(individual_data)
+    if not groups:
+        if individual_data is None or not len(individual_data):
+            return np.nan
+        return float(individual_data["time"].max())
+    return float(min(grp["time"].max() for _, grp in groups))
 
 
 def mean_survival(individual_data: pd.DataFrame) -> pd.DataFrame:
     """Compute restricted mean survival time (RMST) for each treatment.
 
-    Uses the area under the KM curve up to the minimum of the max observed
-    times across treatments (common restriction time).
+    The exact area under each treatment's KM step function from 0 to the
+    common restriction time τ (:func:`common_tau`). Columns: ``treatment``,
+    ``rmst``, ``restriction_time`` (τ, the same for every row).
     """
-    lt = compute_lifetables(individual_data)
-    t_max = lt.groupby("treatment")["time"].max().min()
-
-    results = []
-    for treatment, grp in lt.groupby("treatment"):
-        grp = grp[grp["time"] <= t_max].sort_values("time")
-        times = grp["time"].values
-        surv = grp["km_lx"].values
-
-        # Trapezoidal integration of the survival curve. Prepend the origin
-        # (t=0, S=1) so the initial [0, first_event] interval (area ≈
-        # first_event × 1.0) is included — omitting it biases RMST low, and
-        # because the first event time differs by arm the bias is unequal across
-        # treatments (distorting RMST *differences*, not just levels). This
-        # matches _km_mean_median_one_group, which already anchors the origin.
-        if len(times) >= 1:
-            times_full = np.concatenate([[0.0], times])
-            surv_full = np.concatenate([[1.0], surv])
-            area = np.trapezoid(surv_full, times_full)
-        else:
-            area = np.nan
-
-        results.append({
-            "treatment": treatment,
-            "rmst": area,
-            "restriction_time": t_max,
-        })
-    return pd.DataFrame(results)
+    tau = common_tau(individual_data)
+    results = [{"treatment": treatment, "rmst": km_rmst(grp, tau),
+                "restriction_time": tau}
+               for treatment, grp in treatment_groups(individual_data)]
+    return pd.DataFrame(results, columns=["treatment", "rmst", "restriction_time"])
 
 
-def _km_mean_median_one_group(df: pd.DataFrame) -> dict:
-    """Compute KM-based mean (RMST) and median for a single group.
+def _km_mean_median_one_group(df: pd.DataFrame, tau: float) -> dict:
+    """Compute KM-based mean (RMST up to *tau*) and median for a single group.
 
     Parameters
     ----------
     df : DataFrame with ``time`` and ``event`` columns.
+    tau : the restriction time — the caller's common τ, so the means of the
+        groups it compares cover the same window.
     """
     lt = _lifetable_one_treatment(df)
-
-    # Median: first time KM <= 0.5
-    below = lt[lt["km_lx"] <= 0.5]
-    median_t = float(below["time"].iloc[0]) if len(below) > 0 else np.nan
-
-    # Mean (RMST to max observed time)
-    times = lt["time"].values
-    surv = lt["km_lx"].values
-    if len(times) > 1:
-        # Prepend time 0, surv 1.0 for proper integration
-        times_full = np.concatenate([[0.0], times])
-        surv_full = np.concatenate([[1.0], surv])
-        rmst = float(np.trapezoid(surv_full, times_full))
-    else:
-        rmst = np.nan
-
-    return {"median": median_t, "mean_rmst": rmst, "t_max": float(times[-1]) if len(times) > 0 else np.nan}
+    median_t = _first_at_or_below(lt, "km_lx", 0.5) if len(lt) else np.nan
+    rmst = km_rmst(df, tau)
+    times = lt["time"].values if len(lt) else np.array([])
+    return {"median": median_t, "mean_rmst": rmst,
+            "t_max": float(times[-1]) if len(times) > 0 else np.nan}
 
 
 def _top_percentile_mean(df: pd.DataFrame, percentile: float) -> float:
@@ -267,17 +371,25 @@ def lifespan_statistics(
         treatment_stats : DataFrame — one row per treatment combination
         factor_stats    : DataFrame — one row per individual factor level
                           (e.g. all Males pooled, all 40x pooled)
+        tau             : the restriction time every ``mean_rmst`` uses
 
     Columns in each DataFrame:
-        group, n, n_deaths, n_censored, mean_rmst, median, t_max
+        group, n, n_deaths, n_censored, mean_rmst, tau, median, t_max
         (and top_10pct_mean, top_5pct_mean when assume_censored=False and n>10)
+
+    ``mean_rmst`` is the area under the KM step function up to the **common**
+    τ of :func:`mean_survival` — the smallest of the treatments' last observed
+    times — in both tables, so it matches the Mean survival table and two
+    rows are always means over the same window. ``t_max`` is still each
+    group's own last observed time.
     """
+    tau = common_tau(individual_data)
 
     def _stats_for_group(grp: pd.DataFrame, label: str) -> dict:
         n = len(grp)
         n_deaths = int(grp["event"].sum())
         n_censored = n - n_deaths
-        km = _km_mean_median_one_group(grp)
+        km = _km_mean_median_one_group(grp, tau)
 
         rec = {
             "group": label,
@@ -285,6 +397,7 @@ def lifespan_statistics(
             "n_deaths": n_deaths,
             "n_censored": n_censored,
             "mean_rmst": round(km["mean_rmst"], 2) if not np.isnan(km["mean_rmst"]) else np.nan,
+            "tau": round(tau, 2) if not np.isnan(tau) else np.nan,
             "median": round(km["median"], 2) if not np.isnan(km["median"]) else np.nan,
             "t_max": round(km["t_max"], 2) if not np.isnan(km["t_max"]) else np.nan,
         }
@@ -297,21 +410,29 @@ def lifespan_statistics(
 
     # Per treatment combination
     treatment_rows = []
-    for treatment, grp in individual_data.groupby("treatment"):
+    for treatment, grp in treatment_groups(individual_data):
         treatment_rows.append(_stats_for_group(grp, treatment))
     treatment_stats = pd.DataFrame(treatment_rows)
 
-    # Per individual factor level
+    # Per individual factor level, in the factor's display order
     factor_rows = []
     for factor in factors:
-        for level, grp in individual_data.groupby(factor):
+        col = individual_data[factor]
+        if isinstance(col.dtype, pd.CategoricalDtype):
+            present = set(col.dropna().astype(str))
+            levels = [str(c) for c in col.cat.categories if str(c) in present]
+        else:
+            levels = list(dict.fromkeys(col.dropna().astype(str)))
+        text = col.astype(str)
+        for level in levels:
             label = f"{factor}={level}"
-            factor_rows.append(_stats_for_group(grp, label))
+            factor_rows.append(_stats_for_group(individual_data[text == level], label))
     factor_stats = pd.DataFrame(factor_rows)
 
     return {
         "treatment_stats": treatment_stats,
         "factor_stats": factor_stats,
+        "tau": tau,
     }
 
 
@@ -337,52 +458,12 @@ def survival_quantiles(
         quantiles = [0.90, 0.75, 0.50, 0.25, 0.10]
 
     records = []
-    for treatment, grp in lifetable.groupby("treatment"):
+    for treatment, grp in treatment_groups(lifetable):
         row: dict = {"treatment": treatment}
         for q in quantiles:
             below = grp[grp["km_lx"] <= q]
             col_name = f"S={int(q * 100)}%"
             row[col_name] = float(below["time"].iloc[0]) if len(below) > 0 else np.nan
-        records.append(row)
-
-    return pd.DataFrame(records)
-
-
-def at_risk_table(
-    lifetable: pd.DataFrame,
-    timepoints: list[float] | None = None,
-) -> pd.DataFrame:
-    """Build a number-at-risk table at specified timepoints.
-
-    Parameters
-    ----------
-    lifetable : DataFrame from ``compute_lifetables()``
-    timepoints : specific times at which to report n_at_risk (auto-chosen if None)
-
-    Returns
-    -------
-    DataFrame with treatments as rows and timepoints as columns.
-    """
-    all_times = sorted(lifetable["time"].unique())
-    if timepoints is None:
-        # Pick ~8 evenly spaced timepoints
-        n_pts = min(8, len(all_times))
-        indices = np.linspace(0, len(all_times) - 1, n_pts, dtype=int)
-        timepoints = [all_times[i] for i in indices]
-
-    records = []
-    for treatment, grp in lifetable.groupby("treatment"):
-        row: dict = {"treatment": treatment}
-        for tp in timepoints:
-            # Find the row just before or at this timepoint
-            at_or_before = grp[grp["time"] <= tp]
-            if len(at_or_before) == 0:
-                n_risk = grp["n_at_risk"].iloc[0] if len(grp) > 0 else 0
-            else:
-                last_row = at_or_before.iloc[-1]
-                n_risk = int(last_row["n_at_risk"] - last_row["n_deaths"] - last_row["n_censored"])
-                n_risk = max(0, n_risk)
-            row[f"t={tp:.0f}"] = n_risk
         records.append(row)
 
     return pd.DataFrame(records)

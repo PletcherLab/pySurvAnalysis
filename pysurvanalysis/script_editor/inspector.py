@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..help.window import with_help
 from .actions import Action, ParamSpec
 
 
@@ -39,7 +40,7 @@ class Inspector(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 8)
         outer.setSpacing(6)
-        outer.addWidget(QLabel("<b>Parameters</b>"))
+        outer.addWidget(with_help(QLabel("<b>Parameters</b>"), "script-actions"))
 
         self._title = QLabel("(no step selected)")
         self._title.setStyleSheet("color: palette(mid); font-style: italic;")

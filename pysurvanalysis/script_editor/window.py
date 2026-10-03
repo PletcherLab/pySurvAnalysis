@@ -46,6 +46,7 @@ import yaml
 
 from ..domain import config as cfgmod
 from ..domain import is_experiment_dir, is_project_dir
+from ..help.window import HelpButton, install_f1
 from ..ui import ActionButton, Category, TopBar, icon, resolved_mode
 from ..ui import settings as ui_settings
 from . import project_actions
@@ -92,6 +93,7 @@ class ScriptEditorWindow(QMainWindow):
         self._active_idx = 0 if self._scripts else -1
 
         self._build_ui()
+        install_f1(self, lambda: "script-editor")
         self._load_active_script()
 
     # ------------------------------------------------------------- context
@@ -144,7 +146,17 @@ class ScriptEditorWindow(QMainWindow):
 
     def _read_scripts(self, level: str) -> list[dict]:
         _label, _filename, section = LEVELS[level]
-        data = cfgmod.read_yaml(self._target_path(level))
+        try:
+            data = cfgmod.read_yaml(self._target_path(level))
+        except ValueError as exc:
+            ## Said, and nothing listed. Save re-reads the file and refuses to
+            ## write over one it cannot parse, so an empty list here can never
+            ## replace the user's scripts.
+            QMessageBox.warning(
+                self, "Cannot read scripts",
+                f"{exc}\n\nFix the file, then switch level or reopen the "
+                f"editor. Saving is refused until it parses.")
+            return []
         return [deepcopy(s) for s in cfgmod.scripts_of(data, section)]
 
     # --------------------------------------------------------------- UI
@@ -166,6 +178,7 @@ class ScriptEditorWindow(QMainWindow):
         self._top_bar.add_right(new_btn)
         self._top_bar.add_right(del_btn)
         self._top_bar.add_right(save_btn)
+        self._top_bar.add_right(HelpButton("script-editor"))
         outer.addWidget(self._top_bar)
 
         # Level switcher + scripts dropdown + name editor
@@ -178,6 +191,7 @@ class ScriptEditorWindow(QMainWindow):
         self._level_combo.setCurrentText(LEVELS[self._level][0])
         self._level_combo.currentIndexChanged.connect(self._on_level_changed)
         ctrl_row.addWidget(self._level_combo)
+        ctrl_row.addWidget(HelpButton("scripts-overview"), 0, Qt.AlignmentFlag.AlignVCenter)
         ctrl_row.addSpacing(16)
         ctrl_row.addWidget(QLabel("Active script:"))
         self._scripts_combo = QComboBox()
@@ -206,7 +220,7 @@ class ScriptEditorWindow(QMainWindow):
         self._palette.actionRequested.connect(self._on_action_added)
         h_splitter.addWidget(self._palette)
 
-        self._canvas = Canvas()
+        self._canvas = Canvas(registry=self._registry())
         self._canvas.stepsChanged.connect(self._on_steps_changed)
         self._canvas.stepSelected.connect(self._on_step_selected)
         h_splitter.addWidget(self._canvas)
@@ -351,6 +365,7 @@ class ScriptEditorWindow(QMainWindow):
         self._active_idx = 0 if self._scripts else -1
         self._dirty = False
         self._palette.set_actions(self._registry())
+        self._canvas.set_registry(self._registry())
         self._refresh_scripts_combo()
         self._refresh_context_label()
         self._load_active_script()
@@ -361,6 +376,28 @@ class ScriptEditorWindow(QMainWindow):
             "Switching level discards unsaved edits. Continue?"
         ) == QMessageBox.StandardButton.Yes
 
+    def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        """Ask before closing over unsaved edits — the window held them in
+        memory only, and closing it threw them away without a word."""
+        if self._dirty:
+            answer = QMessageBox.question(
+                self, "Unsaved changes",
+                f"Save the changes to {self._target_path().name} before "
+                f"closing?",
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save)
+            if answer == QMessageBox.StandardButton.Cancel:
+                event.ignore()
+                return
+            if answer == QMessageBox.StandardButton.Save:
+                self._save()
+                if self._dirty:                   # the save was refused
+                    event.ignore()
+                    return
+        super().closeEvent(event)
+
     def _refresh_context_label(self) -> None:
         target = self._target_path()
         if self._level == "project":
@@ -368,7 +405,7 @@ class ScriptEditorWindow(QMainWindow):
         else:
             exp_type = (self._experiment.type if self._experiment is not None
                         else (self._project.type if self._project else None))
-            detail = f"core ∪ {getattr(exp_type, 'label', 'Custom Experiment')}"
+            detail = f"core ∪ {getattr(exp_type, 'label', 'Standard Lifespan')}"
         self._context_lbl.setText(f"{target.name} · {detail}")
 
     def _validate_active(self) -> None:
@@ -403,7 +440,15 @@ class ScriptEditorWindow(QMainWindow):
         """Splice this level's section into its file, other keys untouched."""
         _label, _filename, section = LEVELS[self._level]
         path = self._target_path()
-        data = cfgmod.read_yaml(path)
+        try:
+            data = cfgmod.read_yaml(path)
+        except ValueError as exc:
+            ## Splicing into an empty mapping would throw away every other
+            ## key in the file.
+            QMessageBox.warning(self, "Not saved",
+                                f"{path.name} could not be read, so it was not "
+                                f"overwritten:\n{exc}")
+            return
         data[section] = deepcopy(self._scripts)
         cfgmod.write_yaml(path, data)
         self._dirty = False

@@ -52,6 +52,7 @@ from ..domain import (
     layout as layout_mod,
 )
 from ..experiment_types import available_types, get_type
+from ..help.window import HelpButton, install_f1, with_help
 from ..ui import ActionButton, Category, icon
 
 #: ``defaults:`` keys this dialog owns. Anything else in the section rides
@@ -105,7 +106,8 @@ class ProjectInfoDialog(QDialog):
             "edits it instead."
         )
         intro.setWordWrap(True)
-        outer.addWidget(intro)
+        outer.addWidget(with_help(intro, "project-create"))
+        install_f1(self, lambda: "project-create")
 
         form = QFormLayout()
         form.setFieldGrowthPolicy(
@@ -137,7 +139,7 @@ class ProjectInfoDialog(QDialog):
         self.question_edit.setPlaceholderText(
             "The one question these experiments address — the report cover "
             "and the AI narrative both read it.")
-        form.addRow("Question:", self.question_edit)
+        form.addRow("Question:", with_help(self.question_edit, "config-project"))
         outer.addLayout(form)
 
         # ---- Project Defaults (a seed, not an authority) -------------------
@@ -145,6 +147,11 @@ class ProjectInfoDialog(QDialog):
         dform = QFormLayout(box)
         dform.setFieldGrowthPolicy(
             QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        ## A group box title cannot hold a widget, so its "?" heads the body.
+        defaults_help = QHBoxLayout()
+        defaults_help.addStretch(1)
+        defaults_help.addWidget(HelpButton("config-project"))
+        dform.addRow(defaults_help)
 
         self.type_combo = QComboBox()
         for exp_type in available_types():
@@ -154,7 +161,7 @@ class ProjectInfoDialog(QDialog):
             "must share it, because it describes the data source — input "
             "shape, time unit, censoring and report sections.")
         self.type_combo.currentIndexChanged.connect(self._on_type_changed)
-        dform.addRow("Experiment type:", self.type_combo)
+        dform.addRow("Experiment type:", with_help(self.type_combo, "experiment-types"))
         design_note = QLabel(
             "No factors here: they are discovered from each member's data "
             "file, and each member names its own Focuses — members rarely "
@@ -172,7 +179,11 @@ class ProjectInfoDialog(QDialog):
             QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         global_holder = QWidget()
         global_holder.setLayout(self._global_form)
-        dform.addRow("Global:", global_holder)
+        global_row = QHBoxLayout()
+        global_row.setSpacing(4)
+        global_row.addWidget(global_holder, 1)
+        global_row.addWidget(HelpButton("config-global"), 0, Qt.AlignmentFlag.AlignTop)
+        dform.addRow("Global:", global_row)
         outer.addWidget(box)
 
         note = QLabel(
@@ -455,7 +466,8 @@ class MemberConfigsDialog(QDialog):
             f"later edits to the Project keep reaching them.")
         intro.setWordWrap(True)
         intro.setTextFormat(Qt.TextFormat.RichText)
-        outer.addWidget(intro)
+        outer.addWidget(with_help(intro, "project-members"))
+        install_f1(self, lambda: "project-members")
 
         self._table = QTableWidget(0, 4)
         self._table.setHorizontalHeaderLabels(
@@ -494,9 +506,12 @@ class MemberConfigsDialog(QDialog):
             f"Open this member's {cfgmod.CONFIG_FILENAME} in your desktop's "
             f"editor for YAML files.")
         self._btn_edit.clicked.connect(self._edit_selected)
-        for i, btn in enumerate((self._btn_create, self._btn_create_all,
-                                 self._btn_data_file, self._btn_edit)):
-            grid.addWidget(btn, i // 2, i % 2)
+        for i, (btn, topic) in enumerate((
+                (self._btn_create, "project-members"),
+                (self._btn_create_all, "project-members"),
+                (self._btn_data_file, "config-input"),
+                (self._btn_edit, "config-experiment"))):
+            grid.addWidget(with_help(btn, topic), i // 2, i % 2)
         for col in range(2):
             grid.setColumnStretch(col, 1)
         outer.addLayout(grid)
@@ -572,7 +587,7 @@ class MemberConfigsDialog(QDialog):
         member that restates a default freezes it."""
         try:
             self._project.add_member(name)
-        except (ProjectError, OSError) as exc:
+        except (ProjectError, OSError, ValueError) as exc:
             QMessageBox.warning(self, self.windowTitle(),
                                 f"Could not create the config for "
                                 f"'{name}':\n{exc}")
@@ -612,7 +627,15 @@ class MemberConfigsDialog(QDialog):
             list(item.candidates), 0, False)
         if not ok or not choice:
             return
-        config = cfgmod.load_config(item.directory)
+        ## A config that does not parse is said, never overwritten: writing
+        ## `data_file:` into an empty mapping would replace the user's file.
+        try:
+            config = cfgmod.load_config(item.directory)
+        except ValueError as exc:
+            QMessageBox.warning(self, self.windowTitle(),
+                                f"{item.name}'s config could not be read, so "
+                                f"nothing was written:\n{exc}")
+            return
         config["data_file"] = choice
         cfgmod.save_config(item.directory, config)
         self._log(f"{item.name}: data_file: {choice}")

@@ -3,9 +3,9 @@
 A DLife census workbook of chambers scored to death: assumed censoring on, the
 full survivorship battery, demographic-rate figures included because a lifespan
 cohort dies slowly enough for them to mean something. Every analysis the app can
-do is reachable from it; the 2×2 **Factorial Battery** is offered whenever the
-active Focus is a populated 2×2, gated by Focus Shape rather than by type
-(ADR-0011, which retired the Interaction Experiment type).
+do is reachable from it; the **Factorial Battery** is offered whenever the
+active Focus varies two or more factors, gated by Focus Shape rather than by
+type (ADR-0011, which retired the Interaction Experiment type).
 """
 
 from __future__ import annotations
@@ -31,11 +31,16 @@ class StandardLifespanType(ExperimentType):
         "min_n_per_chamber": 5,
     }
 
+    ## Every series figure the app draws is here, the raw hazard and the
+    ## cumulative deaths included: a figure outside the Plot Set had no
+    ## checkbox, and an `omit:` naming it was accepted and meant nothing.
     plot_set = (
         _BY_ID["km_risk_table"],
         _BY_ID["km_curves"],
+        _BY_ID["cumulative_events"],
         _BY_ID["survival_distribution"],
         _BY_ID["mortality"],
+        _BY_ID["hazard"],
         _BY_ID["smoothed_hazard"],
         _BY_ID["nelson_aalen"],
         _BY_ID["number_at_risk"],
@@ -48,8 +53,9 @@ class StandardLifespanType(ExperimentType):
         "km_curves", "nelson_aalen", "hazard_plot", "mortality", "forest_plot",
         "log_rank_pairwise", "log_rank_omnibus", "gehan_wilcoxon",
         "parametric_aft", "cox_ph", "rmst",
-        # The Factorial Battery — offered for a 2×2 Focus Shape, Not
-        # Applicable elsewhere (the Action declares the requirement).
+        # The Factorial Battery — offered to a Focus varying two or more
+        # factors, Not Applicable where the populated cells cannot support
+        # it (the Action declares the requirement).
         "faceted_km", "interaction_plot", "cox_interaction", "rmst_interaction",
     )
 

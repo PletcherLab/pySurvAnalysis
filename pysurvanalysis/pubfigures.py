@@ -1,9 +1,17 @@
 """Publication Figures — plotnine renderings of survivorship from a Spec+Style.
 
-Two files, split by what varies (ADR-0005): the **Project's**
-``plot_specs.yaml`` owns ``styles:`` and ``default_style:`` — the shared look —
-and each **Experiment Directory's** ``plot_specs.yaml`` owns ``plots:``, whose
-style names resolve upward (member → project → built-in).
+One ``plot_specs.yaml`` at the **container** — the Project, or a standalone
+Experiment Directory — holds ``plots:`` (each figure's **Plot Spec**),
+``styles:`` and ``default_style:`` (ADR-0005 as amended). Every member renders
+with that one curation. Each saved figure owns a Style under its own name;
+``default_style`` only seeds a figure's first edit. Treatment order, display
+names and per-curve colours are not the Spec's: they belong to the **Focus**
+the figure is drawn under, and a Spec can only narrow its treatments.
+
+Figures are drawn from the Focus's *saved* results; a statistic a figure
+plots that the lifetables do not carry (a cell's median and its interval) is
+computed by the same function the analysis figure uses, in
+:mod:`pysurvanalysis.plotting`, so the two cannot disagree.
 
 The at-risk counts are a ``geom_text`` layer in a reserved band below the curves
 rather than a second axes (ADR-0004: the **At-Risk Band**), so a figure stays
@@ -37,7 +45,13 @@ THEMES = ("theme_classic", "theme_bw", "theme_minimal", "theme_light", "theme_ma
 
 @dataclass
 class PlotStyle:
-    """A named, reusable look shared by every figure that references it."""
+    """One figure's look, saved under that figure's own name.
+
+    A look is shared only deliberately (*Copy style from…* in the Plot
+    Editor): with every Spec referencing one ``default``, editing the
+    mortality plot's line width restyled the KM curves too (ADR-0005, second
+    amendment).
+    """
 
     name: str = "default"
 
@@ -182,8 +196,8 @@ class PlotSpec:
     #: Legend title for the curves. Faceting splits by factor 1, so the
     #: curves are factor 2 — naming it "Treatment" would be wrong.
     series_label: str = "Treatment"
-    #: Facet the panel by a factor column (the Interaction Experiment's
-    #: headline figure facets by its first factor).
+    #: Facet the panel by one of the Focus's varying factors (the faceted KM,
+    #: the Headline Figure of a Focus crossing factors, facets by the first).
     facet_by: str = ""
     facet_order: list[str] = field(default_factory=list)
     x_limits: list[float] = field(default_factory=list)
@@ -211,17 +225,28 @@ def default_spec(plot_id: str = "km", time_label: str = "Age") -> PlotSpec:
     """A sensible starting Spec for one figure.
 
     The median-survival reference (0.5) is seeded only where the y axis is a
-    survival probability — on a hazard rate or a count it marks nothing, and
-    the checkbox that now governs the line should start unchecked there.
+    probability that crosses 0.5 at the median — survival, or its mirror the
+    cumulative probability of death. On a hazard rate or a count it marks
+    nothing, and the checkbox that governs the line should start unchecked.
     """
     kind = PLOT_KINDS.get(plot_id, PLOT_KINDS["km_curves"])
-    survivalish = kind.y == "km_lx"
+    survivalish = kind.y in _PROBABILITY_AXES
     ## Axis labels come from the KIND, not the PlotSpec class default: a
     ## mortality spec born saying "Survival probability" renders with the
-    ## wrong axis, and the class default is a KM label.
-    x_label = f"log({time_label})" if kind.x == "log_time" else time_label
-    return PlotSpec(plot_id=plot_id, x_label=x_label,
-                    y_label=kind.y_label or "Survival probability", title="",
+    ## wrong axis, and the class default is a KM label. Only an axis that IS
+    ## time gets the time label — a forest's x is a ratio, an interaction
+    ## plot's a factor's levels (named by fill_default_specs, which knows the
+    ## Focus).
+    if kind.geom == "forest":
+        x_label = "Hazard ratio (log scale)"
+    elif kind.geom == "interaction":
+        x_label = ""
+    else:
+        x_label = f"log({time_label})" if kind.x == "log_time" else time_label
+    y_label = kind.y_label or "Survival probability"
+    if kind.geom == "interaction":
+        y_label = f"{kind.y_label} — {time_label}"
+    return PlotSpec(plot_id=plot_id, x_label=x_label, y_label=y_label, title="",
                     reference_line=0.5 if survivalish else None)
 
 
@@ -237,9 +262,10 @@ class ProjectSpecs:
     **Both halves live in one file at the container** — the Project when there
     is one, the Experiment Directory itself for a standalone (ADR-0003). That
     is the sister app's model, adopted here: a Spec is as much a shared
-    editorial decision as a Style (the same axis labels, the same treatment
-    order, the same reference line across every member), and splitting them
-    meant curating one figure per member by hand.
+    editorial decision as a Style (the same axis labels, limits and reference
+    line across every member), and splitting them meant curating one figure
+    per member by hand. Treatment order and naming are the Focus's, not the
+    Spec's (ADR-0005, third amendment).
     """
 
     default_style: str = "default"
@@ -466,6 +492,19 @@ def _offered_plot_ids(experiment, focus) -> list[str]:
     return ids
 
 
+def _not_offered_reason(plot_id: str, focus) -> str:
+    """Why *focus* is not offered *plot_id*, in the Requirement's words."""
+    from .domain.focus import requirement
+    from .experiment_types.base import ALL_PLOT_DEFS
+
+    req = requirement({p.id: p.requires for p in ALL_PLOT_DEFS}.get(plot_id))
+    if req is not None and focus is not None:
+        ok, reason = req.relevant(focus)
+        if not ok:
+            return reason
+    return "not in this experiment type's Plot Set"
+
+
 def fill_default_specs(saved: dict[str, PlotSpec], experiment,
                        focus=None) -> dict[str, PlotSpec]:
     """*saved*, plus a default Spec for every renderable plot in the Focus's
@@ -483,6 +522,11 @@ def fill_default_specs(saved: dict[str, PlotSpec], experiment,
             spec.facet_by = factors[0] if factors else ""
             if len(factors) > 1:
                 spec.series_label = factors[1]
+        if PLOT_KINDS[plot_id].geom == "interaction" and len(factors) > 1:
+            ## The first varying factor is on x and the others make the
+            ## lines — the same way round as the faceted KM's panels.
+            spec.x_label = factors[0]
+            spec.series_label = " × ".join(factors[1:])
         out[plot_id] = spec
     return out
 
@@ -521,9 +565,18 @@ class PlotKind:
 
 
 #: Everything the Style can offer, per feature, so a kind names what it uses.
+#: ``fill`` is the band opacity used as an area fill (the distribution's
+#: densities); ``markers`` the point shape, size, fill and outline on a plot
+#: whose marker IS the estimate (forest, interaction) — drawn always, so the
+#: show/where/opacity half of the point controls means nothing there.
 _CI = "ci"; _CENSOR = "censor"; _RISK = "risk"; _POINTS = "points"
+_FILL = "fill"; _MARKERS = "markers"
 _SERIES_FEATURES = frozenset({_POINTS})
 _KM_FEATURES = frozenset({_CI, _CENSOR, _RISK, _POINTS})
+
+#: y columns that are probabilities crossing 0.5 at the median: fixed 0–1
+#: breaks, and a median reference line by default.
+_PROBABILITY_AXES = ("km_lx", "cum_death")
 
 PLOT_KINDS: dict[str, PlotKind] = {
     "km_curves": PlotKind("lifetables", "step", "km_lx", "Survival probability",
@@ -539,24 +592,35 @@ PLOT_KINDS: dict[str, PlotKind] = {
     "number_at_risk": PlotKind("lifetables", "step", "n_at_risk",
                                "Individuals at risk",
                                supports=_SERIES_FEATURES),
-    "cumulative_events": PlotKind("lifetables", "step", "cum_deaths",
-                                  "Cumulative deaths", origin=(0.0, 0.0),
-                                  supports=_SERIES_FEATURES),
+    ## 1 − S(t), not a running count of deaths: a count ignores censoring and
+    ## grows with group size, so treatments of different sizes could not be
+    ## compared on it — and the analysis figure was always the probability.
+    "cumulative_events": PlotKind("lifetables", "step", "cum_death",
+                                  "Cumulative probability of death",
+                                  origin=(0.0, 0.0),
+                                  ci=("cum_ci_lo", "cum_ci_hi"),
+                                  supports=_SERIES_FEATURES | {_CI}),
     "mortality": PlotKind("lifetables", "line", "qx",
                           "Mortality (qx)", supports=_SERIES_FEATURES),
     "hazard": PlotKind("lifetables", "line", "hx", "Hazard rate",
                        supports=_SERIES_FEATURES),
     "smoothed_hazard": PlotKind("lifetables", "line", "hx_smooth",
                                 "Smoothed hazard", supports=_SERIES_FEATURES),
-    "log_log": PlotKind("lifetables", "step", "log_neg_log",
+    ## Joined with lines, as the analysis figure joins them: the diagnostic
+    ## is read for parallel trends, and a staircase on a log-log axis adds
+    ## steps nobody is meant to read.
+    "log_log": PlotKind("lifetables", "line", "log_neg_log",
                         "log(−log S(t))", x="log_time",
                         supports=_SERIES_FEATURES),
     "survival_distribution": PlotKind("individual", "distribution",
-                                      y_label="Density"),
+                                      y_label="Density",
+                                      supports=frozenset({_FILL})),
     "hazard_ratio_forest": PlotKind("hazard_ratios", "forest",
-                                    y_label="Comparison"),
+                                    y_label="Comparison",
+                                    supports=frozenset({_MARKERS})),
     "interaction_lifespan": PlotKind("individual", "interaction",
-                                     y_label="Median lifespan"),
+                                     y_label="Median lifespan",
+                                     supports=frozenset({_MARKERS})),
 }
 
 #: Plot ids the publication renderer can draw — the whole Plot Set of every
@@ -584,19 +648,27 @@ def kind_for(spec_or_id) -> PlotKind:
     return PLOT_KINDS.get(str(plot_id), PLOT_KINDS["km_curves"])
 
 
-def _derived(grp: pd.DataFrame, kind: PlotKind, smoothing: float = 3.0) -> pd.DataFrame:
+def _derived(grp: pd.DataFrame, kind: PlotKind,
+              smoothing: float | None = None) -> pd.DataFrame:
     """Add whatever column *kind* wants that the lifetable does not carry."""
     grp = grp.sort_values("time").copy()
-    if kind.y == "cum_deaths":
-        grp["cum_deaths"] = grp["n_deaths"].cumsum()
+    if kind.y == "cum_death":
+        ## The KM complement and its band reflected — the analysis figure's
+        ## quantity (``plotting.plot_cumulative_events``), censoring-aware.
+        grp["cum_death"] = 1.0 - grp["km_lx"].astype(float)
+        grp["cum_ci_lo"] = 1.0 - grp["km_ci_hi"].astype(float)
+        grp["cum_ci_hi"] = 1.0 - grp["km_ci_lo"].astype(float)
     elif kind.y == "hx_smooth":
         ## The same Gaussian kernel and bandwidth the analyst figure uses
         ## (``plotting.plot_smoothed_hazard``), so the publication figure is
         ## the same estimate in a different coat — not a second one.
         from scipy.ndimage import gaussian_filter1d
 
+        from .plotting import SMOOTHED_HAZARD_SIGMA
+
         values = grp["hx"].to_numpy(dtype=float)
-        grp["hx_smooth"] = (gaussian_filter1d(values, sigma=smoothing)
+        sigma = SMOOTHED_HAZARD_SIGMA if smoothing is None else smoothing
+        grp["hx_smooth"] = (gaussian_filter1d(values, sigma=sigma)
                             if len(values) >= 5 else values)
     elif kind.y == "log_neg_log":
         ## Defined only where survival is strictly between 0 and 1 and time is
@@ -806,15 +878,19 @@ def risk_band_data(data: pd.DataFrame, style: PlotStyle,
     """The At-Risk Band's text layer: one row per (curve, time point).
 
     Counts are read off the step data rather than recomputed, so the band can
-    never disagree with the curve above it.
+    never disagree with the curve above it — and by the same function, at
+    the same default ages, as the analysis figure's at-risk table
+    (:func:`plotting.at_risk_counts`: at risk at age t means a recorded time
+    of t or later).
     """
+    from .plotting import at_risk_counts, default_risk_times
+
     if data.empty:
         return pd.DataFrame(columns=["time", "y", "count", "label"])
 
     times = list(style.risk_table_times)
     if not times:
-        t_max = float(data["time"].max())
-        times = [round(t_max * f, 2) for f in (0.0, 0.25, 0.5, 0.75, 1.0)]
+        times = default_risk_times(float(data["time"].max()))
 
     series_col = "_series" if "_series" in data.columns else "label"
     facet_values = data["_facet"].unique() if "_facet" in data.columns else [None]
@@ -828,12 +904,8 @@ def risk_band_data(data: pd.DataFrame, style: PlotStyle,
             if curve.empty:
                 continue
             y = -style.risk_row_height * (i + 1)
-            for t in times:
-                at_or_before = curve[curve["time"] <= t]
-                # The count *entering* the next interval is what an at-risk
-                # table reports, so read the last row at or before t.
-                row_source = at_or_before if len(at_or_before) else curve
-                count = int(row_source["n_risk"].iloc[-1 if len(at_or_before) else 0])
+            counts = at_risk_counts(curve["time"], curve["n_risk"], times)
+            for t, count in zip(times, counts):
                 row = {"time": t, "y": y, "count": count, "label": label,
                        series_col: label}
                 if facet is not None:
@@ -868,6 +940,24 @@ def build_ggplot(data: pd.DataFrame, spec: PlotSpec, style: PlotStyle):
 
 def _series_column(data: pd.DataFrame) -> str:
     return "_series" if "_series" in data.columns else "label"
+
+
+def _colour_scale(data: pd.DataFrame, series_col: str, colours: dict[str, str],
+                  name: str, labels: list[str]):
+    """The curve colour scale, its legend in the data's (the Focus's) order.
+
+    ``breaks`` is what fixes the order: a discrete scale over a string column
+    otherwise sorts its levels, which put every publication legend in
+    alphabetical order beside curves drawn in the Focus's. The legend text is
+    each curve's display name — for a faceted figure the curves are keyed by
+    level, so the name comes from the ``label`` column beside it.
+    """
+    import plotnine as p9
+
+    names = (dict(zip(data[series_col].astype(str), data["label"].astype(str)))
+             if "label" in data.columns else {})
+    return p9.scale_color_manual(values=colours, breaks=labels, name=name,
+                                 labels=[names.get(str(lv), str(lv)) for lv in labels])
 
 
 def _build_series(data: pd.DataFrame, spec: PlotSpec, style: PlotStyle,
@@ -937,12 +1027,21 @@ def _build_series(data: pd.DataFrame, spec: PlotSpec, style: PlotStyle,
     if style.risk_table and _RISK in kind.supports:
         band = risk_band_data(data, style, spec)
         if len(band):
+            y_lo = float(band["y"].min()) - style.risk_row_height * 0.6
+            if style.grid == "both":
+                ## The band is text, not data: vertical gridlines running
+                ## through it read as a table ruling nobody drew (ADR-0004
+                ## reserves the region free of them). Masked in the panel's
+                ## own fill, under the counts.
+                g = g + p9.annotate(
+                    "rect", xmin=-np.inf, xmax=np.inf, ymin=-np.inf,
+                    ymax=-style.risk_row_height * 0.4,
+                    fill=style.panel_bg or "#ffffff", alpha=1.0)
             g = g + p9.geom_text(
                 data=band,
                 mapping=p9.aes(x="time", y="y", label="count", color=series_col),
                 size=style.risk_font_size, show_legend=False, inherit_aes=False,
             )
-            y_lo = float(band["y"].min()) - style.risk_row_height * 0.6
 
     if spec.facet_by and "_facet" in data.columns:
         order = [f for f in spec.facet_order if f in set(data["_facet"])] \
@@ -953,13 +1052,13 @@ def _build_series(data: pd.DataFrame, spec: PlotSpec, style: PlotStyle,
 
     if needs_fill_scale:
         g = g + p9.scale_fill_manual(values=colours, guide=None)
-    g = g + p9.scale_color_manual(values=colours,
-                                  name=spec.series_label or "Treatment")
+    g = g + _colour_scale(data, series_col, colours,
+                          spec.series_label or "Treatment", labels)
 
     ## A probability gets fixed 0–1 breaks and, with an At-Risk Band, room
     ## below zero for it. Everything else is free: a hazard rate and a count
     ## of survivors have neither an upper bound nor a meaningful 0.25.
-    if kind.y == "km_lx":
+    if kind.y in _PROBABILITY_AXES:
         g = g + p9.scale_y_continuous(breaks=[0, 0.25, 0.5, 0.75, 1.0])
     coord_args: dict[str, Any] = {}
     if spec.y_limits:
@@ -1040,8 +1139,8 @@ def _build_distribution(data: pd.DataFrame, spec: PlotSpec, style: PlotStyle,
         ## silently re-shape the curves.
         g = g + p9.coord_cartesian(**coord_args)
     return (g
-            + p9.scale_color_manual(values=colours,
-                                    name=spec.series_label or "Treatment")
+            + _colour_scale(data, series_col, colours,
+                            spec.series_label or "Treatment", labels)
             + p9.scale_fill_manual(values=colours, guide=None)
             + p9.labs(title=spec.title or None, x=spec.x_label,
                       y=spec.y_label or kind.y_label)
@@ -1050,10 +1149,12 @@ def _build_distribution(data: pd.DataFrame, spec: PlotSpec, style: PlotStyle,
 
 def _build_interaction(data: pd.DataFrame, spec: PlotSpec, style: PlotStyle,
                        kind: PlotKind):
-    """Median lifespan by factor level, one line per level of the other.
+    """Median lifespan by factor level, one line per level of the others.
 
     Non-parallel lines are the interaction — which is why the lines are drawn
-    at all rather than leaving four disconnected points.
+    at all rather than leaving four disconnected points. The x axis is the
+    first varying factor's levels in the Focus's order (``x`` arrives as an
+    ordered Categorical from :func:`interaction_data`).
     """
     import plotnine as p9
 
@@ -1070,9 +1171,9 @@ def _build_interaction(data: pd.DataFrame, spec: PlotSpec, style: PlotStyle,
     if spec.y_limits:
         g = g + p9.coord_cartesian(ylim=tuple(spec.y_limits))
     return (g
-            + p9.scale_color_manual(values=colours,
-                                    name=spec.series_label or "Treatment")
-            + p9.labs(title=spec.title or None, x=spec.x_label,
+            + _colour_scale(data, "label", colours,
+                            spec.series_label or "Treatment", labels)
+            + p9.labs(title=spec.title or None, x=spec.x_label or None,
                       y=spec.y_label or kind.y_label)
             + _theme_for(style))
 
@@ -1189,10 +1290,18 @@ def _theme_for(style: PlotStyle):
 
     ## Gridlines are off by default here: a survivorship curve is read against
     ## its own steps, and horizontal rules at 0.25/0.5/0.75 compete with them.
-    if style.grid == "none":
-        overrides["panel_grid_major"] = p9.element_blank()
-    elif style.grid == "y":
+    ## When asked for they are DRAWN, not merely kept: theme_classic (the
+    ## default theme) has none of its own, so "keep the theme's gridlines"
+    ## made y and both do nothing on it.
+    rule = p9.element_line(color="#d9d9d9", size=max(0.3, lw * 0.6))
+    if style.grid == "y":
+        overrides["panel_grid_major_y"] = rule
         overrides["panel_grid_major_x"] = p9.element_blank()
+    elif style.grid == "both":
+        overrides["panel_grid_major_x"] = rule
+        overrides["panel_grid_major_y"] = rule
+    else:
+        overrides["panel_grid_major"] = p9.element_blank()
 
     if style.strip_style == "boxed":
         overrides["strip_background"] = p9.element_rect(
@@ -1221,12 +1330,16 @@ def _theme_for(style: PlotStyle):
 
 
 def forest_data(hazard_ratios: pd.DataFrame, spec: PlotSpec) -> pd.DataFrame:
-    """One row per pairwise comparison: the ratio and its interval."""
+    """One row per pairwise comparison: the ratio and its interval, labelled
+    with the Focus's display names as every other figure's legend is."""
     if hazard_ratios is None or not len(hazard_ratios):
         return pd.DataFrame(columns=["label", "ratio", "ci_lo", "ci_hi"])
     hr = hazard_ratios.copy()
+    names = spec.display_names or {}
     out = pd.DataFrame({
-        "label": hr["group1"].astype(str) + " vs " + hr["group2"].astype(str),
+        "label": (hr["group1"].astype(str).map(lambda t: names.get(t, t))
+                  + " vs "
+                  + hr["group2"].astype(str).map(lambda t: names.get(t, t))),
         "ratio": hr["hazard_ratio"].astype(float),
         "ci_lo": hr["hr_ci_lo"].astype(float),
         "ci_hi": hr["hr_ci_hi"].astype(float),
@@ -1265,37 +1378,45 @@ def distribution_data(individual_data: pd.DataFrame, spec: PlotSpec,
 
 def interaction_data(individual_data: pd.DataFrame,
                      spec: PlotSpec) -> pd.DataFrame:
-    """Median lifespan (±SEM of the median via a normal approximation) per
-    factorial cell, shaped for the interaction plot: factor 1 on x, one line
-    per level of factor 2."""
+    """Each factorial cell's Kaplan-Meier median lifespan and its 95%
+    confidence interval, shaped for the interaction plot: the first varying
+    factor's level on x, one line per combination of the others.
+
+    The same statistic, by the same function, as the analysis figure
+    (:func:`plotting.cell_lifespan`): censoring-aware, censored individuals
+    included as censored, never dropped or counted as deaths. A cell whose
+    survival never falls to 0.5 has no median and no point; a limit the band
+    never reaches gets no bar on that side. Cells follow the Spec's
+    (Focus-ordered) treatments, so x and the lines run in the Focus's order.
+    """
+    from .plotting import cell_lifespan
+
+    empty = pd.DataFrame(columns=["x", "value", "ci_lo", "ci_hi", "label"])
     df = individual_data
     if df is None or not len(df) or "treatment" not in df.columns:
-        return pd.DataFrame(columns=["x", "value", "label"])
-    parts = df["treatment"].astype(str).str.split("/", n=1, expand=True)
-    if parts.shape[1] != 2:
+        return empty
+    treatments = df["treatment"].astype(str)
+    order = ([t for t in (spec.treatments or []) if t in set(treatments)]
+             or list(dict.fromkeys(treatments)))
+    if not all("/" in t for t in order):
         ## Not factorial: nothing to cross.
-        return pd.DataFrame(columns=["x", "value", "label"])
-    work = pd.DataFrame({
-        "x": parts[0], "series": parts[1],
-        "time": df["time"].astype(float),
-        "event": (df["event"] if "event" in df.columns else 1),
-    })
-    work = work[work["event"] == 1]
+        return empty
     rows = []
-    for (level, series), grp in work.groupby(["x", "series"], sort=True):
-        times = grp["time"].to_numpy(dtype=float)
-        if not len(times):
+    for treatment in order:
+        level, series = treatment.split("/", 1)
+        stat = cell_lifespan(df[(treatments == treatment).to_numpy()])
+        if stat is None:
             continue
-        median = float(np.median(times))
-        ## 1.2533·σ/√n — the standard error of a median under normality.
-        se = 1.2533 * float(np.std(times, ddof=1)) / max(len(times), 1) ** 0.5 \
-            if len(times) > 1 else 0.0
-        rows.append({"x": str(level), "value": median,
-                     "ci_lo": median - se, "ci_hi": median + se,
-                     "series": str(series)})
+        value, low, high = stat
+        rows.append({"x": level, "value": value,
+                     "ci_lo": low if np.isfinite(low) else value,
+                     "ci_hi": high if np.isfinite(high) else value,
+                     "series": series})
     out = pd.DataFrame(rows)
     if out.empty:
-        return pd.DataFrame(columns=["x", "value", "label"])
+        return empty
+    levels = list(dict.fromkeys(t.split("/", 1)[0] for t in order))
+    out["x"] = pd.Categorical(out["x"], categories=levels, ordered=True)
     out["label"] = out["series"].map(lambda s: spec.display_names.get(s, s))
     return out
 
@@ -1319,7 +1440,8 @@ def data_for(experiment, spec: PlotSpec,
         return series_data(lt, effective_spec(spec, focus, available), kind,
                            factors=factors)
     if kind.source == "hazard_ratios":
-        return forest_data(_load_hazard_ratios(experiment, focus), spec)
+        return forest_data(_load_hazard_ratios(experiment, focus),
+                           effective_spec(spec, focus))
     individual = _load_individual_data(experiment, focus)
     available = (list(dict.fromkeys(individual["treatment"].astype(str)))
                  if len(individual) and "treatment" in individual.columns else [])
@@ -1360,7 +1482,8 @@ def figure_for(experiment, plot_id: str, spec: PlotSpec | None = None,
                focus=None):
     """Build the ggplot for one of an experiment's Publication Figures."""
     focus = focus_of(experiment, focus)
-    spec = spec or specs_for(experiment, focus).get(plot_id) or default_spec(plot_id)
+    spec = (spec or specs_for(experiment, focus).get(plot_id)
+            or default_spec(plot_id, experiment.type.resolve_time_label(experiment.config)))
     style = effective_style(style or resolve_style(spec.style, experiment), focus, spec)
     return build_ggplot(data_for(experiment, spec, lifetables, focus), spec, style)
 
@@ -1442,9 +1565,18 @@ def render_all(experiment, fmt: str = "svg", log=None, focus=None) -> list[Path]
              f"no figures rendered. Curate them in the Plot Editor first.")
         return written
 
+    ## A Spec is the Project's, so it meets every Focus of every member — but
+    ## a figure is drawn only where it is a question the slice asks. A
+    ## curated km_faceted under a one-factor Focus used to fall through to a
+    ## plain KM saved as km_faceted_<focus>, a file whose name lies.
+    offered = {_SPEC_ALIASES.get(p, p) for p in _offered_plot_ids(experiment, focus)}
     lifetables = None
     for plot_id, spec in specs.items():
         if plot_id not in PLOT_TYPES:
+            continue
+        if plot_id not in offered:
+            emit(f"  {plot_id}: not offered — {_not_offered_reason(plot_id, focus)}"
+                 f" — skipped.")
             continue
         try:
             if kind_for(spec).source == "lifetables" and lifetables is None:
@@ -1452,9 +1584,9 @@ def render_all(experiment, fmt: str = "svg", log=None, focus=None) -> list[Path]
             style = effective_style(resolve_style(spec.style, experiment), focus, spec)
             data = data_for(experiment, spec, lifetables, focus)
             if data.empty:
-                ## A forest with no saved Cox fit, an interaction with no
-                ## factorial cells: named and skipped, not an error — the
-                ## other figures still render.
+                ## A forest with no saved pairwise hazard ratios, an
+                ## interaction plot whose cells have no median: named and
+                ## skipped, not an error — the other figures still render.
                 emit(f"  {plot_id}: no data under Focus {focus.name!r} — skipped.")
                 continue
             g = build_ggplot(data, spec, style)
