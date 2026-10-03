@@ -20,7 +20,7 @@ treatments. The window says which, in words, under the factor list.
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -38,6 +38,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -48,6 +49,34 @@ from PyQt6.QtWidgets import (
 from ..domain import focus as focusmod
 from ..domain.focus import Focus
 
+#: Rows every factor's level list shows before it scrolls — one height for
+#: all, so a two-level factor does not collapse to a sliver beside a seven.
+VISIBLE_LEVELS = 4
+
+
+class _LevelList(QListWidget):
+    """A level list exactly :data:`VISIBLE_LEVELS` rows tall.
+
+    Measured from the rows themselves, at layout time: a hardcoded row height
+    is wrong wherever the platform style or display scaling differs (rows on
+    Windows run taller), and a mere maximum let the scroll area squeeze the
+    list down to a single row."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setSizePolicy(self.sizePolicy().horizontalPolicy(),
+                           QSizePolicy.Policy.Fixed)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 (Qt override)
+        hint = super().sizeHint()
+        row = self.sizeHintForRow(0) if self.count() else -1
+        if row <= 0:
+            row = self.fontMetrics().height() + 4
+        hint.setHeight(VISIBLE_LEVELS * row + 2 * self.frameWidth())
+        return hint
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 (Qt override)
+        return QSize(super().minimumSizeHint().width(), self.sizeHint().height())
 
 
 class _FactorBox(QGroupBox):
@@ -63,9 +92,8 @@ class _FactorBox(QGroupBox):
         self.toggled.connect(lambda _on: self._changed())
 
         lay = QHBoxLayout(self)
-        self.levels = QListWidget()
+        self.levels = _LevelList()
         self.levels.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
-        self.levels.setMaximumHeight(max(48, min(7, len(levels)) * 22 + 6))
         self.levels.setToolTip("Tick the levels this Focus keeps; drag (or use "
                                "▲▼) to set their display order.")
         for level in levels:
@@ -76,7 +104,9 @@ class _FactorBox(QGroupBox):
             self.levels.addItem(item)
         self.levels.itemChanged.connect(lambda _i: self._changed())
         self.levels.model().rowsMoved.connect(lambda *_a: self._changed())
-        lay.addWidget(self.levels, 1)
+        ## Top-aligned: the ▲▼/Reference column can stand taller than four
+        ## rows, and a fixed-height list would otherwise float mid-box.
+        lay.addWidget(self.levels, 1, Qt.AlignmentFlag.AlignTop)
 
         side = QVBoxLayout()
         up = QPushButton("▲")

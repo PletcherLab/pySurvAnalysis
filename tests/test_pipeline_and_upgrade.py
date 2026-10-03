@@ -407,3 +407,57 @@ def test_individuals_with_no_level_are_counted_not_silently_dropped(tmp_path):
     assert payload["focus"]["unassigned"] == 3
     report = experiment.outputs(FACTORIAL).report(experiment.name, ".md").read_text()
     assert "3 individual(s) in the data file have no recorded level" in report
+
+
+# ── omit: what a run leaves out (ADR-0012) ─────────────────────────────────
+
+def test_an_unticked_analysis_is_left_out_and_said(tmp_path):
+    experiment = SurvivalExperiment(make_experiment_dir(tmp_path / "om"))
+    experiment.set_included("analyses", "parametric_aft", False)
+    experiment.set_included("analyses", "interaction", False)
+    experiment.set_included("plots", "log_log", False)
+    result = experiment.run_analysis()
+    assert result.parametric_models == {}
+    assert result.cox_analyses == []              # Cox and RMST factorial, together
+    assert "log_log" not in result.figure_paths
+    assert len(result.pairwise_lr)                # still ticked, still run
+    left = {item["id"] for item in result.left_out}
+    assert left == {"parametric_aft", "interaction", "log_log"}
+    payload = json.loads(result.outputs.summary.read_text(encoding="utf-8"))
+    assert {item["id"] for item in payload["left_out"]} == left
+    report = result.outputs.report(experiment.name, ".md").read_text(encoding="utf-8")
+    assert "Left out of this run" in report
+    assert "Interaction analyses: left out of this run" in report
+
+
+def test_the_forest_goes_with_the_hazard_ratios_it_draws(tmp_path):
+    experiment = SurvivalExperiment(make_experiment_dir(tmp_path / "hr"))
+    forest = experiment.run_analysis().figure_paths["hazard_ratio_forest"]
+    assert forest.is_file()
+    experiment.set_included("analyses", "hazard_ratios", False)
+    result = experiment.run_analysis()
+    assert "hazard_ratio_forest" not in result.figure_paths
+    ## The earlier run's copies would read as current in the folder.
+    assert not forest.exists()
+    assert not result.outputs.stats("hazard_ratios").exists()
+    reason = next(item["reason"] for item in result.left_out
+                  if item["id"] == "hazard_ratio_forest")
+    assert "Pairwise hazard ratios" in reason
+
+
+def test_render_plots_draws_the_ticked_set_and_leaves_the_run_alone(tmp_path):
+    import matplotlib.pyplot as plt
+
+    experiment = SurvivalExperiment(make_experiment_dir(tmp_path / "rp"))
+    experiment.set_included("plots", "mortality", False)
+    figures = pipeline.render_plots(experiment)
+    try:
+        titles = [title for title, _fig in figures]
+        assert any(t.startswith("Faceted Kaplan-Meier") for t in titles)
+        assert not any(t.startswith("Mortality") for t in titles)
+        outs = experiment.outputs(experiment.active())
+        assert outs.plot("kaplan_meier.png").is_file()
+        assert not outs.summary.exists()          # a figure pass is not a run
+    finally:
+        for _title, fig in figures:
+            plt.close(fig)

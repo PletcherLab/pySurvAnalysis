@@ -2,9 +2,9 @@
 
 The config is the authority for everything that used to be UI state: the input
 format, the time/event columns, the censoring policy, the active **Exclusion
-Group**, the Experiment Type, and the declared **Focuses** — named slices of
-the factors and levels discovered in the data file (ADR-0011). Factors
-themselves are never declared.
+Group**, the Experiment Type, the declared **Focuses** — named slices of the
+factors and levels discovered in the data file (ADR-0011) — and what a run
+leaves out (``omit:``, ADR-0012). Factors themselves are never declared.
 
 Unknown keys ride through a write untouched, so a config edited by a future
 version of the app — or by hand — is never silently truncated.
@@ -26,7 +26,10 @@ SPECS_FILENAME = "plot_specs.yaml"
 
 #: Sections merged key-by-key when a Member Experiment inherits Project
 #: Defaults. Anything else is replaced wholesale by the member's value.
-_DEEP_SECTIONS = ("global", "input", "exclusions")
+_DEEP_SECTIONS = ("global", "input", "exclusions", "omit")
+
+#: What an ``omit:`` block can name: the Analysis Set and the Plot Set.
+OMIT_KINDS = ("analyses", "plots")
 
 #: Sections a member never inherits. Members rarely share factors, so an
 #: inherited Focus would be a Blocked Focus in every member it does not fit,
@@ -154,6 +157,51 @@ def exclusion_group(config: dict) -> str | None:
     return str(group).strip()
 
 
+def omitted(config: dict, kind: str) -> frozenset[str]:
+    """The analysis or plot ids (*kind* ``"analyses"`` or ``"plots"``) a run
+    leaves out — the boxes unticked in the Hub.
+
+    Stored as what is left *out*, so an untouched config runs everything and
+    an analysis added by a later version is included until someone unticks it.
+    """
+    section = (config or {}).get("omit") or {}
+    if not isinstance(section, dict):
+        return frozenset()
+    items = section.get(kind) or []
+    if isinstance(items, str):
+        items = [items]
+    if not isinstance(items, list):
+        return frozenset()
+    return frozenset(str(i).strip() for i in items if str(i).strip())
+
+
+def validate_omit_block(config: dict) -> list[str]:
+    from ..experiment_types.base import ALL_ANALYSIS_DEFS, ALL_PLOT_DEFS
+
+    section = (config or {}).get("omit")
+    if section is None:
+        return []
+    if not isinstance(section, dict):
+        return ["`omit:` must be a mapping, e.g. `{analyses: [parametric_aft]}`."]
+    known = {"analyses": [a.id for a in ALL_ANALYSIS_DEFS],
+             "plots": [p.id for p in ALL_PLOT_DEFS]}
+    problems: list[str] = []
+    for kind, items in section.items():
+        if kind not in known:
+            problems.append(f"`omit.{kind}` is not something a run can leave out "
+                            f"(use {' or '.join(OMIT_KINDS)}).")
+            continue
+        if items is not None and not isinstance(items, (list, str)):
+            problems.append(f"`omit.{kind}` must be a list of ids.")
+            continue
+        ## A misspelt id leaves nothing out — the run then includes what the
+        ## user meant to drop, and nothing on screen says why.
+        for item in sorted(omitted(config, kind) - set(known[kind])):
+            problems.append(f"`omit.{kind}` names {item!r}, which no run "
+                            f"produces. Known: {', '.join(known[kind])}.")
+    return problems
+
+
 def scripts_of(config: dict, key: str = "scripts") -> list[dict]:
     """The saved step lists under *key* (``[]`` when absent or malformed)."""
     scripts = (config or {}).get(key) or []
@@ -187,5 +235,6 @@ def validate_config(config: dict) -> list[str]:
     from .focus import validate_focus_block
 
     problems.extend(validate_focus_block(config))
+    problems.extend(validate_omit_block(config))
     problems.extend(exp_type.validate_config(config))
     return problems

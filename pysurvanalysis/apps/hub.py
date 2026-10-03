@@ -8,9 +8,10 @@ Two things differ from the sister app by design:
 
 * the **selection** may be a Batch, a Project, *or* a standalone Experiment
   Directory — a Project is not required to load anything (ADR-0003); and
-* the **Analyze** panel's buttons are contributed by the loaded experiment's
-  Experiment Type, so a button and its script action are one declaration
-  (ADR-0002).
+* the **Analyze** and **Plots** panels are a checkbox per analysis or figure
+  the loaded experiment's Experiment Type offers the Active Focus, over one
+  button that runs them; the ticks are the config's ``omit:``, so a script or
+  a Batch Run includes the same (ADR-0012, amending ADR-0002).
 
 Batch discovery is recursive (ADR-0009), so the selection may name a folder
 several levels above the Projects. The walk is expensive next to the single
@@ -32,7 +33,7 @@ from ..gui_env import sanitize_input_method_environment, use_agg_matplotlib
 sanitize_input_method_environment()
 use_agg_matplotlib()
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction, QBrush
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -86,11 +87,13 @@ from .common import TaskWorker
 
 PANEL_WIDTH = 540
 
-#: The five experiment sub-panels hold a column of buttons, and a button
-#: stretched across 540px was mostly padding — their content needs ~270px.
+#: The five experiment sub-panels hold a column of buttons and checkboxes,
+#: and a control stretched across 540px was mostly padding. The widest is a
+#: Plot Set checkbox ("Nelson-Aalen cumulative hazard", ~290px — a checkbox
+#: label cannot wrap), so this leaves it room on a wider system font.
 #: The Batch/Project/Experiment panels keep the full width for their tables
 #: and the sub-tile row.
-NARROW_PANEL_WIDTH = 350
+NARROW_PANEL_WIDTH = 380
 _PANEL_WIDTHS = {key: NARROW_PANEL_WIDTH
                  for key in ("qc", "analyze", "plots", "scripts", "ai")}
 
@@ -584,8 +587,9 @@ class HubWindow(QMainWindow):
     def _build_analyze_panel(self) -> None:
         self._analyze_card = Card(
             "Analyze", Category.ANALYZE, icon_name="analyze",
-            subtitle="Buttons here are contributed by the loaded experiment's "
-                     "Experiment Type.")
+            subtitle="Tick what a run includes, then Run analysis. Results and "
+                     "the report go to analysis/<focus>/; the ticks are saved "
+                     "in the config, so scripts and Batch Runs match.")
         self._panels["analyze"].add_card(self._analyze_card)
 
     def _build_experiment_panel(self) -> None:
@@ -701,13 +705,12 @@ class HubWindow(QMainWindow):
         self._panels["qc"].add_card(card)
 
     def _build_plots_panel(self) -> None:
-        ## Plot-producing actions live here, not under Analyze: an Action
-        ## already declares its category, and a plot is a plot wherever the
-        ## Experiment Type contributed it from.
+        ## The Plot Set, one box per figure: the same ticks decide what
+        ## Generate plots draws now and what every saved run embeds.
         self._plot_actions_card = Card(
             "Plots", Category.PLOTS, icon_name="plot",
-            subtitle="Buttons here are contributed by the loaded experiment's "
-                     "Experiment Type.")
+            subtitle="Tick the figures to draw, then Generate plots. Every "
+                     "saved run includes the same ticked figures.")
         self._panels["plots"].add_card(self._plot_actions_card)
         ## No Publication-figure card here. Authoring a figure is Plot Editor
         ## work — the Spec and its Style are what a figure IS (ADR-0005) — and
@@ -796,7 +799,7 @@ class HubWindow(QMainWindow):
 
         Separate from :meth:`_toggle_panel` because some flows *move* the user
         to a panel — double-clicking a Batch row lands them on Project, and a
-        finished load lands them on Analyze — and a toggle would close it
+        finished load lands them on Experiment — and a toggle would close it
         again whenever they were already there.
         """
         self.close_panel()
@@ -997,10 +1000,11 @@ class HubWindow(QMainWindow):
             return
         self._log.append_line(f"Loaded {name} ({self._experiment.type.label}).")
         self._refresh_all()
-        ## Loading is a means, not an end: the next thing anyone does with a
-        ## member is analyse it, so the double-click lands them there rather
-        ## than leaving the Project panel open over a now-live Analyze tile.
-        self._open_panel_for("analyze")
+        ## Loading is a means, not an end, but analysing comes second: every
+        ## experiment-level surface acts on the Active Focus, so the
+        ## double-click lands on the Experiment panel, where the Focus is
+        ## chosen (or created) above the sub-tiles that act on it.
+        self._open_panel_for("experiment")
 
     # ── refresh ────────────────────────────────────────────────────────────
 
@@ -1390,13 +1394,13 @@ class HubWindow(QMainWindow):
             table.setItem(row, col, QTableWidgetItem(str(value)))
 
     def _refresh_action_panels(self) -> None:
-        """Rebuild the contributed buttons from ``core ∪ type`` (ADR-0002).
+        """Rebuild the Analyze and Plots cards for the Active Focus (ADR-0012).
 
-        One registry, split by the category each Action already declares:
-        plot-producing actions go to the Plots card, everything else to
-        Analyze. Those contributed buttons are now all the Plots panel holds
-        — authoring a Publication Figure is Plot Editor work and rendering
-        one is a Project action.
+        Each card is a checkbox per item its set offers — the type's Analysis
+        Set, its Plot Set — over the one button that runs them. A box's tick
+        is the config's ``omit:``, so what the Hub runs is what a script or a
+        Batch Run runs. The individual actions remain the script vocabulary;
+        as buttons they were a dozen ways to run one analysis piecemeal.
         """
         analyze = self._analyze_card.body_layout()
         plots = self._plot_actions_card.body_layout()
@@ -1407,86 +1411,111 @@ class HubWindow(QMainWindow):
                 if widget is not None:
                     widget.setParent(None)
 
-        if self._experiment is None:
-            analyze.addWidget(QLabel("Load an experiment to see its actions."))
+        experiment = self._experiment
+        if experiment is None:
+            analyze.addWidget(QLabel("Load an experiment to see its analyses."))
             plots.addWidget(QLabel("Load an experiment to see its plots."))
             return
 
-        from ..script_editor import actions as action_mod
+        exp_type = experiment.type
+        active = experiment.active()
+        shape = experiment.estimated_shape(active) if active is not None else None
+        omit_analyses = experiment.omitted("analyses")
+        offered = exp_type.analysis_set_for(shape)
+        for analysis in offered:
+            analyze.addWidget(self._selection_box(
+                "analyses", analysis, shape, checked=analysis.id not in omit_analyses))
+        run = ActionButton("Run analysis", Category.ANALYZE, icon_name="analyze")
+        run.setToolTip("Run the ticked analyses and figures under the Active "
+                       "Focus, and write the results and the report to "
+                       "analysis/<focus>/.")
+        run.clicked.connect(lambda: self._run_action("run_analysis"))
+        analyze.addWidget(run)
+        self._add_not_offered(analyze, active, [a for a in exp_type.analysis_set
+                                                if a not in offered])
 
-        registry = action_mod.registry_for(self._experiment.type)
-        ## Script steps that make no sense as standalone buttons. Rendering
-        ## is project-level (its button lives on the Project panel), and
-        ## apply_exclusions only means something INSIDE a script, where steps
-        ## share a context — a script can run under a different group than
-        ## the config's. As a button it loaded data into a context that was
-        ## thrown away one line later, while every real run already applies
-        ## the active Exclusion Group; the working control is QC's
-        ## "Set active group". The overlay button drew the same figures the
-        ## Chamber QC viewer draws (the same plotting call over the same
-        ## per-chamber lifetables) as dead tabs — the viewer adds flagging
-        ## and Save Exclusions, so it is the one way in.
-        registry = {k: a for k, a in registry.items()
-                    if k not in ("render_publication_figures",
-                                 "apply_exclusions",
-                                 "chamber_overlay_qc",
-                                 ## Structural: it splits a script, so as a
-                                 ## button it has nothing to split.
-                                 "run_in_focuses",
-                                 ## Script tools: their value is the explicit
-                                 ## `factors:` subset a step can name. As a
-                                 ## button, under a Focus, each fits exactly
-                                 ## what the Cox / RMST factorial model fits —
-                                 ## two buttons, one analysis.
-                                 "cox_ph", "rmst")}
-        order = [k for k in action_mod.CORE_KEYS if k in registry]
-        order += [k for k in sorted(registry) if k not in order]
+        labels = {a.id: a.label for a in exp_type.analysis_set}
+        omit_plots = experiment.omitted("plots")
+        for plot in exp_type.plot_set_for(shape):
+            needs = [labels.get(n, n) for n in plot.needs if n in omit_analyses]
+            plots.addWidget(self._selection_box(
+                "plots", plot, shape, checked=plot.id not in omit_plots,
+                needs=needs))
+        generate = ActionButton("Generate plots", Category.PLOTS, icon_name="plot")
+        generate.setToolTip("Draw the ticked figures for the Active Focus into "
+                            "tabs, and save them to analysis/<focus>/plots/.")
+        generate.clicked.connect(self._generate_plots)
+        plots.addWidget(generate)
+        self._add_not_offered(plots, active, list(exp_type.plots_not_offered(shape))
+                              if shape is not None else [])
+
+    def _selection_box(self, kind: str, item, shape, *, checked: bool,
+                       needs: list[str] | None = None) -> QCheckBox:
+        """One analysis or figure: ticked = included in every run."""
+        box = QCheckBox(item.label)
+        box.setChecked(checked)
+        tip = item.caption
+        if shape is not None:
+            ok, reason = shape.admits(item.requires)
+            if not ok:
+                ## Relevant but not computable: the question is asked and the
+                ## data cannot answer it — greyed, with the reason, where it
+                ## would be ticked.
+                tip += f"\n\nNot applicable to Focus {shape.focus_name}: {reason}."
+                box.setEnabled(False)
+        if needs:
+            tip += (f"\n\nDraws from {', '.join(needs)} — tick it on the "
+                    f"Analyze panel to draw this figure.")
+            box.setEnabled(False)
+        box.setToolTip(tip)
+        box.toggled.connect(
+            lambda on, k=kind, i=item: self._set_included(k, i, on))
+        return box
+
+    def _add_not_offered(self, layout, active, items: list) -> None:
+        """One quiet line, so a missing box reads as a property of the Focus
+        rather than a fault: what is not offered, and why."""
+        if not items or active is None:
+            return
         from ..domain.focus import requirement
 
-        active = self._experiment.active()
-        shape = self._experiment.estimated_shape(active) if active is not None else None
-        hidden: list[str] = []
-        why: dict[int, tuple[list[str], set[str]]] = {}
-        for key in order:
-            action = registry[key]
-            req = requirement(action.requires)
-            ## Not relevant to the Active Focus's definition — a one-factor
-            ## Focus asks no interaction question — so no button at all.
-            if req is not None and active is not None and not req.relevant(active)[0]:
-                hidden.append(action.title)
-                target = plots if action.category is Category.PLOTS else analyze
-                titles, reasons = why.setdefault(id(target), ([], set()))
-                titles.append(action.title)
-                reasons.add(req.relevant(active)[1])
-                continue
-            btn = ActionButton(action.title, action.category,
-                               icon_name=action.icon_name)
-            tip = action.description
-            if req is not None and shape is not None:
-                ok, reason = req.computable(shape)
-                if not ok:
-                    ## Relevant but not computable: the question is asked and
-                    ## the data cannot answer it — greyed, with the reason,
-                    ## where it would be clicked.
-                    tip += f"\n\nNot applicable to Focus {active.name}: {reason}."
-                    btn.setEnabled(False)
-            btn.setToolTip(tip)
-            btn.clicked.connect(lambda _c, k=key: self._run_action(k))
-            target = plots if action.category is Category.PLOTS else analyze
-            target.addWidget(btn)
-        self._hidden_actions = hidden
-        ## One quiet line per card, so a missing button reads as a property of
-        ## the Focus rather than a fault: what is not offered, and why.
-        for target in (analyze, plots):
-            titles, reasons = why.get(id(target), ([], set()))
-            if not titles:
-                continue
-            note = QLabel(f"Not offered for Focus {active.name}: "
-                          + ", ".join(titles) + ".")
-            note.setWordWrap(True)
-            note.setToolTip("\n".join(sorted(reasons)))
-            note.setStyleSheet("color: palette(mid); font-style: italic;")
-            target.addWidget(note)
+        reasons = {requirement(i.requires).relevant(active)[1]
+                   for i in items if i.requires is not None}
+        note = QLabel(f"Not offered for Focus {active.name}: "
+                      + ", ".join(i.label for i in items) + ".")
+        note.setWordWrap(True)
+        note.setToolTip("\n".join(sorted(r for r in reasons if r)))
+        note.setStyleSheet("color: palette(mid); font-style: italic;")
+        layout.addWidget(note)
+
+    def _set_included(self, kind: str, item, included: bool) -> None:
+        experiment = self._experiment
+        if experiment is None:
+            return
+        experiment.set_included(kind, item.id, included)
+        self._log.append_line(
+            f"{item.label}: {'included in' if included else 'left out of'} "
+            f"{experiment.name}'s runs — {cfgmod.CONFIG_FILENAME} omit:.")
+        if kind == "analyses":
+            ## A figure may draw from what was just unticked. Deferred: this
+            ## runs inside the box's own signal, and the rebuild deletes it.
+            QTimer.singleShot(0, self._refresh_action_panels)
+
+    def _generate_plots(self) -> None:
+        """Draw the ticked Plot Set for the Active Focus into tabs."""
+        from .. import pipeline
+
+        experiment = self._experiment
+        if experiment is None:
+            return
+        focus = experiment.active()
+
+        def _job():
+            figures = pipeline.render_plots(experiment, focus=focus, log=print)
+            return figures or "No figures drawn — tick some on the Plots panel."
+
+        label = f"Generate plots — {focus.name}" if focus is not None else "Generate plots"
+        self._spawn(label, _job)
 
     def _refresh_scripts(self) -> None:
         self._scripts_combo.clear()
@@ -1606,7 +1635,8 @@ class HubWindow(QMainWindow):
         return box is not None and box.isChecked()
 
     def _run_action(self, key: str) -> None:
-        """Execute one Analyze button — the same action a script step names."""
+        """Execute one action under the Active Focus — the same action a
+        script step names (Run analysis is ``run_analysis``)."""
         from ..script_editor import actions as action_mod
         from ..script_editor.spec import RunContext
 

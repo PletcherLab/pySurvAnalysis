@@ -281,6 +281,25 @@ diagnostic); a Focus varying two or more factors adds the faceted KM (its
 therefore a property of the run — type plus Focus — not of the directory.
 _Avoid_: plot list, figure set
 
+**Analysis Set**:
+The optional analyses a run may perform — log-rank pairwise and omnibus,
+Gehan-Wilcoxon, pairwise hazard ratios, parametric AFT, and the interaction
+analyses (the **Factorial Battery**, one item) — less any whose **Requirement**
+is not relevant to the Focus. The survivorship core (lifetables, summaries,
+median and mean survival) is not in it: every figure and section stands on
+that core, so it always runs. Like the Plot Set, a property of the run.
+_Avoid_: analysis list, battery (that is the whole run)
+
+**Left Out**:
+An item of the Analysis Set or Plot Set the Focus is offered that the
+experiment's `omit:` block excludes from every run — Hub, script or Batch
+alike; the boxes unticked on the Hub's Analyze and Plots panels (ADR-0012).
+The run records each in the log, the Run Summary and the report's Focus
+section, apart from **Not Applicable**: left out is a choice, Not Applicable
+is the data. A figure that draws from a left-out analysis (the forest, from
+the hazard ratios) is left out with it.
+_Avoid_: skipped, disabled
+
 **Headline Figure**:
 The one figure of a Plot Set that states a **Focus**'s primary result — the
 faceted KM when the Focus crosses factors, the KM with at-risk counts
@@ -392,10 +411,14 @@ shape line (`2 factors · 4 treatments · N=409 · 2×2`) showing, before anythi
 runs, whether the Factorial Battery will be offered. The status readout carries
 a Focus row, since "which experiment" without "which Focus" is now half an
 answer. All controls live in a tile's anchored panel, one open at a time.
-The Analyze tile's cards are contributed by the loaded experiment's
-**Experiment Type**. The selection names the working container — a Batch, a
-Project, or a standalone Experiment Directory; a Member Experiment is loaded
-by double-clicking its row in the Project panel's members table. The Project
+The Analyze and Plots panels are each a checkbox per item of the loaded
+**Experiment Type**'s **Analysis Set** or **Plot Set** the Active Focus is
+offered, over one button — Run analysis, Generate plots; an unticked box is
+**Left Out** of every run (ADR-0012). The selection names the working
+container — a Batch, a Project, or a standalone Experiment Directory; a Member
+Experiment is loaded by double-clicking its row in the Project panel's members
+table, which lands on the Experiment panel so the Focus is chosen before
+anything runs. The Project
 panel is three cards deep: **Create/Load** (the ways into a Project, plus
 Validate YAMLs), **Experiments** (the members table and the ways to make one),
 and **Actions** (report, view, plot editor) over the Project **Scripts** card.
@@ -404,8 +427,9 @@ input format, time/event columns and censoring policy now live in
 `survival_config.yaml`)
 
 **Type Action**:
-A Hub button, and the script action mirroring it, contributed by an
-Experiment Type rather than by the core. The action registry at each level is
+A script action contributed by an Experiment Type rather than by the core.
+Until ADR-0012 each was also a Hub button; the Hub now offers the type's
+Analysis Set and Plot Set as checkboxes instead. The action registry at each level is
 *core ∪ type ∪ what the active Focus Shape admits* — `cox_interaction` and
 `interaction_plot` are in the registry when the Focus is 2×2 and absent when
 it is not (ADR-0011). A script step naming an action outside that union is a

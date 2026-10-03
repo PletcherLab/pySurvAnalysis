@@ -634,9 +634,10 @@ POOL["run_analysis"] = Action(
     key="run_analysis",
     title="Run analysis",
     description=(
-        "Run the whole battery — the analyses and the Plot Set, the Factorial "
-        "Battery when the Focus is a 2×2 — and write it under "
-        "analysis/<focus>/. Unattended with no Focus, it runs every Focus."
+        "Run the battery — the analyses and the Plot Set, the Factorial "
+        "Battery when the Focus is a 2×2, less anything the config's omit: "
+        "block leaves out — and write it under analysis/<focus>/. Unattended "
+        "with no Focus, it runs every Focus."
     ),
     category=Category.ANALYZE,
     icon_name="analyze",

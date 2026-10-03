@@ -156,17 +156,54 @@ def test_the_members_table_is_the_way_to_load(hub):
     assert hub._selection == hub._project.directory
 
 
-def test_analyze_buttons_come_from_the_registry(hub):
+def _boxes(card) -> dict:
+    """The card's checkboxes, by label, in order."""
+    from PyQt6.QtWidgets import QCheckBox
+
+    layout = card.body_layout()
+    widgets = [layout.itemAt(i).widget() for i in range(layout.count())]
+    return {w.text(): w for w in widgets if isinstance(w, QCheckBox)}
+
+
+def _push_buttons(card) -> list[str]:
+    from PyQt6.QtWidgets import QAbstractButton, QCheckBox
+
+    layout = card.body_layout()
+    widgets = [layout.itemAt(i).widget() for i in range(layout.count())]
+    return [w.text().strip() for w in widgets
+            if isinstance(w, QAbstractButton) and not isinstance(w, QCheckBox)]
+
+
+def test_analyze_is_a_box_per_analysis_over_one_run_button(hub):
+    """You choose, then run: one button, the analyses it includes ticked
+    above it — not a button per analysis."""
     _load_first_member(hub)
-    labels = _button_labels(hub._analyze_card)
-    assert "Cox factorial model" in labels        # the Factorial Battery
-    assert "Run analysis" in labels               # core
-    assert "Parametric AFT models" in labels      # the general case withholds nothing
-    assert "Run in focuses" not in labels         # structural: a script step only
+    boxes = _boxes(hub._analyze_card)
+    assert "Interaction analyses" in boxes        # 2×2: Cox + RMST factorial, one box
+    assert "Parametric AFT models" in boxes       # the general case withholds nothing
+    assert all(box.isChecked() for box in boxes.values())   # untouched config: everything
+    assert _push_buttons(hub._analyze_card) == ["Run analysis"]
+    layout = hub._analyze_card.body_layout()
+    widgets = [layout.itemAt(i).widget() for i in range(layout.count())]
+    run_at = next(i for i, w in enumerate(widgets)
+                  if w.text().strip() == "Run analysis")
+    assert all(widgets.index(box) < run_at for box in boxes.values())
 
 
-def test_buttons_irrelevant_to_the_focus_are_not_shown(own_hub):
-    ## A one-factor Focus asks no interaction question: no button at all, and
+def test_plots_is_a_box_per_figure_over_one_generate_button(hub):
+    _load_first_member(hub)
+    experiment = hub._experiment
+    boxes = _boxes(hub._plot_actions_card)
+    shape = experiment.estimated_shape(experiment.active())
+    assert list(boxes) == [p.label for p in experiment.type.plot_set_for(shape)]
+    assert "Faceted Kaplan-Meier" in boxes        # the 2×2 earns it
+    assert _push_buttons(hub._plot_actions_card) == ["Generate plots"]
+    ## A figure is never on Analyze, and an analysis never on Plots.
+    assert set(boxes).isdisjoint(_boxes(hub._analyze_card))
+
+
+def test_what_the_focus_does_not_ask_is_not_offered(own_hub):
+    ## A one-factor Focus asks no interaction question: no box at all, and
     ## one quiet line saying what is not offered and why.
     from pysurvanalysis.domain.focus import Focus
 
@@ -176,20 +213,19 @@ def test_buttons_irrelevant_to_the_focus_are_not_shown(own_hub):
     member.save_focuses(member.focuses() + [Focus("Geno", {"Genotype": ["wt", "mut"]})])
     member.active_focus = "Geno"
     hub._refresh_all()
-    analyze = _button_labels(hub._analyze_card)
-    plots = _button_labels(hub._plot_actions_card)
-    for title in ("Cox factorial model", "RMST factorial model"):
-        assert title not in analyze
-    for title in ("Faceted KM", "Lifespan interaction plot"):
+    analyze = _boxes(hub._analyze_card)
+    plots = _boxes(hub._plot_actions_card)
+    assert "Interaction analyses" not in analyze
+    for title in ("Faceted Kaplan-Meier", "Lifespan interaction plot"):
         assert title not in plots
     assert "Log-rank pairwise" in analyze                 # still two treatments
-    note = next(t for t in analyze if t.startswith("Not offered"))
-    assert "Cox factorial model" in note
-    ## And the duplicate general-purpose Cox/RMST stay script tools.
-    assert "Cox PH (interactions)" not in analyze
+    for card, title in ((hub._analyze_card, "Interaction analyses"),
+                        (hub._plot_actions_card, "Faceted Kaplan-Meier")):
+        note = next(t for t in _button_labels(card) if t.startswith("Not offered"))
+        assert title in note
 
 
-def test_a_relevant_but_uncomputable_button_is_greyed_with_the_reason(qapp, tmp_path):
+def test_a_relevant_but_uncomputable_box_is_greyed_with_the_reason(qapp, tmp_path):
     import pandas as pd
 
     from pysurvanalysis.apps.hub import HubWindow
@@ -202,44 +238,59 @@ def test_a_relevant_but_uncomputable_button_is_greyed_with_the_reason(qapp, tmp_
         path, index=False)
     hub = HubWindow(str(directory))
     try:
-        button = next(b for b in _buttons(hub._analyze_card)
-                      if b.text().strip() == "Cox factorial model")
-        assert not button.isEnabled()
-        assert "Genotype=mut × Treatment=drug" in button.toolTip()
-        faceted = next(b for b in _buttons(hub._plot_actions_card)
-                       if b.text().strip() == "Faceted KM")
-        assert faceted.isEnabled()                       # a missing curve is fine
+        box = _boxes(hub._analyze_card)["Interaction analyses"]
+        assert not box.isEnabled()
+        assert "Genotype=mut × Treatment=drug" in box.toolTip()
+        ## A missing cell is just a missing curve.
+        assert _boxes(hub._plot_actions_card)["Faceted Kaplan-Meier"].isEnabled()
     finally:
         hub.close()
 
 
-def test_plot_actions_land_on_the_plots_card_not_analyze(hub):
-    """An Action's category decides its card: PLOTS ones leave Analyze."""
+def test_a_tick_is_the_config_so_scripts_and_batches_agree(own_hub):
+    from pysurvanalysis.domain import config as cfgmod
+
+    hub = own_hub
     _load_first_member(hub)
-    analyze = _button_labels(hub._analyze_card)
-    plots = _button_labels(hub._plot_actions_card)
+    directory = hub._experiment.directory
+    _boxes(hub._analyze_card)["Parametric AFT models"].setChecked(False)
+    _boxes(hub._plot_actions_card)["Log-log diagnostic"].setChecked(False)
+    assert cfgmod.load_config(directory)["omit"] == {
+        "analyses": ["parametric_aft"], "plots": ["log_log"]}
+    hub._refresh_all()
+    assert not _boxes(hub._analyze_card)["Parametric AFT models"].isChecked()
+    _boxes(hub._analyze_card)["Parametric AFT models"].setChecked(True)
+    assert cfgmod.load_config(directory)["omit"] == {"plots": ["log_log"]}
 
-    ## Project-level only: rendering walks every member, so its button lives
-    ## on the Project panel and NOWHERE on the experiment tiles. The script
-    ## action still exists for Experiment Scripts.
-    assert "Render publication figures" not in plots
-    assert "Render publication figures" not in analyze
 
-    ## Core, and ANALYZE: it stays put.
-    assert "Run analysis" in analyze
-    assert "Run analysis" not in plots
+def test_unticking_the_hazard_ratios_greys_the_forest(qapp, own_hub):
+    hub = own_hub
+    _load_first_member(hub)
+    _boxes(hub._analyze_card)["Pairwise hazard ratios"].setChecked(False)
+    qapp.processEvents()                          # the deferred rebuild
+    forest = _boxes(hub._plot_actions_card)["Hazard-ratio forest"]
+    assert not forest.isEnabled()
+    assert "Pairwise hazard ratios" in forest.toolTip()
 
-    ## Nothing the type contributes as a plot is left behind on Analyze.
-    from pysurvanalysis.script_editor import actions as action_mod
-    from pysurvanalysis.ui import Category
 
-    registry = action_mod.registry_for(hub._experiment.type)
-    plot_titles = {a.title for a in registry.values()
-                   if a.category is Category.PLOTS
-                   and a.key != "render_publication_figures"}
-    assert plot_titles, "expected this type to contribute at least one plot"
-    assert plot_titles.isdisjoint(analyze)
-    assert plot_titles <= set(plots)
+def test_generate_plots_draws_only_the_ticked_figures(own_hub, monkeypatch):
+    import matplotlib.pyplot as plt
+
+    hub = own_hub
+    _load_first_member(hub)
+    _boxes(hub._plot_actions_card)["Log-log diagnostic"].setChecked(False)
+    jobs = []
+    monkeypatch.setattr(hub, "_spawn", lambda name, fn, **_k: jobs.append((name, fn)))
+    hub._generate_plots()
+    ((_name, job),) = jobs
+    figures = job()
+    try:
+        titles = [title for title, _fig in figures]
+        assert any(t.startswith("Faceted Kaplan-Meier") for t in titles)
+        assert not any(t.startswith("Log-log") for t in titles)
+    finally:
+        for _title, fig in figures:
+            plt.close(fig)
 
 
 def _button_labels(card) -> list[str]:
@@ -698,9 +749,10 @@ def test_cards_dim_until_they_have_a_subject(hub):
         assert not any(card.is_dimmed() for card in hub._panels[key].cards()), key
 
 
-def test_loading_a_member_lands_on_the_analyze_panel(hub):
+def test_loading_a_member_lands_on_the_experiment_panel(hub):
+    """The Focus is chosen there, before anything acts on it (ADR-0011)."""
     _load_first_member(hub)
-    assert hub._open_panel == "analyze"
+    assert hub._open_panel == "experiment"
 
 
 def test_suppressing_tabs_closes_the_figure_only_during_a_batch_run(hub):
@@ -1548,6 +1600,48 @@ def test_the_focus_window_authors_a_focus(qapp, focus_member):
     written = cfgmod.load_config(focus_member.directory)["focuses"]["Drug, by genotype"]
     assert written["factors"] == {"Genotype": ["mut", "wt"], "Treatment": ["drug"]}
     assert written["reference"] == {"Genotype": "wt"}
+
+
+def test_every_level_list_shows_four_rows(qapp, focus_member):
+    """A two-level factor's list collapsed to one visible row on Windows,
+    where rows run taller than the 22px its height was guessed from."""
+    from pysurvanalysis.apps.focus_window import VISIBLE_LEVELS, FocusWindow
+
+    window = FocusWindow(None, focus_member)
+    try:
+        window.show()
+        qapp.processEvents()
+        for factor, box in window._boxes.items():
+            levels = box.levels
+            assert (levels.viewport().height()
+                    >= VISIBLE_LEVELS * levels.sizeHintForRow(0)), factor
+    finally:
+        window.close()
+
+
+def test_a_colour_picked_on_an_auto_swatch_is_kept(qapp, monkeypatch):
+    """The dialog carries its alpha through a pick, and an auto swatch opened
+    it at alpha 0 — so every colour chosen came back as "none". Parented to
+    the swatch, it also inherited the swatch's button stylesheet."""
+    from PyQt6.QtGui import QColor
+    from PyQt6.QtWidgets import QColorDialog, QWidget
+
+    from pysurvanalysis.apps.plot_editor import ColorButton
+
+    seen = {}
+
+    def _get_color(initial, parent, *_args):
+        seen["parent"] = parent
+        picked = QColor("#ff0000")
+        picked.setAlpha(initial.alpha())     # what the real dialog does
+        return picked
+
+    monkeypatch.setattr(QColorDialog, "getColor", staticmethod(_get_color))
+    host = QWidget()
+    swatch = ColorButton("", host)
+    swatch._pick()
+    assert swatch.color() == "#ff0000"
+    assert seen["parent"] is host
 
 
 def test_renaming_in_the_focus_window_moves_the_results(qapp, focus_member):

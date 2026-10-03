@@ -126,6 +126,12 @@ def not_applicable(result) -> list[dict]:
             if isinstance(item, dict)]
 
 
+def left_out(result) -> list[dict]:
+    """What the run left out by choice — the config's ``omit:`` (ADR-0012)."""
+    return [dict(item) for item in (getattr(result, "left_out", None) or [])
+            if isinstance(item, dict)]
+
+
 def _cover(result, name: str) -> m.Cover:
     exp_type = result.experiment_type
     es = result.experiment_summary or {}
@@ -175,6 +181,11 @@ def _cover(result, name: str) -> m.Cover:
         status.append(m.StatusLine(
             f"{len(skipped)} action(s) not applicable to this Focus — listed in "
             f"the Focus section.", m.Level.WARN))
+    omitted = left_out(result)
+    if omitted:
+        status.append(m.StatusLine(
+            f"{len(omitted)} analysis or figure(s) left out of this run by "
+            f"choice — listed in the Focus section.", m.Level.NEUTRAL))
     title_name = f"{name} · {rec['name']}" if rec.get("name") else name
     return m.Cover(
         title=getattr(exp_type, "report_title", lambda n: n)(title_name),
@@ -235,6 +246,15 @@ def _section_focus(result) -> list:
             caption=("Real actions this slice does not admit. Recorded rather "
                      "than omitted, so a missing figure or model is never "
                      "mistaken for a result.")))
+    omitted = left_out(result)
+    if omitted:
+        blocks.append(m.Table(
+            columns=["Left out", "Why"],
+            rows=[[str(i.get("item", "")), str(i.get("reason", ""))] for i in omitted],
+            title="Left out of this run",
+            caption=("Analyses and figures this Focus is offered that the run "
+                     "was asked to leave out. A choice, not a property of the "
+                     "data — tick them again and re-run to include them.")))
     return blocks
 
 
@@ -409,6 +429,11 @@ def _section_interaction(result) -> list:
             if item.get("action") == "Factorial Battery":
                 blocks.append(m.Paragraph(
                     f"**Factorial Battery: not run** — {item.get('reason')}."))
+        for item in left_out(result):
+            if item.get("id") == "interaction":
+                blocks.append(m.Paragraph(
+                    f"**Interaction analyses: left out of this run** — "
+                    f"{item.get('reason')}."))
         return blocks
     for model in result.cox_analyses or []:
         title = model.get("title") or model.get("model_type", "Factorial model")

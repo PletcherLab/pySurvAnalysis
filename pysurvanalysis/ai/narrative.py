@@ -77,6 +77,10 @@ def member_digest(saved) -> str:
         lines.append(f"Exclusion group applied: {saved.exclusion_group}")
     for item in saved.not_applicable:
         lines.append(f"Not applicable: {item.get('action')} — {item.get('reason')}")
+    ## Said, so the narrative never reads a deliberately absent test as a
+    ## null result.
+    for item in getattr(saved, "left_out", None) or []:
+        lines.append(f"Left out of this run by choice (not computed): {item.get('item')}")
 
     median = saved.median_surv
     if len(median):

@@ -584,6 +584,37 @@ class SurvivalExperiment:
             excluded |= set(data_loader.load_chamber_flags(path))
         return excluded
 
+    def omitted(self, kind: str) -> frozenset[str]:
+        """The analysis or plot ids every run of this experiment leaves out."""
+        return cfgmod.omitted(self.config, kind)
+
+    def set_included(self, kind: str, item_id: str, included: bool) -> None:
+        """Tick or untick one analysis or plot: written to ``omit:``, so the
+        Hub, a script and a Batch Run all leave out the same things."""
+        if kind not in cfgmod.OMIT_KINDS:
+            raise ValueError(f"Unknown omit kind {kind!r}.")
+        left_out = set(self.omitted(kind))
+        if included:
+            left_out.discard(item_id)
+        else:
+            left_out.add(item_id)
+        config = cfgmod.load_config(self.directory)
+        section = config.get("omit") if isinstance(config.get("omit"), dict) else {}
+        inherited = (self.defaults.get("omit") or {}) if isinstance(
+            self.defaults.get("omit"), dict) else {}
+        ## An empty list is kept only when it overrides a Project default —
+        ## otherwise a config nobody narrowed stays free of the block.
+        if left_out or inherited.get(kind):
+            section[kind] = sorted(left_out)
+        else:
+            section.pop(kind, None)
+        if section:
+            config["omit"] = section
+        else:
+            config.pop("omit", None)
+        cfgmod.save_config(self.directory, config)
+        self._reload_config()
+
     def scripts(self) -> list[dict]:
         """Experiment Scripts: the member's own, then the Project's central set."""
         own = cfgmod.scripts_of(self.raw_config, "scripts")

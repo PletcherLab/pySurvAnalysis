@@ -20,11 +20,14 @@ Supports two invocation modes:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 import pandas as pd
 
 from . import data_loader, lifetable, plotting, statistics
+
+#: Why an item a run left out is missing — in the reader's words.
+UNTICKED = "unticked in the Hub (`omit:` in survival_config.yaml)"
 
 
 class AnalysisResult:
@@ -91,6 +94,9 @@ class AnalysisResult:
         #: ``{"action", "reason"}`` for every real action this Focus does not
         #: admit — recorded, never fatal, never silent.
         self.not_applicable: list[dict] = []
+        #: ``{"id", "item", "reason"}`` for every analysis or figure this run
+        #: left out by choice (the config's ``omit:``) — a choice, not a gap.
+        self.left_out: list[dict] = []
         #: Individuals with no recorded level for a factor the Focus names —
         #: in no treatment, so outside the slice, and said so rather than
         #: silently dropped.
@@ -181,6 +187,9 @@ def run_analysis(
     # The Focus this run is under; default the experiment's Active Focus, or
     # Unfiltered in direct mode.
     focus: "Any" = None,
+    # Analysis and plot ids to leave out; default the config's `omit:` block.
+    omit_analyses: Optional[Iterable[str]] = None,
+    omit_plots: Optional[Iterable[str]] = None,
     log=None,
 ) -> AnalysisResult:
     """Run the complete survival analysis pipeline under one Focus.
@@ -201,9 +210,14 @@ def run_analysis(
     :class:`~pysurvanalysis.domain.experiment.BlockedFocusError` before
     anything is written.
 
+    Analyses and figures the config's ``omit:`` block names (the boxes
+    unticked in the Hub) are not computed, and the run records each as
+    **left out** — in the log, the Run Summary and the report — so a missing
+    table reads as a choice, never as a gap (ADR-0012).
+
     Returns an :class:`AnalysisResult` with everything computed.
     """
-    from .domain import focus as fm
+    from .domain import config as cfgmod, focus as fm
     from .domain.experiment import BlockedFocusError
     from .experiment_types import STANDARD
 
@@ -289,12 +303,7 @@ def run_analysis(
         emit(f"  {unassigned} individual(s) have no recorded level of "
              f"{', '.join(named)} and belong to no treatment — outside this Focus.")
     populated = fm.populated_labels(individual_data)
-    empty = fm.empty_reasons(focus, design, populated)
-    if empty:
-        raise BlockedFocusError(focus, empty)
-    if not len(individual_data):
-        raise BlockedFocusError(focus, [fm.BlockReason(
-            fm.EMPTY, f"Focus {focus.name!r} selects no individuals", "edit the Focus")])
+    _raise_if_empty(focus, design, individual_data)
     shape = fm.focus_shape(focus, individual_data)
     factors = list(focus.varying_factors)
     emit(f"Focus {focus.name!r}: {focus.describe(design)} — "
@@ -316,6 +325,27 @@ def run_analysis(
         not_applicable.append({"action": action, "reason": reason})
         emit(f"  Not applicable — {action}: {reason}")
 
+    # ── The selection: what this run leaves out ────────────────────────────
+    if omit_analyses is None:
+        omit_analyses = cfgmod.omitted(config, "analyses")
+    if omit_plots is None:
+        omit_plots = cfgmod.omitted(config, "plots")
+    omit_analyses, omit_plots = frozenset(omit_analyses), frozenset(omit_plots)
+    left_out: list[dict] = []
+
+    def _left_out(item_id: str, label: str, reason: str = UNTICKED) -> None:
+        left_out.append({"id": item_id, "item": label, "reason": reason})
+        emit(f"  Left out — {label}: {reason}")
+
+    ## Only what this Focus is offered can be left out of it: an unticked
+    ## interaction analysis means nothing to a one-factor Focus.
+    wanted: set[str] = set()
+    for analysis in exp_type.analysis_set_for(shape):
+        if analysis.id in omit_analyses:
+            _left_out(analysis.id, analysis.label)
+        else:
+            wanted.add(analysis.id)
+
     # ── Compute ────────────────────────────────────────────────────────────
     emit("Computing lifetables and summary statistics…")
     lifetables = lifetable.compute_lifetables(individual_data)
@@ -327,17 +357,22 @@ def run_analysis(
     ## them at all; one whose second treatment the data never populated is
     ## asked, and told why there is no answer.
     comparable, why = shape.admits(fm.COMPARISON)
-    if comparable:
+    pairwise_lr = pairwise_gw = hazard_ratios = pd.DataFrame()
+    omnibus_lr: dict = {}
+    comparisons = wanted & {"logrank_pairwise", "logrank_omnibus",
+                            "gehan_wilcoxon", "hazard_ratios"}
+    if comparable and comparisons:
         emit("Running survival comparisons…")
-        pairwise_lr = statistics.pairwise_logrank(individual_data)
-        omnibus_lr = statistics.logrank_multi(individual_data)
-        pairwise_gw = statistics.pairwise_gehan_wilcoxon(individual_data)
-        hazard_ratios = statistics.pairwise_hazard_ratios(individual_data)
-    else:
-        pairwise_lr = pairwise_gw = hazard_ratios = pd.DataFrame()
-        omnibus_lr = {}
-        if shape.relevant(fm.COMPARISON)[0]:
-            _not_applicable("Survival comparisons", why)
+        if "logrank_pairwise" in comparisons:
+            pairwise_lr = statistics.pairwise_logrank(individual_data)
+        if "logrank_omnibus" in comparisons:
+            omnibus_lr = statistics.logrank_multi(individual_data)
+        if "gehan_wilcoxon" in comparisons:
+            pairwise_gw = statistics.pairwise_gehan_wilcoxon(individual_data)
+        if "hazard_ratios" in comparisons:
+            hazard_ratios = statistics.pairwise_hazard_ratios(individual_data)
+    elif comparisons and shape.relevant(fm.COMPARISON)[0]:
+        _not_applicable("Survival comparisons", why)
     ## Pooled per-factor-level statistics only mean something when two or more
     ## factors vary; with one they repeat the per-treatment table.
     lifespan_stats = lifetable.lifespan_statistics(
@@ -345,10 +380,12 @@ def run_analysis(
         assume_censored=assume_censored,
     )
     surv_quantiles = lifetable.survival_quantiles(lifetables)
-    try:
-        parametric_models = statistics.fit_parametric_models(individual_data)
-    except Exception:  # noqa: BLE001 - a non-converging AFT fit never kills a run
-        parametric_models = {}
+    parametric_models: dict = {}
+    if "parametric_aft" in wanted:
+        try:
+            parametric_models = statistics.fit_parametric_models(individual_data)
+        except Exception:  # noqa: BLE001 - a non-converging AFT fit never kills a run
+            parametric_models = {}
     exp_summary = statistics.experiment_summary(individual_data)
 
     result = AnalysisResult(
@@ -382,14 +419,16 @@ def run_analysis(
     result.outputs = outs
     result.headline_plot_id = exp_type.headline_for(shape)
     result.not_applicable = not_applicable
+    result.left_out = left_out
     result.unassigned = unassigned
 
     # ── The Factorial Battery, by Focus Shape ──────────────────────────────
     from .experiment_types.factorial import BATTERY, run_factorial_battery
 
-    ## Offered only when the Focus varies two or more factors; then run, or
-    ## recorded as Not Applicable when the crossing has an empty cell.
-    if fm.FACTORIAL_MODEL.relevant(focus)[0]:
+    ## Offered only when the Focus varies two or more factors (and the
+    ## interaction analyses are ticked); then run, or recorded as Not
+    ## Applicable when the crossing has an empty cell.
+    if "interaction" in wanted:
         try:
             models = run_factorial_battery(individual_data, focus, shape)
             emit("Running the Factorial Battery…")
@@ -422,31 +461,9 @@ def run_analysis(
         hazard_ratios.to_csv(outs.stats("hazard_ratios"), index=False)
 
     # ── Figures: the Plot Set this Focus earns, in order ──────────────────
-    from . import plot_registry
-
-    plot_defs = exp_type.plot_set_for(shape)
-    emit(f"Rendering {len(plot_defs)} figure(s)…")
-    for plot_def in plot_defs:
-        ## The Plot Set holds only figures relevant to this Focus; a relevant
-        ## one the populated cells cannot support is said, not skipped.
-        ok, reason = shape.admits(plot_def.requires)
-        if not ok:
-            _not_applicable(plot_def.label, reason)
-            continue
-        try:
-            fig = plot_registry.build(plot_def.id, result)
-        except fm.NotApplicable as exc:
-            _not_applicable(plot_def.label, exc.reason)
-            continue
-        except Exception as exc:  # noqa: BLE001 - one bad figure never kills a run
-            _not_applicable(plot_def.label, f"could not be drawn ({exc})")
-            continue
-        if fig is None:
-            _not_applicable(plot_def.label, "the data cannot support it")
-            continue
-        path = outs.plot(plot_registry.get(plot_def.id).filename)
-        _plot_and_save(fig, path)
-        result.figure_paths[plot_def.id] = path
+    _draw_plot_set(result, omit_plots, omit_analyses,
+                   not_applicable=_not_applicable, left_out=_left_out, emit=emit)
+    _drop_stale_outputs(result)
 
     # ── Defined Plots: all of a plot's curves, or none and a reason ────────
     for plot_name, treatment_list in defined_plots:
@@ -474,6 +491,165 @@ def run_analysis(
     mpl_plt.close("all")
     emit(f"Analysis complete — {output_dir}")
     return result
+
+
+def render_plots(experiment, focus=None, log=None) -> list[tuple[str, Any]]:
+    """Draw the ticked figures of *focus*'s Plot Set — the Plots panel's
+    **Generate plots**.
+
+    The same figures, from the same slice, that a full run draws, saved to the
+    same files under ``analysis/<focus>/plots/``; the statistics, the report
+    and the Run Summary stay as the last run wrote them. *focus* defaults to
+    the Active Focus. Returns ``(title, figure)`` pairs, left open for display.
+    """
+    from .domain import focus as fm
+    from .domain.experiment import BlockedFocusError, ExperimentError
+
+    emit = log or (lambda _m: None)
+    if isinstance(focus, str):
+        focus = experiment.focus(focus)
+    focus = focus or experiment.active()
+    if focus is None:
+        raise ExperimentError(f"{experiment.name}: no Focus could be resolved — "
+                              f"is the data file readable?")
+    if experiment.materialize_focuses():
+        focus = experiment.focus(focus.name)
+    design = experiment.design()
+    stale = fm.stale_reasons(focus, design)
+    if stale:
+        raise BlockedFocusError(focus, stale)
+    data, _factors = experiment.load(focus=focus)
+    _raise_if_empty(focus, design, data)
+    shape = fm.focus_shape(focus, data)
+    omit_plots, omit_analyses = experiment.omitted("plots"), experiment.omitted("analyses")
+
+    outs = experiment.outputs(focus).ensure()
+    result = AnalysisResult(
+        input_file=experiment.data_file(), output_dir=outs.root,
+        factors=list(focus.varying_factors), individual_data=data,
+        lifetables=lifetable.compute_lifetables(data),
+        summary=pd.DataFrame(), median_surv=pd.DataFrame(), mean_surv=pd.DataFrame(),
+        pairwise_lr=pd.DataFrame(), omnibus_lr={}, hazard_ratios=pd.DataFrame(),
+        assume_censored=experiment.type.resolve_assume_censored(experiment.config),
+    )
+    result.experiment, result.experiment_type = experiment, experiment.type
+    result.focus, result.focus_shape, result.design, result.outputs = focus, shape, design, outs
+    ## Only what the ticked figures draw from: the forest needs the hazard
+    ## ratios, and no other figure needs a statistic.
+    wanted = {need for p in experiment.type.plot_set_for(shape)
+              if p.id not in omit_plots for need in p.needs} - omit_analyses
+    if "hazard_ratios" in wanted and shape.admits(fm.COMPARISON)[0]:
+        result.hazard_ratios = statistics.pairwise_hazard_ratios(data)
+
+    figures = _draw_plot_set(
+        result, omit_plots, omit_analyses,
+        not_applicable=lambda label, reason: emit(f"  Not applicable — {label}: {reason}"),
+        left_out=lambda _id, label, reason=UNTICKED: emit(f"  Left out — {label}: {reason}"),
+        emit=emit, keep=True)
+    emit(f"{len(figures)} figure(s) saved to {outs.plots_dir}")
+    return figures
+
+
+def _raise_if_empty(focus, design, individual_data) -> None:
+    """Block a Focus whose cells the exclusions emptied, or that selects no
+    one — before anything is written."""
+    from .domain import focus as fm
+    from .domain.experiment import BlockedFocusError
+
+    empty = fm.empty_reasons(focus, design, fm.populated_labels(individual_data))
+    if empty:
+        raise BlockedFocusError(focus, empty)
+    if not len(individual_data):
+        raise BlockedFocusError(focus, [fm.BlockReason(
+            fm.EMPTY, f"Focus {focus.name!r} selects no individuals", "edit the Focus")])
+
+
+def _draw_plot_set(result: AnalysisResult, omit_plots, omit_analyses, *,
+                   not_applicable, left_out, emit, keep: bool = False) -> list:
+    """Draw and save the figures of the run's Plot Set that the selection keeps.
+
+    Shared by a full run and by Generate plots, so the two cannot disagree
+    about which figures a Focus gets or why one is missing. With *keep* the
+    figures stay open and come back as ``(title, figure)`` pairs; otherwise
+    each is closed once saved.
+    """
+    import matplotlib.pyplot as mpl_plt
+
+    from . import plot_registry
+    from .domain import focus as fm
+    from .experiment_types.base import ALL_ANALYSIS_DEFS
+
+    labels = {a.id: a.label for a in ALL_ANALYSIS_DEFS}
+    shape = result.focus_shape
+    plot_defs = result.experiment_type.plot_set_for(shape)
+    drawn: list = []
+    emit(f"Rendering {sum(p.id not in omit_plots for p in plot_defs)} figure(s)…")
+    for plot_def in plot_defs:
+        if plot_def.id in omit_plots:
+            left_out(plot_def.id, plot_def.label)
+            continue
+        missing = [labels.get(a, a) for a in plot_def.needs if a in omit_analyses]
+        if missing:
+            left_out(plot_def.id, plot_def.label,
+                     f"draws from {', '.join(missing)}, which is unticked")
+            continue
+        ## The Plot Set holds only figures relevant to this Focus; a relevant
+        ## one the populated cells cannot support is said, not skipped.
+        ok, reason = shape.admits(plot_def.requires)
+        if not ok:
+            not_applicable(plot_def.label, reason)
+            continue
+        try:
+            fig = plot_registry.build(plot_def.id, result)
+        except fm.NotApplicable as exc:
+            not_applicable(plot_def.label, exc.reason)
+            continue
+        except Exception as exc:  # noqa: BLE001 - one bad figure never kills a run
+            not_applicable(plot_def.label, f"could not be drawn ({exc})")
+            continue
+        if fig is None:
+            not_applicable(plot_def.label, "the data cannot support it")
+            continue
+        path = result.outputs.plot(plot_registry.get(plot_def.id).filename)
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        result.figure_paths[plot_def.id] = path
+        if keep:
+            drawn.append((f"{plot_def.label} — {result.focus.name}", fig))
+        else:
+            mpl_plt.close(fig)
+    return drawn
+
+
+def _drop_stale_outputs(result: AnalysisResult) -> None:
+    """Delete what an earlier run of this Focus wrote and this one did not —
+    a figure or table since left out reads as current in the folder.
+
+    Only names this pipeline writes are touched (a Plot Set figure, a
+    comparison table, a factorial model's tables), never a file someone else
+    put there.
+    """
+    from . import plot_registry
+
+    def _unlink(path: Path) -> None:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:                 # open in a viewer — stale, not fatal
+            pass
+
+    outs = result.outputs
+    for plot_id in plot_registry.available():
+        if plot_id not in result.figure_paths:
+            _unlink(outs.plot(plot_registry.get(plot_id).filename))
+    for stem, frame in (("logrank_pairwise", result.pairwise_lr),
+                        ("gehan_wilcoxon_pairwise", result.pairwise_gw),
+                        ("hazard_ratios", result.hazard_ratios)):
+        if frame is None or not len(frame):
+            _unlink(outs.stats(stem))
+    n_models = len(result.cox_analyses or [])
+    for path in outs.stats_dir.glob(f"factorial_*_{outs.slug}.csv"):
+        index = path.stem.split("_")[1]
+        if index.isdigit() and int(index) > n_models:
+            _unlink(path)
 
 
 def _jsonable(value):
@@ -530,6 +706,7 @@ def _write_run_summary(result: AnalysisResult, output_dir: Path) -> None:
         "defined_plots": {k: str(v.name) for k, v in
                           getattr(result, "defined_plot_paths", {}).items()},
         "not_applicable": list(result.not_applicable or []),
+        "left_out": list(getattr(result, "left_out", None) or []),
         "omnibus_lr": _jsonable(result.omnibus_lr),
         # Enough of each factorial model to rebuild its report section from
         # disk; the coefficient tables sit beside it as CSVs.

@@ -91,6 +91,11 @@ class SavedAnalysis:
                 if isinstance(i, dict)]
 
     @property
+    def left_out(self) -> list[dict]:
+        return [dict(i) for i in self.payload.get("left_out") or []
+                if isinstance(i, dict)]
+
+    @property
     def headline_plot_id(self) -> str | None:
         return self.focus_record.get("headline")
 

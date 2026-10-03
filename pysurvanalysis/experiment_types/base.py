@@ -9,6 +9,10 @@ designs, so which analyses and figures apply is decided by the active
 **Focus Shape** (ADR-0011). The 2×2 figures, for instance, are not a type's
 Plot Set — they are added to any run whose Focus is a populated 2×2.
 
+A type also declares its **Analysis Set** — the optional analyses a run may
+perform — and a run leaves out whichever of either set the config's ``omit:``
+block names (ADR-0012).
+
 A type declares its Plot Set as plain ids; :mod:`pysurvanalysis.plot_registry`
 maps those ids to builders, so this module stays free of matplotlib and can be
 imported by config validation and tests without the analysis stack.
@@ -34,6 +38,52 @@ class PlotDef:
     label: str
     caption: str = ""
     requires: str | None = None
+    #: Analysis ids the figure draws from. Leaving one out of a run leaves
+    #: the figure out too — a forest with no hazard ratios has nothing to plot.
+    needs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class AnalysisDef:
+    """One entry in an **Analysis Set**: an optional analysis a run performs.
+
+    The survivorship core — lifetables, summaries, median and mean survival —
+    is not in it: every figure and every report section stands on that core,
+    so it always runs. ``requires`` works as it does for a :class:`PlotDef`.
+    """
+
+    id: str
+    label: str
+    caption: str = ""
+    requires: str | None = None
+
+
+#: Every optional analysis, in report order. The ids are what the config's
+#: ``omit: analyses:`` names.
+ALL_ANALYSIS_DEFS: tuple[AnalysisDef, ...] = (
+    AnalysisDef("logrank_pairwise", "Log-rank pairwise",
+                "Mantel-Cox log-rank test for every treatment pair.",
+                requires="comparison"),
+    AnalysisDef("logrank_omnibus", "Log-rank omnibus",
+                "K-sample log-rank test across all treatments.",
+                requires="comparison"),
+    AnalysisDef("gehan_wilcoxon", "Gehan-Wilcoxon pairwise",
+                "Wilcoxon-weighted log-rank for every pair — weights early "
+                "deaths more heavily.",
+                requires="comparison"),
+    AnalysisDef("hazard_ratios", "Pairwise hazard ratios",
+                "A Cox hazard ratio with 95% CI for every pair; the "
+                "hazard-ratio forest draws these.",
+                requires="comparison"),
+    AnalysisDef("parametric_aft", "Parametric AFT models",
+                "Weibull, log-normal and log-logistic accelerated-failure-time "
+                "fits."),
+    AnalysisDef("interaction", "Interaction analyses",
+                "The Factorial Battery: the Cox factorial model (main effects "
+                "vs pairwise interactions, LR test, Schoenfeld PH check) and "
+                "its RMST companion, relative to the Focus's Reference Levels.",
+                requires="factorial_model"),
+)
 
 
 @dataclass(frozen=True)
@@ -61,6 +111,10 @@ class ExperimentType:
     #: The base Plot Set — what every Focus gets. Shape-gated figures are
     #: added by :meth:`plot_set_for`.
     plot_set: tuple[PlotDef, ...] = ()
+
+    #: The optional analyses a run may perform; :meth:`analysis_set_for`
+    #: keeps those relevant to a Focus.
+    analysis_set: tuple[AnalysisDef, ...] = ALL_ANALYSIS_DEFS
 
     #: The one figure that states a Focus's primary result when its shape
     #: names no other; leads the report and is the Plot Editor's default.
@@ -142,6 +196,21 @@ class ExperimentType:
                 out.append(plot)
         return tuple(out)
 
+    def analysis_set_for(self, shape=None) -> tuple[AnalysisDef, ...]:
+        """The optional analyses a run under a Focus of *shape* is offered:
+        those whose Requirement the Focus's definition makes relevant. A
+        one-factor Focus is not offered the interaction analyses at all."""
+        if shape is None:
+            return tuple(self.analysis_set)
+        return tuple(a for a in self.analysis_set if shape.relevant(a.requires)[0])
+
+    def plots_not_offered(self, shape) -> tuple[PlotDef, ...]:
+        """Figures this type draws that a Focus of *shape* is not offered —
+        what the Hub names in its quiet "not offered" line."""
+        offered = self.plot_set_for(shape)
+        return tuple(p for p in (*self.plot_set, *SHAPE_GATED_PLOT_DEFS)
+                     if p not in offered)
+
     def headline_for(self, shape=None) -> str | None:
         """The Headline Figure for a Focus of *shape*: the faceted KM when the
         Focus crosses factors and the data can draw it, the type's own
@@ -203,7 +272,7 @@ ALL_PLOT_DEFS: tuple[PlotDef, ...] = (
             "Distribution of individual lifespans by treatment."),
     PlotDef("hazard_ratio_forest", "Hazard-ratio forest",
             "Pairwise hazard ratios with 95% confidence intervals.",
-            requires="comparison"),
+            requires="comparison", needs=("hazard_ratios",)),
     PlotDef("km_faceted", "Faceted Kaplan-Meier",
             "One panel per level of the first varying factor, curves coloured "
             "by the others.",

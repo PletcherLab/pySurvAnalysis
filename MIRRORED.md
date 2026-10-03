@@ -30,7 +30,7 @@ mechanical rather than archaeological.
 | `pysurvanalysis/ui/zoom.py` | `pytrackinganalysis/ui/zoom.py` | vendored earlier; has since grown locally |
 | `pysurvanalysis/script_editor/{canvas,inspector,palette,window}.py` | same | vendored earlier; `window.py` is now level-aware, `palette.py` rebuildable |
 | `pysurvanalysis/apps/hub.py` | `pytrackinganalysis/apps/hub.py` | **structure ported, body rewritten** — same tile strip and panel model, survival domain, type-contributed Analyze cards; now also the cached recursive scan, batch table with keys/status/red rows/context menu, card dimming, always-lit Batch and Project tiles, tab suppression, stream logging, and the Create/Load ∥ Experiments card pair with a button per state (ADR-0010). The strip is two-tier, converging with upstream's own `_EXPERIMENT_SUBTILES` redesign: a wide Batch/Project/Experiment rank (tile categories matched to upstream's by name — LOAD/NEUTRAL/QC), with QC/Analyze/Plots/Scripts/AI as compact sub-tiles inside the Experiment tile's panel, and the five sub-panels at a narrower width than the container panels |
-| `pysurvanalysis/apps/plot_editor.py` | `pytrackinganalysis/apps/plot_editor.py` | **structure ported** — same Spec/Style editing model, experiment-level (ADR-0005); `ColorButton` (alpha-aware, "none" = transparent) and the wheel-transparent `_NoWheelSpin`/`_NoWheelCombo`/`_NoWheelFontCombo` are **near-verbatim**. The style form is grouped into four Cards rather than one QGroupBox column, and the preview renders at widget resolution × device pixel ratio (upstream's is fixed-DPI) |
+| `pysurvanalysis/apps/plot_editor.py` | `pytrackinganalysis/apps/plot_editor.py` | **structure ported** — same Spec/Style editing model, experiment-level (ADR-0005); `ColorButton` (alpha-aware, "none" = transparent; diverges in `_pick`, which opens an empty swatch opaque and parents the dialog to the window — upstream's alpha-0 start turned every pick into "none", and its swatch stylesheet bled onto the dialog's buttons) and the wheel-transparent `_NoWheelSpin`/`_NoWheelCombo`/`_NoWheelFontCombo` are **near-verbatim**. The style form is grouped into four Cards rather than one QGroupBox column, and the preview renders at widget resolution × device pixel ratio (upstream's is fixed-DPI) |
 | `pysurvanalysis/pubfigures.py` | `pytrackinganalysis/pubfigures.py` | **reimplemented** on the same Spec/Style contract for survivorship curves + the At-Risk Band (ADR-0004). `resolve_font_family` is **verbatim**; the per-element font sizes, `text_color`, `line_pt`, `strip_style`/`strip_bg`/`panel_bg` and the outlined-point treatment (`fill` = series, `color` = edge, `stroke` = weight) follow upstream's `PlotStyle`/`_theme_for` field for field. `step_expand` and `point_data` are local — a step curve has knots where a jittered dot plot has none. Now also `ProjectSpecs`/`load_project_specs`/`save_project_specs` — upstream's single project-root `plot_specs.yaml`, adopted here (ADR-0005 amendment) with `specs_root` falling back to a standalone experiment's own directory, plus a `PlotKind` table dispatching the whole Plot Set (series / forest / distribution / interaction) where upstream has one figure shape. `render_all` follows upstream's curated-only rule, but stricter: an empty `plots:` renders nothing here, where upstream falls back to every plot type |
 | `pysurvanalysis/script_editor/project_actions.py` | `pytrackinganalysis/script_editor/project_actions.py` | **reimplemented**; no pooling actions, adds the type-registry hard error |
 | `pysurvanalysis/domain/batch.py` | `pytrackinganalysis/batch.py` | **reimplemented** on the same contract — structural Batch, lazy `batch.yaml`, `resolve_designated_script` central→own→built-in, no implicit fallback (ADR-0007); now also the recursive walk, `project_kind`, relative-path keys, scoped `run()` (ADR-0009 ← upstream ADR-0011) |
@@ -74,9 +74,17 @@ framing, which ADR-0001 forbids.
   statistics, no mixed model (ADR-0001).
 * **Standalone experiments load without a Project** (ADR-0003), inverting the
   sister app's ADR-0008.
-* **Experiment Types contribute Hub buttons and script actions** (ADR-0002).
-  This idea originates here; upstream has a fixed registry because it has one
-  Experiment Type. It is the first thing to backport.
+* **Experiment Types contribute script actions** (ADR-0002), and an Analysis
+  Set and Plot Set to the Hub. This idea originates here; upstream has a
+  fixed registry because it has one Experiment Type. It is the first thing to
+  backport.
+* **The Analyze and Plots panels are checkboxes over one button** (ADR-0012),
+  where upstream has a button per action. The ticks are an `omit:` block in
+  the experiment's config, so scripts and Batch Runs leave out the same
+  things, and every run states what it left out.
+* **Double-clicking a member lands on the Experiment panel**, not Analyze as
+  ported in the 2026-08-24 pass: every experiment-level surface acts on the
+  Active Focus, and the Experiment panel is where it is chosen or created.
 * **Styles are per-figure, not a named shared library.** Upstream's styles
   are named and reusable, with one `default_style` many plots reference; here
   each saved figure carries a style under its own name, and reuse is the

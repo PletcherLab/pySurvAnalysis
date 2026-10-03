@@ -437,3 +437,33 @@ def test_type_problems_for_enforces_the_type_and_nothing_else(project):
     wrong = dict(same, experiment_type="fecundity")
     problems = project.type_problems_for(wrong, "wrong.yaml")
     assert len(problems) == 1 and "Unknown experiment_type" in problems[0]
+
+
+def test_omit_names_what_runs_leave_out_and_is_validated():
+    """Stored as what is left OUT, so an untouched config runs everything and
+    an analysis added later is included until someone unticks it."""
+    assert cfgmod.omitted({}, "analyses") == frozenset()
+    assert cfgmod.validate_omit_block({"omit": {"analyses": ["parametric_aft"],
+                                                "plots": ["log_log"]}}) == []
+    problems = cfgmod.validate_omit_block(
+        {"omit": {"analyses": ["parametric"], "tables": ["x"]}})
+    ## A misspelt id would leave nothing out — say so rather than run it.
+    assert any("'parametric'" in p for p in problems)
+    assert any("omit.tables" in p for p in problems)
+
+
+def test_a_member_overrides_omit_one_kind_at_a_time():
+    merged = cfgmod.merge_defaults({"omit": {"plots": ["log_log"]}},
+                                   {"omit": {"analyses": ["parametric_aft"]}})
+    assert cfgmod.omitted(merged, "analyses") == {"parametric_aft"}
+    assert cfgmod.omitted(merged, "plots") == {"log_log"}
+
+
+def test_set_included_writes_omit_and_keeps_an_untouched_config_clean(tmp_path):
+    experiment = SurvivalExperiment(make_experiment_dir(tmp_path / "om"))
+    experiment.set_included("analyses", "parametric_aft", False)
+    assert cfgmod.load_config(experiment.directory)["omit"] == {
+        "analyses": ["parametric_aft"]}
+    assert experiment.omitted("analyses") == {"parametric_aft"}
+    experiment.set_included("analyses", "parametric_aft", True)
+    assert "omit" not in cfgmod.load_config(experiment.directory)

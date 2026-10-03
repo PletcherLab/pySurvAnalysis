@@ -104,8 +104,18 @@ class ColorButton(QPushButton):
             f"border-radius: 3px; }}")
 
     def _pick(self) -> None:
+        ## A swatch with no colour opens opaque: the dialog carries its alpha
+        ## through a pick, so starting from auto/"none" (alpha 0) turned every
+        ## colour chosen into "none". Transparency stays one slider away.
+        initial = self._qcolor()
+        if self._color in ("", "none"):
+            initial.setAlpha(255)
+        ## Parented to the window, not this button: a widget's stylesheet
+        ## cascades to its children, and the swatch's QPushButton rule
+        ## repainted the dialog's OK/Cancel in the swatch colour (7pt grey on
+        ## an auto swatch — all but invisible).
         chosen = QColorDialog.getColor(
-            self._qcolor(), self, "Pick colour (alpha 0 = transparent)",
+            initial, self.window(), "Pick colour (alpha 0 = transparent)",
             QColorDialog.ColorDialogOption.ShowAlphaChannel)
         if not chosen.isValid():
             return
