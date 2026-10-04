@@ -181,3 +181,8 @@ def apply_theme(app: QApplication, mode: ThemeMode = "auto") -> None:
     _current_mode = mode
     _resolved_mode = _resolve_auto() if mode == "auto" else mode  # type: ignore[assignment]
     qdarktheme.setup_theme(mode, additional_qss=_additional_qss())
+    ## Here because every app sets its theme on start: the one place that
+    ## reaches the Hub, the QC viewer and the Plot Editor alike.
+    from .tooltips import install_tooltip_wrapping
+
+    install_tooltip_wrapping(app)
