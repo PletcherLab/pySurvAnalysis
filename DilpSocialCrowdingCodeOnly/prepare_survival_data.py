@@ -19,7 +19,9 @@ import pandas as pd
 
 # ── 1. Load the RawData sheet ────────────────────────────────────────────────
 #INPUT_FILE = "mDilp235bx_Crowding_donor_20v40.xlsx"
-INPUT_FILE = "wCS_mDilp235bx_Crowding_donor_20v40.xlsx"
+#INPUT_FILE = "wCS_mDilp235bx_Crowding_donor_20v40.xlsx"
+#INPUT_FILE = "wCS_mDilp235bx_Crowding_donor_20v40_151015.xlsx"
+INPUT_FILE = "mDilp235bx_Crowding_donor_20v40_M.xlsx"
 FLIES_PER_VIAL = 2
 
 df = pd.read_excel(INPUT_FILE, sheet_name="RawData")
