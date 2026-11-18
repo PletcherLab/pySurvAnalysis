@@ -22,6 +22,9 @@ The member reads a file outside its folder, and its folder holds a data file too
 **`<member> is a duplicate: it reads the same data file as <other> (…) — only <other> is analysed`**
 Two members of one Project read the same file. Only the first in name order runs, and the other is listed in red with status `duplicate`. Point it at a different file, or remove it.
 
+**`<name>: <folder>/data cannot be listed (permissions?) — the data file in it cannot be found, and a copy at the directory root is never read in its place.`**
+The member's `data/` exists, but the app is not allowed to list it. It will not fall back to a file at the folder root, which is often an older copy. Fix the folder's permissions. The member shows as `blocked: unreadable` until then.
+
 **`No input data file found in <name> (looked in data/ and the directory root).`**
 Shown by *Validate YAMLs* and in the Project Report when a member has a config but no data. Add the data file.
 

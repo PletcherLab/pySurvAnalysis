@@ -12,7 +12,7 @@ Each Experiment Directory has exactly one data file. The app looks for it in thi
 2. Otherwise, any `.xlsx`, `.csv` or `.tsv` in the `data/` subdirectory.
 3. Otherwise, any such file at the directory root.
 
-The search stops at the first place that holds anything. If that place holds **more than one** candidate, the app refuses to guess and the member is *Blocked* until you name one with `data_file:` (the **Set data file…** button in the Project panel's *Experiment configs…* dialog writes this key for you). Excel lock files (`~$…`) and `remove_chambers.csv` are never treated as data.
+The search stops at the first place that holds anything. A `data/` folder that exists but cannot be listed (permissions) stops it too: the member is blocked as `unreadable`, and a file at the root is never read in its place. If that place holds **more than one** candidate, the app refuses to guess and the member is *Blocked* until you name one with `data_file:` (the **Set data file…** button in the Project panel's *Experiment configs…* dialog writes this key for you). Excel lock files (`~$…`) and `remove_chambers.csv` are never treated as data.
 
 ## The DLife workbook (.xlsx)
 

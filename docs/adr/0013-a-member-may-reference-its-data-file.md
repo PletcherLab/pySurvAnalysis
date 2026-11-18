@@ -186,3 +186,26 @@ Project. Only the workbook is outside, and it is only read.
 - **Two new blocked statuses, `duplicate` and `conflict`, with no fix
   button.** The fix for each is deciding which member, or which file, is the
   experiment.
+
+## Amended 2026-11-17: an unreadable `data/` is refused, not searched past
+
+Routing the loader through the resolver made both of them fall through an
+unreadable `data/` to the directory root, as the classifier always had (the
+loader used to raise `PermissionError` there instead). Agreeing was right;
+agreeing on *reading* was not. What an unreadable `data/` holds is unknown,
+and a file at the root is often the older copy it replaced. So a `data/` that
+exists but cannot be listed is now a problem of the location itself:
+
+- the classifier reports the member as `unreadable`, naming the folder, and
+  so do `members_in`, the preflight and Validate YAMLs;
+- the loader raises `DataLocationError` naming it, before `analysis/` or
+  `qc/` is created;
+- `validate()`, `upgrade.plan` and the QC viewer's bare-folder load say the
+  same thing instead of "no data file found".
+
+It applies with or without the key. A member referencing a file outside is
+refused too, since whether its folder holds a data file of its own cannot be
+checked. An empty, readable `data/` still falls through to the root, as it
+always has. This is the one change here to members without `data_file:`:
+an unreadable `data/` with a file at the root used to be usable to the
+classifier and an exception to the loader, and is now blocked for both.

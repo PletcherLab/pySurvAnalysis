@@ -311,7 +311,9 @@ class SurvivalExperiment:
         A ``data_file:`` key in the config wins; otherwise ``data/`` is searched
         before the directory root. Exactly one candidate must survive — an
         ambiguous directory is an error naming what it found, never a silent
-        pick. A ``data_file:`` outside the directory is a Referenced Data File
+        pick. A ``data/`` that exists but cannot be listed is refused, naming
+        it, rather than searched past to an older copy at the root. A
+        ``data_file:`` outside the directory is a Referenced Data File
         (ADR-0013): returned resolved, and refused with a
         :class:`~pysurvanalysis.domain.layout.DataLocationError` — naming the
         key, the value as written and the resolved path — when it is missing,
@@ -731,9 +733,10 @@ class SurvivalExperiment:
         problems = list(cfgmod.validate_config(self.config))
         if not self.has_data():
             location = self.data_location()
-            if location.external and location.problem:
-                ## It never looked in data/: say what it did look at.
-                problems.append(f"{location.problem}.")
+            if location.refusal:
+                ## Say what it did look at — a referenced file, or a data/
+                ## it could not list — not where it never looked.
+                problems.append(f"{location.refusal}.")
             else:
                 problems.append(
                     f"No input data file found in {self.directory.name} "
@@ -837,9 +840,9 @@ class SurvivalExperiment:
                                   f"the data file readable?")
         if self.materialize_focuses():
             focus = self.focus(focus.name)
-        location = self.data_location()
-        if location.external and location.problem:
-            ## A Referenced Data File the loader refuses is refused before
+        if self.data_location().refusal:
+            ## A location the loader refuses on sight — a Referenced Data File
+            ## it cannot read, a data/ it cannot list — is refused before
             ## anything is created (ADR-0013). Every other case is as it was.
             self.data_file()
         self.ensure_dirs()

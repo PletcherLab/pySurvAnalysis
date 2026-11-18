@@ -152,10 +152,25 @@ def data_candidates(directory: Path) -> tuple[Path, list[Path]]:
     """
     directory = Path(directory)
     for base in (directory / "data", directory):
+        if base != directory and _unlistable(base):
+            ## Unknown is not empty: what data/ holds cannot be seen, and an
+            ## old copy at the root is exactly what reading on would find.
+            return base, []
         found = _candidates(base)
         if found:
             return base, found
     return directory, []
+
+
+def _unlistable(folder: Path) -> bool:
+    """*folder* exists as a directory but cannot be listed."""
+    return os.path.isdir(folder) and not _readable(folder)
+
+
+def _unlistable_problem(folder: Path) -> str:
+    return (f"{folder} cannot be listed (permissions?) — the data file in it "
+            f"cannot be found, and a copy at the directory root is never read "
+            f"in its place")
 
 
 def data_file_value(directory: Path | str, name: str) -> str:
@@ -210,6 +225,8 @@ _MISSING = "missing"
 _NOT_A_FILE = "not a file"
 _NOT_A_PATH = "not a path"
 _CONFLICT = "conflict"
+#: The member's own ``data/`` exists but cannot be listed.
+_UNLISTABLE = "unlistable"
 
 
 @dataclass(frozen=True)
@@ -252,6 +269,16 @@ class DataLocation:
         if self.path is None:
             return None
         return os.path.normcase(os.path.realpath(self.path))
+
+    @property
+    def refusal(self) -> str:
+        """Why the loader refuses this location, in words naming what it
+        looked at — or ``""``. Empty also for a ``data_file:`` inside the
+        member folder that does not exist: that keeps the loader's older
+        message, word for word."""
+        if self.referenced and not self.external:
+            return ""
+        return self.problem
 
     def provenance(self) -> dict | None:
         """``{"written", "resolved"}`` for a readable Referenced Data File,
@@ -345,13 +372,17 @@ def data_location(directory: Path | str, *, config: dict | None = None) -> DataL
     """Which file the member in *directory* reads.
 
     Without ``data_file:`` this is the loader's search (:func:`data_candidates`),
-    and nothing more is checked. With it, the value is resolved against
+    and nothing more is checked — except that a ``data/`` which exists but
+    cannot be listed is a problem, never a reason to search the root: what it
+    holds is unknown, and an old copy at the root is exactly what reading on
+    would find. With ``data_file:``, the value is resolved against
     *directory*:
 
     * A file **inside** the member folder is ``data_file:`` as it has always
       been: it must exist, and other data files beside it are fine.
     * A file **outside** is a Referenced Data File, checked in this order for
-      what makes the loader refuse it: a data file of the member's own beside
+      what makes the loader refuse it: a local ``data/`` that cannot be listed
+      (so no conflict can be ruled out); a data file of the member's own beside
       the key ("which is the experiment?" — an empty ``data/`` holds none);
       a file that does not exist; a folder where a file belongs. Each problem
       names the key, the value as written and the resolved path.
@@ -361,6 +392,9 @@ def data_location(directory: Path | str, *, config: dict | None = None) -> DataL
     directory = Path(directory)
     value = configured_data_file(directory, config)
     if value is None:
+        if _unlistable(directory / "data"):
+            return DataLocation(None, kind=_UNLISTABLE, base=directory / "data",
+                                problem=_unlistable_problem(directory / "data"))
         base, found = data_candidates(directory)
         return DataLocation(found[0] if len(found) == 1 else None,
                             base=base, candidates=tuple(found))
@@ -386,6 +420,12 @@ def data_location(directory: Path | str, *, config: dict | None = None) -> DataL
     def refused(kind: str, problem: str) -> DataLocation:
         return DataLocation(Path(resolved), value, True, problem, kind)
 
+    if _unlistable(directory / "data"):
+        return refused(
+            _UNLISTABLE,
+            f"{where}, but {directory / 'data'} cannot be listed (permissions?) "
+            f"— whether {directory.name} also holds a data file of its own "
+            f"cannot be checked")
     own = _own_data_files(directory)
     if own:
         return refused(
@@ -403,17 +443,16 @@ def data_location(directory: Path | str, *, config: dict | None = None) -> DataL
 def require_data_location(directory: Path | str, *, config: dict | None = None,
                           name: str | None = None) -> DataLocation:
     """:func:`data_location`, raising :class:`DataLocationError` when the
-    member names a file the loader cannot read. The loader's entry point; a
-    member that names no file is returned as found, for the loader's own
-    messages."""
+    member names a file the loader cannot read, or its ``data/`` cannot be
+    listed. The loader's entry point; any other member that names no file is
+    returned as found, for the loader's own messages."""
     location = data_location(directory, config=config)
-    if location.referenced and location.problem:
-        label = name or Path(directory).name
-        if location.external or location.kind == _NOT_A_PATH:
-            raise DataLocationError(f"{label}: {location.problem} (set in "
-                                    f"{cfgmod.config_path(directory)}).")
-        raise DataLocationError(f"{label}: {location.problem}.")
-    return location
+    if not location.problem:
+        return location
+    label = name or Path(directory).name
+    source = (f" (set in {cfgmod.config_path(directory)})"
+              if location.external or location.kind == _NOT_A_PATH else "")
+    raise DataLocationError(f"{label}: {location.problem}{source}.")
 
 
 class DataLocations:
@@ -489,6 +528,9 @@ def _classify(directory: Path, location: DataLocation) -> MemberLayout:
         ## A blocked member, named with the file and line — never an
         ## exception out of the walk, which would lose every other Project.
         return _blocked(BAD_CONFIG, str(exc))
+    if location.kind == _UNLISTABLE:
+        ## Blocked, never searched past: the loader refuses it the same way.
+        return _blocked(UNREADABLE, location.problem)
 
     ## An explicit `data_file:` settles the question before any search — it is
     ## exactly how the loader resolves an otherwise-ambiguous directory, and

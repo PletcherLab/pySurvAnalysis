@@ -532,7 +532,13 @@ class QcViewerWindow(QMainWindow):
         never a silent pick — when it finds several files."""
         from ..domain.layout import data_location
 
-        found = list(data_location(self._project_dir).candidates)
+        location = data_location(self._project_dir)
+        if location.problem:
+            ## A data/ that cannot be listed: refused, as the loader refuses
+            ## it, rather than read past to an older copy at the root.
+            QMessageBox.warning(self, "Cannot read data/", location.problem)
+            return None
+        found = list(location.candidates)
         if not found:
             QMessageBox.warning(
                 self, "No data",

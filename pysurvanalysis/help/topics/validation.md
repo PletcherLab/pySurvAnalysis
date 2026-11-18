@@ -84,6 +84,7 @@ A subdirectory of a Project that a run cannot use is a **Blocked Member**. It is
 | `duplicate — reads the same data file as <member> (…) — only <member> is analysed` | Two members read one file. Point one of them at a different file, or remove it. |
 | `ambiguous — N data files in data/ (…) — which is the experiment?` | **Set data file…** in *Experiment configs…* (or the preflight) writes `data_file:` for you. |
 | `unreadable — cannot be listed (permissions?)` | Fix the folder's permissions. |
+| `unreadable — <folder>/data cannot be listed (permissions?) — the data file in it cannot be found, and a copy at the directory root is never read in its place` | Fix `data/`'s permissions. The app will not fall back to a file at the folder root, which is often an older copy. |
 | `bad config — survival_config.yaml, line N: not valid YAML — …` | Fix the YAML at that line (see *YAML syntax errors* below). |
 
 When loading, the same conditions appear as `<name>: N data files in data (…). Name one with data_file: in survival_config.yaml.` and `<name>: no .xlsx/.csv/.tsv found in … or its data/ subdirectory.`

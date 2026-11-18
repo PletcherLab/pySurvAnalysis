@@ -120,7 +120,13 @@ def plan(directory: str | Path, type_key: str | None = None) -> UpgradePlan:
             f"{candidates[0].name}. Edit `data_file:` to choose another."
         )
     else:
+        from . import layout
+
+        ## A data/ that cannot be listed is said as such: the config would be
+        ## written, but the member stays blocked until it can be read.
+        problem = layout.data_location(d).problem
         p.warnings.append(
+            f"{problem}." if problem else
             "No .xlsx/.csv/.tsv found — the config will be written with type "
             "defaults only, and you will need to add the data file."
         )

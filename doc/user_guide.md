@@ -603,7 +603,7 @@ Each Experiment Directory has exactly one data file. The app looks for it in thi
 2. Otherwise, any `.xlsx`, `.csv` or `.tsv` in the `data/` subdirectory.
 3. Otherwise, any such file at the directory root.
 
-The search stops at the first place that holds anything. If that place holds **more than one** candidate, the app refuses to guess and the member is *Blocked* until you name one with `data_file:` (the **Set data file…** button in the Project panel's *Experiment configs…* dialog writes this key for you). Excel lock files (`~$…`) and `remove_chambers.csv` are never treated as data.
+The search stops at the first place that holds anything. A `data/` folder that exists but cannot be listed (permissions) stops it too: the member is blocked as `unreadable`, and a file at the root is never read in its place. If that place holds **more than one** candidate, the app refuses to guess and the member is *Blocked* until you name one with `data_file:` (the **Set data file…** button in the Project panel's *Experiment configs…* dialog writes this key for you). Excel lock files (`~$…`) and `remove_chambers.csv` are never treated as data.
 
 ### The DLife workbook (.xlsx)
 
@@ -1485,6 +1485,7 @@ A subdirectory of a Project that a run cannot use is a **Blocked Member**. It is
 | `duplicate — reads the same data file as <member> (…) — only <member> is analysed` | Two members read one file. Point one of them at a different file, or remove it. |
 | `ambiguous — N data files in data/ (…) — which is the experiment?` | **Set data file…** in *Experiment configs…* (or the preflight) writes `data_file:` for you. |
 | `unreadable — cannot be listed (permissions?)` | Fix the folder's permissions. |
+| `unreadable — <folder>/data cannot be listed (permissions?) — the data file in it cannot be found, and a copy at the directory root is never read in its place` | Fix `data/`'s permissions. The app will not fall back to a file at the folder root, which is often an older copy. |
 | `bad config — survival_config.yaml, line N: not valid YAML — …` | Fix the YAML at that line (see *YAML syntax errors* below). |
 
 When loading, the same conditions appear as `<name>: N data files in data (…). Name one with data_file: in survival_config.yaml.` and `<name>: no .xlsx/.csv/.tsv found in … or its data/ subdirectory.`
@@ -1961,7 +1962,7 @@ Projects with anything blocked are shown in red and expanded. Hover over a child
 - **no data**: a config with no `.xlsx`/`.csv`/`.tsv` in `data/` or the folder root, or a `data_file:` naming a file that does not exist (or a folder). Supply the data, or correct the path, outside the app.
 - **conflict**: the member's `data_file:` names a file outside its folder, and the folder also holds a data file of its own. Decide which is the experiment outside the app.
 - **duplicate**: an earlier member (in name order) already reads the same data file, so only that one runs. Decide which member should read it outside the app.
-- **unreadable**: the folder cannot be listed (permissions). Fix it outside the app.
+- **unreadable**: the folder, or its `data/`, cannot be listed (permissions). Fix it outside the app. A `data/` that cannot be listed is never searched past: a file at the folder root is not read in its place.
 - **bad config**: the member's `survival_config.yaml` is not valid YAML; the detail names the file and line (`survival_config.yaml, line N: not valid YAML — …`). Fix the file in an editor; the rest of the Project runs.
 - **focus blocked**: a Focus names a factor or level the data file no longer contains (**stale**, for example after a level was renamed in the Design sheet), or a cell it keeps has no individuals left after the active Exclusion Group (**empty**). Finding these means reading each usable member's Design sheet. The member's other Focuses still run.
 
@@ -6372,6 +6373,9 @@ The member reads a file outside its folder, and its folder holds a data file too
 
 **`<member> is a duplicate: it reads the same data file as <other> (…) — only <other> is analysed`**
 Two members of one Project read the same file. Only the first in name order runs, and the other is listed in red with status `duplicate`. Point it at a different file, or remove it.
+
+**`<name>: <folder>/data cannot be listed (permissions?) — the data file in it cannot be found, and a copy at the directory root is never read in its place.`**
+The member's `data/` exists, but the app is not allowed to list it. It will not fall back to a file at the folder root, which is often an older copy. Fix the folder's permissions. The member shows as `blocked: unreadable` until then.
 
 **`No input data file found in <name> (looked in data/ and the directory root).`**
 Shown by *Validate YAMLs* and in the Project Report when a member has a config but no data. Add the data file.

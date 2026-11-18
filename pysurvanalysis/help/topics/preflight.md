@@ -29,7 +29,7 @@ Projects with anything blocked are shown in red and expanded. Hover over a child
 - **no data**: a config with no `.xlsx`/`.csv`/`.tsv` in `data/` or the folder root, or a `data_file:` naming a file that does not exist (or a folder). Supply the data, or correct the path, outside the app.
 - **conflict**: the member's `data_file:` names a file outside its folder, and the folder also holds a data file of its own. Decide which is the experiment outside the app.
 - **duplicate**: an earlier member (in name order) already reads the same data file, so only that one runs. Decide which member should read it outside the app.
-- **unreadable**: the folder cannot be listed (permissions). Fix it outside the app.
+- **unreadable**: the folder, or its `data/`, cannot be listed (permissions). Fix it outside the app. A `data/` that cannot be listed is never searched past: a file at the folder root is not read in its place.
 - **bad config**: the member's `survival_config.yaml` is not valid YAML; the detail names the file and line (`survival_config.yaml, line N: not valid YAML — …`). Fix the file in an editor; the rest of the Project runs.
 - **focus blocked**: a Focus names a factor or level the data file no longer contains (**stale**, for example after a level was renamed in the Design sheet), or a cell it keeps has no individuals left after the active Exclusion Group (**empty**). Finding these means reading each usable member's Design sheet. The member's other Focuses still run.
 
