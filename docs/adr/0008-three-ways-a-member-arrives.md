@@ -56,3 +56,16 @@ stricter demands (a `data/` folder holding a validating workbook), so an
 empty inside folder failed confusingly here and worked there. The domain
 method keeps its in-place branch for callers that already know what they
 have; the *button* is outside-only.
+
+## Amended by [ADR-0013](0013-a-member-may-reference-its-data-file.md) (2026-11-17)
+
+"Copy in, never reference" no longer holds for the data file. Its reason was
+that a member analysed in place from outside the Project would write its
+output outside the Project. That is about where the **member folder** is, and
+it still stands: every member folder, and everything written for it, is the
+Project's. It was never about where the **data** is. A member may now name a
+workbook outside the Project with `data_file:`, and that workbook is only ever
+read. **Reference data file…** joins the two buttons under the divider as a
+third way in from outside, and the copy-in buttons are unchanged. "The Project
+owns its members' data" now reads: the Project owns its members, and every
+data file a member reads but does not hold, it only reads.

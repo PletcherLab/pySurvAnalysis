@@ -78,11 +78,24 @@ A subdirectory of a Project that a run cannot use is a **Blocked Member**. It is
 | `no config — holds N data files but no survival_config.yaml` | Scaffold the config first, then name the data file. |
 | `no data — survival_config.yaml but no .xlsx/.csv/.tsv in data/ or the directory root` | Add the data file. |
 | `` no data — `data_file: …` does not exist (looked at …) `` | Correct the path in `data_file:`. |
+| `` no data — `data_file: …` resolves to …, which does not exist `` | A `data_file:` outside the folder points at nothing. Correct the path; it is relative to the experiment folder. |
+| `` no data — `data_file: …` resolves to …, which is a folder, not a file `` | Name the workbook inside that folder, not the folder. |
+| `` conflict — `data_file: …` resolves to …, outside <name>, but <name> also holds a data file of its own (…) `` | Decide which file is the experiment: remove `data_file:`, or move the local file out of the folder. |
+| `duplicate — reads the same data file as <member> (…) — only <member> is analysed` | Two members read one file. Point one of them at a different file, or remove it. |
 | `ambiguous — N data files in data/ (…) — which is the experiment?` | **Set data file…** in *Experiment configs…* (or the preflight) writes `data_file:` for you. |
 | `unreadable — cannot be listed (permissions?)` | Fix the folder's permissions. |
 | `bad config — survival_config.yaml, line N: not valid YAML — …` | Fix the YAML at that line (see *YAML syntax errors* below). |
 
 When loading, the same conditions appear as `<name>: N data files in data (…). Name one with data_file: in survival_config.yaml.` and `<name>: no .xlsx/.csv/.tsv found in … or its data/ subdirectory.`
+
+## Warnings
+
+A warning is something that works but is fragile. It never stops a run. Validate YAMLs lists each as `warning — <member>: …`, and `pysurvanalysis run` prints them before it starts.
+
+| Message | Fix |
+|---|---|
+| `` `data_file: …` is an absolute path — it works, but not once the folders move or are opened from another computer. `` | Write the path relative to the experiment directory. |
+| `` `data_file: …` uses backslashes, which are a separator only on Windows — write forward slashes. `` | Replace `\` with `/`. |
 
 ## Blocked Focuses (need the data)
 
@@ -105,6 +118,10 @@ Adding a workbook or directory checks the workbook's headers first. These messag
 - `<file>: Design sheet has no treatment factor columns after 'StartTime'.`
 - `<file>: RawData sheet is missing AgeH, Censored, ….`
 - `<dir> has no data/ subdirectory.` / `No .xlsx file in <dir>/data.` (Add directory)
+- `<dir>'s survival_config.yaml reads its data from data_file: …, outside the folder …` (Add directory: use **Reference data file…** on that workbook instead)
+- `<file> is already inside this Project. Use Add experiment… …` (Reference data file)
+- `<file> has no relative path from <project> (…)` (Reference data file: the workbook is on another drive)
+- `<member> already reads <file> — one data file, one member.` (Reference data file)
 
 See [Input data formats](help:data-formats) for the sheet layout.
 

@@ -26,6 +26,26 @@ Batch/                          a folder of Projects (structural; batch.yaml opt
     └── rep_b/
 ```
 
+### Data that stays where it is
+
+A member can read a workbook that lives outside the Project, such as a
+recording in a locked folder that several studies share. Its config names the
+file with `data_file:`, relative to the member folder and with forward
+slashes:
+
+```yaml
+data_file: ../../../../../runs/lifespan/2026/R-20261020-asmith-01/data/R-20261020-asmith-01.xlsx
+```
+
+The member folder and everything the analysis writes stay in the Project.
+The workbook is only read, and nothing is ever written beside it. The Hub's
+**Reference data file…** writes such a member for you. A member whose folder
+also holds a data file of its own is a conflict, and the app refuses to guess.
+Two members of one Project that read the same file are one member: the second
+is reported as a duplicate. An absolute path works, but Validate YAMLs warns
+about it. Without an outside `data_file:`, nothing changes
+([ADR-0013](docs/adr/0013-a-member-may-reference-its-data-file.md)).
+
 Factors are never declared: they are **discovered** from the data file (the
 Design sheet's columns after `StartTime`, or a CSV's factor columns), with each
 factor's levels in the order they first appear. What a config declares instead

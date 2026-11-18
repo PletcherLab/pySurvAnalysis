@@ -321,6 +321,25 @@ def _divergence_blocks(project) -> list:
     return blocks
 
 
+def _data_location_blocks(project) -> list:
+    """Where each member reading a Referenced Data File reads it from — a
+    ``data_file:`` outside its folder, as written and as resolved (ADR-0013).
+    Nothing at all for a Project whose members read their own files."""
+    rows = []
+    for member in project.members():
+        location = member.data_location()
+        if location.external:
+            rows.append([member.name, str(location.written),
+                         location.problem or location.resolved])
+    if not rows:
+        return []
+    return [m.Table(
+        columns=["Member", "data_file (as written)", "Resolved"],
+        rows=rows, title="Data files read from outside the Project",
+        caption="These members read their data file where it lies; nothing "
+                "was copied into the Project, and nothing is written there.")]
+
+
 def build_project_report(project, narrative: dict[str, str] | None = None) -> m.Report:
     """The bound document: cover, inventory, divergence, then Focus sections."""
     rows = _focus_rows(project)
@@ -337,6 +356,10 @@ def build_project_report(project, narrative: dict[str, str] | None = None) -> m.
     else:
         status = [m.StatusLine("This Project has no Member Experiments yet.",
                                m.Level.WARN)]
+    ## A duplicate is named, never dropped silently: one data file is one
+    ## member's, and the report says which one it is bound under.
+    status += [m.StatusLine(note, m.Level.WARN)
+               for note in project.duplicate_notes()]
     report.add(m.Cover(
         title=f"{project.name} — Project Report",
         subtitle=project.question,
@@ -353,6 +376,7 @@ def build_project_report(project, narrative: dict[str, str] | None = None) -> m.
     report.add(m.SectionDivider("Focuses"))
     if rows:
         report.add(_inventory_table(rows))
+    report.extend(_data_location_blocks(project))
     report.extend(_divergence_blocks(project))
 
     if narrative and narrative.get("__across__"):

@@ -320,7 +320,13 @@ class BatchPreflightDialog(QDialog):
         directory = item.data(0, _DIR_ROLE)
         if not directory or item.data(0, _FOCUS_ROLE):
             return None, None
-        return str(item.data(0, _KEY_ROLE)), layout_mod.classify(directory)
+        ## Re-read with the Project's own walk: a duplicate is a fact about
+        ## two members, which classifying one folder alone cannot see.
+        directory = Path(directory)
+        found = next((m for m in layout_mod.members_in(directory.parent)
+                      if m.name == directory.name), None)
+        return (str(item.data(0, _KEY_ROLE)),
+                found or layout_mod.classify(directory))
 
     def _selected_focus(self):
         """``(project_key, member directory, focus name)`` for a selected

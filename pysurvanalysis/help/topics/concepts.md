@@ -54,7 +54,7 @@ A **Batch** is any folder with at least one Project somewhere beneath it, at any
 
 The app separates *what cannot run* from *what you chose not to run*:
 
-- A **Blocked Member** is a member folder a run cannot use as it stands: data but no config, a config but no data, or several candidate data files and no `data_file:` naming one. The other members still run.
+- A **Blocked Member** is a member folder a run cannot use as it stands: data but no config, a config but no data, several candidate data files and no `data_file:` naming one, a `data_file:` outside the folder beside a data file of its own (a conflict), or a second member reading a data file another member already reads (a duplicate). The other members still run.
 - A **Blocked Focus** names a factor or level the data no longer has, or keeps a cell that the active Exclusion Group empties. The member's other Focuses still run.
 - **Not Applicable** means an analysis is relevant to the Focus but the data cannot compute it. It is recorded in the log, the Run Summary and the report.
 - **Left Out** means you unticked the analysis or figure on the Analyze or Plots panel. It is recorded too, separately from Not Applicable.

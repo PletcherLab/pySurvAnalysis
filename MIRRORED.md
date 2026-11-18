@@ -35,7 +35,7 @@ mechanical rather than archaeological.
 | `pysurvanalysis/pubfigures.py` | `pytrackinganalysis/pubfigures.py` | **reimplemented** on the same Spec/Style contract for survivorship curves + the At-Risk Band (ADR-0004). `resolve_font_family` is **verbatim**; the per-element font sizes, `text_color`, `line_pt`, `strip_style`/`strip_bg`/`panel_bg` and the outlined-point treatment (`fill` = series, `color` = edge, `stroke` = weight) follow upstream's `PlotStyle`/`_theme_for` field for field. `step_expand` and `point_data` are local — a step curve has knots where a jittered dot plot has none. Now also `ProjectSpecs`/`load_project_specs`/`save_project_specs` — upstream's single project-root `plot_specs.yaml`, adopted here (ADR-0005 amendment) with `specs_root` falling back to a standalone experiment's own directory, plus a `PlotKind` table dispatching the whole Plot Set (series / forest / distribution / interaction) where upstream has one figure shape. `render_all` follows upstream's curated-only rule, but stricter: an empty `plots:` renders nothing here, where upstream falls back to every plot type |
 | `pysurvanalysis/script_editor/project_actions.py` | `pytrackinganalysis/script_editor/project_actions.py` | **reimplemented**; no pooling actions, adds the type-registry hard error |
 | `pysurvanalysis/domain/batch.py` | `pytrackinganalysis/batch.py` | **reimplemented** on the same contract — structural Batch, lazy `batch.yaml`, `resolve_designated_script` central→own→built-in, no implicit fallback (ADR-0007); now also the recursive walk, `project_kind`, relative-path keys, scoped `run()` (ADR-0009 ← upstream ADR-0011), `designate()` writing the Hub picker's choice, a `batch.yaml` that will not parse listed but refused, and `project_directory` refusing Windows-rooted keys |
-| `pysurvanalysis/domain/layout.py` | `pytrackinganalysis/layout.py` | **structure ported, body rewritten** — same `classify`/`members_in` contract and the same "decide with the loader's own rule" principle, but this loader accepts data at the root *or* `data/`, so there is no Unfiled Recording and none of the filing machinery. Its blocked set is no-config / no-data / ambiguous / bad config (a YAML that will not parse); `initializable_dirs` came across for the Initialize picker, with an added `<stem>_figures` suffix rule this app's report backend needs |
+| `pysurvanalysis/domain/layout.py` | `pytrackinganalysis/layout.py` | **structure ported, body rewritten** — same `classify`/`members_in` contract and the same "decide with the loader's own rule" principle, but this loader accepts data at the root *or* `data/`, so there is no Unfiled Recording and none of the filing machinery. Its blocked set is no-config / no-data / ambiguous / bad config (a YAML that will not parse); `initializable_dirs` came across for the Initialize picker, with an added `<stem>_figures` suffix rule this app's report backend needs. **Data-location rule ported from `@e91adf5`** (upstream ADR-0018 → [ADR-0013](docs/adr/0013-a-member-may-reference-its-data-file.md)): `DataLocation` (`.referenced`, `.identity` = `normcase(realpath)`), `configured_data_file` (no parse unless the text mentions the key), `resolve_data_file` (`realpath` of the joined path), `data_location` / `require_data_location`, `DataLocationError`, `DataLocations.claim` (the lenient duplicate rule, verbatim), `duplicate_detail`, the `DUPLICATE` status, and `classify` split into `classify` → `_classify(dir, location)` so `members_in` resolves each member once. Diverges: the key is the existing `data_file:`, naming a **file**, where upstream's new `data_folder:` names a folder, so there is no "holds the replicate" refusal and the wrong-kind check is "a folder, not a file"; a `data_file:` *inside* the member folder keeps its old job (Set data file…) with no conflict check; the conflict test is "a file `data_candidates` would offer, in `data/` or at the root, never a hidden one" rather than upstream's xlsx/csv rule; and a conflict gets its own `CONFLICT` status rather than upstream's `ambiguous`, because here `ambiguous` has a one-click fix that would pick a local file |
 | `pysurvanalysis/apps/project_dialogs.py` | `ProjectInfoDialog` + `ExperimentConfigsDialog` in `pytrackinganalysis/apps/hub.py` | **structure ported, body rewritten** — same shared-dialog-for-three-ways-in shape and the same bulk config table. Its group box edits Project Defaults (a seed) rather than a shared design (an authority), so it has no design-conformance half; its bulk dialog offers "Set data file…" where upstream offers a Config Editor, and "Edit config…" hands the YAML to the desktop. Lives in its own module rather than at the bottom of `hub.py` |
 | `pysurvanalysis/report_builder.py` (`_curated_figure`) | `pytrackinganalysis/report_figures.py` | **rule ported, body local** — upstream's report-native figures replace pasted-in analysis PNGs; here the same precedence (curated Publication Figure over the analysis's default PNG, default as the fallback, a failing render never sinking the report) is applied per plot id from the container's `plot_specs.yaml`, rendered through the plotnine path at 200 dpi |
 | `pysurvanalysis/apps/batch_preflight.py` | `pytrackinganalysis/apps/batch_preflight.py` | **structure ported** — same always-shown review modal, tree of Projects → blocked children, reason-matched repair, Rescan, derive-don't-remember check state. Repairs differ (scaffold a config, name a `data_file:`); no Removal Sheet section |
@@ -68,6 +68,23 @@ buttons rather than replacing them.
 Not ported: the filing half of upstream's Initialize (there is nothing to
 file here — see below), and its "shared design (enforced on every replicate)"
 framing, which ADR-0001 forbids.
+
+### The 2026-11-17 pass (`referenced-data@e91adf5`)
+
+Upstream's `referenced-data` branch let a replicate read its recording from a
+folder its config names (its ADR-0018). Ported: the rule, from
+`pytrackinganalysis/layout.py` and `project.py` at `e91adf5`, into
+`domain/layout.py` (row above) and `domain/project.py` (`Project.member_dirs`
+applies `DataLocations`; `duplicates()`, `duplicate_notes()` and
+`warnings()` stand in for upstream's `duplicates`, `data_locations` and
+`warnings` attributes, because this `Project` computes its members on
+demand rather than in `__init__`). `domain/batch.py` needed no change, as
+upstream's did not: discovery reaches the rule through `project_kind` →
+`members_in`. Not ported, because there is nothing here to port it to:
+filing (none here), clock repair, Arena's CSV exports, the Config Editor's
+Data folder field (no member Config Editor), and `scaffold_replicate_config`'s
+key-dropping (here `data_file` is in `NEVER_INHERITED`, and no scaffold
+copies another member's config).
 
 ## Not mirrored — deliberate divergences
 
@@ -141,10 +158,12 @@ framing, which ADR-0001 forbids.
   and offers **Set data file…** in the slot upstream gives the editor. That
   repair (naming one of several candidates in `data_file:`) has no upstream
   counterpart at all, because upstream's ambiguous state is unrepairable.
-* **The Experiments card has five buttons where upstream's has three**
-  (ADR-0010). The three state buttons are upstream's; the two below the
-  divider are ADR-0008's ways a member arrives from *outside* the Project,
-  which upstream has no need for — its replicates are always made in place.
+* **The Experiments card has six buttons where upstream's has three**
+  (ADR-0010). The three state buttons are upstream's; the three below the
+  divider are the ways a member arrives from *outside* the Project — ADR-0008's
+  two copy-ins and ADR-0013's **Reference data file…** — which upstream has no
+  need for: its replicates are always made in place, and a referencing one is
+  written by hand or by another tool.
 * **Project Defaults are edited as a seed, never as a design.** Upstream's
   `ProjectInfoDialog` edits an authority: facet cutoffs, phase names, counting
   regions and `design.global` keys every replicate is hard-validated against,

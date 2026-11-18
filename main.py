@@ -116,6 +116,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
             for problem in problems:
                 print(f"  - {problem}")
             return 2
+        ## Never fatal: it works, but will not travel (ADR-0013).
+        for warning in experiment.warnings():
+            print(f"  warning — {warning}")
         ## Every Focus unless named: an unattended run that analysed one and
         ## stayed quiet about the rest is the gap Focuses close (ADR-0011).
         outcome = experiment.run_all(log=print, extra_excluded=extra_excluded,

@@ -13,6 +13,15 @@ More than one candidate file was found, and the app never guesses. Add `data_fil
 **`` `data_file: <path>` does not exist (looked at <full path>). ``**
 The file named in `data_file:` is missing. Correct the path (relative paths are relative to the experiment folder).
 
+**`` `data_file: <path>` resolves to <full path>, which does not exist ``** (or **`…, which is a folder, not a file`**)
+The config names a data file outside the experiment folder, and nothing usable is there. Correct the path. It is relative to the experiment folder, so count the `../` steps. A Project copied without the folders its members reference shows this for each of them.
+
+**`` `data_file: <path>` resolves to <full path>, outside <name>, but <name> also holds a data file of its own (<file>) — which is the experiment? ``**
+The member reads a file outside its folder, and its folder holds a data file too. The app never guesses. Remove `data_file:` to analyse the local file, or move the local file out to keep the reference.
+
+**`<member> is a duplicate: it reads the same data file as <other> (…) — only <other> is analysed`**
+Two members of one Project read the same file. Only the first in name order runs, and the other is listed in red with status `duplicate`. Point it at a different file, or remove it.
+
 **`No input data file found in <name> (looked in data/ and the directory root).`**
 Shown by *Validate YAMLs* and in the Project Report when a member has a config but no data. Add the data file.
 

@@ -360,7 +360,7 @@ A **Batch** is any folder with at least one Project somewhere beneath it, at any
 
 The app separates *what cannot run* from *what you chose not to run*:
 
-- A **Blocked Member** is a member folder a run cannot use as it stands: data but no config, a config but no data, or several candidate data files and no `data_file:` naming one. The other members still run.
+- A **Blocked Member** is a member folder a run cannot use as it stands: data but no config, a config but no data, several candidate data files and no `data_file:` naming one, a `data_file:` outside the folder beside a data file of its own (a conflict), or a second member reading a data file another member already reads (a duplicate). The other members still run.
 - A **Blocked Focus** names a factor or level the data no longer has, or keeps a cell that the active Exclusion Group empties. The member's other Focuses still run.
 - **Not Applicable** means an analysis is relevant to the Focus but the data cannot compute it. It is recorded in the log, the Run Summary and the report.
 - **Left Out** means you unticked the analysis or figure on the Analyze or Plots panel. It is recorded too, separately from Not Applicable.
@@ -599,7 +599,7 @@ The file type is decided by its extension. For a workbook, `input.format` in `su
 
 Each Experiment Directory has exactly one data file. The app looks for it in this order:
 
-1. The file named by `data_file:` in `survival_config.yaml`, if that key is set (a path relative to the experiment directory, or an absolute path).
+1. The file named by `data_file:` in `survival_config.yaml`, if that key is set: a path relative to the experiment directory (an absolute path works, with a warning). It may name a file outside the directory, which is then only read, never written beside. See [survival_config.yaml reference](#config-experiment).
 2. Otherwise, any `.xlsx`, `.csv` or `.tsv` in the `data/` subdirectory.
 3. Otherwise, any such file at the directory root.
 
@@ -791,7 +791,7 @@ scripts:
 | Key | Type | Default | Effect |
 |---|---|---|---|
 | `experiment_type` | string | `standard_lifespan` | The [Experiment Type](#experiment-types). Omitted, empty, or a retired key (`interaction`, `custom`) all mean Standard Lifespan. Any other unknown value is an error. |
-| `data_file` | path | none | Names the data file, relative to the experiment directory or absolute. Overrides the search of `data/` and the root. Required when that search finds several files. |
+| `data_file` | path | none | Names the data file, relative to the experiment directory. Overrides the search of `data/` and the root. Required when that search finds several files. May name a file outside the directory (see below). Never inherited from the Project Defaults. |
 | `global` | mapping | type defaults | Time unit, axis label, censoring policy, quality threshold. See [The global: section](#config-global). |
 | `input` | mapping | see below | How to read a CSV/TSV. See [The input: section](#config-input). |
 | `exclusions` | mapping | none | `group: <name>` names the active [Exclusion Group](#exclusions). Blank (`group: ''`) means no group; absent means no group unless the Project Defaults name one, which a member then inherits. |
@@ -799,6 +799,28 @@ scripts:
 | `omit` | mapping | nothing left out | Analyses and figures every run leaves out. See [The omit: section](#config-omit). |
 | `scripts` | list | `Standard analysis` | Saved Experiment Scripts. See [Experiment and Project Scripts](#scripts-overview). |
 | `factors` | mapping | none | **Legacy.** A pre-Focus factor block. If there is no `focuses:` block, it becomes one Focus called `Interaction`, and it is removed the next time Focuses are saved. |
+
+#### data_file
+
+`data_file:` names the file this experiment reads. Write it relative to the experiment directory, with forward slashes.
+
+- **Inside the directory** (`data/cohort_b.xlsx`): it picks one of several data files in the folder. That is what **Set data file…** writes. Other data files beside it are fine.
+- **Outside the directory**: the experiment reads that file where it lies, and nothing is copied. For example:
+
+  ```yaml
+  data_file: ../../../../../runs/lifespan/2026/R-20261020-asmith-01/data/R-20261020-asmith-01.xlsx
+  ```
+
+  Everything the analysis writes still goes into the experiment directory. Nothing is ever written beside the named file. The run summary and the reports record the path as written and as resolved.
+
+An outside `data_file:` blocks the member, and the run stops with a message naming the key, the path as written and the resolved path, when:
+
+- the file does not exist, or is a folder;
+- the experiment directory also holds a data file of its own, in `data/` or at its root (a **conflict**: which one is the experiment?). An empty `data/` folder, Excel lock files (`~$…`), hidden files and `remove_chambers.csv` do not count.
+
+An absolute path works, but **Validate YAMLs** warns that it will break when the folders move or are opened from another computer. A path with backslashes gets the same warning: backslashes are a separator only on Windows.
+
+`data_file:` belongs to one member. It is never inherited from the Project's `defaults:`, and a `defaults: data_file:` is reported by Validate YAMLs as ignored. In a Project, two members whose `data_file:` resolves to the same file are one member: the first in name order is analysed and the other is reported as a `duplicate`.
 
 #### exclusions
 
@@ -832,7 +854,7 @@ A list of saved step lists, each with `name`, optional `notes` and `steps` (each
 
 ### Members and Project Defaults
 
-For a Member Experiment, this file is merged with the Project's `defaults:` before use. Anything the member states wins. `global`, `input`, `exclusions` and `omit` merge key by key, so a member can override one setting without restating the whole section. `focuses` is never inherited. A member scaffolded by the app is deliberately minimal (often just `experiment_type` and `scripts`), so later edits to the Project Defaults keep reaching it. See [project.yaml and Project Defaults](#config-project).
+For a Member Experiment, this file is merged with the Project's `defaults:` before use. Anything the member states wins. `global`, `input`, `exclusions` and `omit` merge key by key, so a member can override one setting without restating the whole section. `focuses` and `data_file` are never inherited. A member scaffolded by the app is deliberately minimal (often just `experiment_type` and `scripts`), so later edits to the Project Defaults keep reaching it. See [project.yaml and Project Defaults](#config-project).
 
 ### Checking the file
 
@@ -1457,11 +1479,24 @@ A subdirectory of a Project that a run cannot use is a **Blocked Member**. It is
 | `no config — holds N data files but no survival_config.yaml` | Scaffold the config first, then name the data file. |
 | `no data — survival_config.yaml but no .xlsx/.csv/.tsv in data/ or the directory root` | Add the data file. |
 | `` no data — `data_file: …` does not exist (looked at …) `` | Correct the path in `data_file:`. |
+| `` no data — `data_file: …` resolves to …, which does not exist `` | A `data_file:` outside the folder points at nothing. Correct the path; it is relative to the experiment folder. |
+| `` no data — `data_file: …` resolves to …, which is a folder, not a file `` | Name the workbook inside that folder, not the folder. |
+| `` conflict — `data_file: …` resolves to …, outside <name>, but <name> also holds a data file of its own (…) `` | Decide which file is the experiment: remove `data_file:`, or move the local file out of the folder. |
+| `duplicate — reads the same data file as <member> (…) — only <member> is analysed` | Two members read one file. Point one of them at a different file, or remove it. |
 | `ambiguous — N data files in data/ (…) — which is the experiment?` | **Set data file…** in *Experiment configs…* (or the preflight) writes `data_file:` for you. |
 | `unreadable — cannot be listed (permissions?)` | Fix the folder's permissions. |
 | `bad config — survival_config.yaml, line N: not valid YAML — …` | Fix the YAML at that line (see *YAML syntax errors* below). |
 
 When loading, the same conditions appear as `<name>: N data files in data (…). Name one with data_file: in survival_config.yaml.` and `<name>: no .xlsx/.csv/.tsv found in … or its data/ subdirectory.`
+
+### Warnings
+
+A warning is something that works but is fragile. It never stops a run. Validate YAMLs lists each as `warning — <member>: …`, and `pysurvanalysis run` prints them before it starts.
+
+| Message | Fix |
+|---|---|
+| `` `data_file: …` is an absolute path — it works, but not once the folders move or are opened from another computer. `` | Write the path relative to the experiment directory. |
+| `` `data_file: …` uses backslashes, which are a separator only on Windows — write forward slashes. `` | Replace `\` with `/`. |
 
 ### Blocked Focuses (need the data)
 
@@ -1484,6 +1519,10 @@ Adding a workbook or directory checks the workbook's headers first. These messag
 - `<file>: Design sheet has no treatment factor columns after 'StartTime'.`
 - `<file>: RawData sheet is missing AgeH, Censored, ….`
 - `<dir> has no data/ subdirectory.` / `No .xlsx file in <dir>/data.` (Add directory)
+- `<dir>'s survival_config.yaml reads its data from data_file: …, outside the folder …` (Add directory: use **Reference data file…** on that workbook instead)
+- `<file> is already inside this Project. Use Add experiment… …` (Reference data file)
+- `<file> has no relative path from <project> (…)` (Reference data file: the workbook is on another drive)
+- `<member> already reads <file> — one data file, one member.` (Reference data file)
 
 See [Input data formats](#data-formats) for the sheet layout.
 
@@ -1580,7 +1619,7 @@ With no Project open but a standalone experiment loaded, it validates that exper
 
 ## The Experiments card — members
 
-The **Experiments** card is the second card in the Project panel. It lists the open Project's Member Experiments, along with any subfolders that are not members yet, and holds the five ways to make a new member. Double-click a member to load it. The card is dimmed, and all five buttons are disabled, until a Project is open.
+The **Experiments** card is the second card in the Project panel. It lists the open Project's Member Experiments, along with any subfolders that are not members yet, and holds the six ways to make a new member. Double-click a member to load it. The card is dimmed, and all five buttons are disabled, until a Project is open.
 
 ### The members table
 
@@ -1592,7 +1631,7 @@ There is one row per member (a subfolder with a `survival_config.yaml`), in name
 | **Config** | whether the folder has a `survival_config.yaml` | `yes`, or `missing` (in red) for a folder that is not a member yet |
 | **Focuses** | how many Focuses the member has, and the first three names | `2: Unfiltered, FemalesOnly`, `5: A, B, C …` when there are more than three; `—` when none can be resolved (no declared Focus and the data file cannot be read, for example a member with no data yet) |
 | **N** | individuals in one analysed slice | for the loaded member, the Active Focus's total when it has current results; otherwise the largest Focus with current results. Hover over the cell to see which Focus it is. `—` when no Focus has current results (an Out of Date result is not counted). It is never a sum over Focuses, which overlap |
-| **Analysed** | how far the member's Focuses are analysed (see below) | `no`, `1/3`, a timestamp, `yes`, `re-run needed`, `1/3 · 1 blocked`, `blocked: no data`, `blocked: ambiguous` |
+| **Analysed** | how far the member's Focuses are analysed (see below) | `no`, `1/3`, a timestamp, `yes`, `re-run needed`, `1/3 · 1 blocked`, `blocked: no data`, `blocked: ambiguous`, `blocked: conflict`, `blocked: duplicate` |
 | **Exclusions** | the active Exclusion Group in the member's config | the group name, or `none` |
 
 #### The Analysed column
@@ -1600,6 +1639,8 @@ There is one row per member (a subfolder with a `survival_config.yaml`), in name
 Hover over the **N** and **Analysed** column headers for a reminder of what they count. The first rule that applies wins:
 
 - `blocked: no data` / `blocked: ambiguous`: the member itself cannot run — its config names no data file the loader can find, or the folder holds several candidate data files and no `data_file:` says which is the experiment (see *Red rows* below).
+- `blocked: conflict`: the member's `data_file:` names a file outside its folder, but the folder also holds a data file of its own. The app will not guess which one is the experiment. Remove `data_file:` or move the local file out.
+- `blocked: duplicate`: an earlier member (in name order) already reads the same data file. Only that member is analysed. The row shows no Focuses and cannot be loaded; decide which member should read the file.
 - `k/n · b blocked`: at least one Focus is **Blocked** (it names a level the data lacks, or the active Exclusion Group empties one of its cells). Here *k* is the number of Focuses with current results, *n* the number of Focuses, and *b* the number blocked.
 - `re-run needed`: at least one analysed Focus is **Out of Date**. Its saved results were produced under a different Focus definition (factors, levels, Reference Levels) or a different Exclusion Group from the one the config now declares.
 - `k/n`: some Focuses have no current results yet.
@@ -1627,14 +1668,26 @@ The first three buttons cover folders inside the Project.
 | **Initialize existing directory…** | the folder is in the Project but has no config | Lists the Project's subfolders that have no config, each with its state (for example `empty`, `no config`), and scaffolds a minimal config in the one you pick. Nothing is moved, because the loader already finds a data file at the folder root or in `data/`. If the folder holds several candidate data files, it then asks which one is the experiment and writes `data_file:` into the config. When every folder already has a config it says so and points you to *Create experiment…*. A folder that cannot be listed (`unreadable`) is refused, and has to be fixed outside the app. |
 | **Experiment configs…** | to see or fix many at once | Opens the bulk view (below). |
 
-The two buttons under **Bring one in from outside** reach outside the Project.
+The three buttons under **Bring one in from outside** reach outside the Project.
 
 | Button | What it needs | What it does |
 |---|---|---|
 | **Add directory…** | a folder **outside** the Project with a `data/` subfolder holding a `.xlsx` that validates as a DLife workbook | **Copies** the whole folder into the Project. If it has no `survival_config.yaml`, a minimal one is written (with `data_file:` when `data/` holds more than one data file). A folder that is already a direct child of the Project is refused with a pointer to *Initialize existing directory…*. A destination that already exists is refused rather than merged. |
 | **Add experiment…** | one DLife workbook (`.xlsx`) | Creates a member named after the file (`cohort_a.xlsx` becomes `cohort_a/`), puts the workbook in its `data/` (**moved** if it was already inside the Project tree, **copied** otherwise), and writes a minimal config. |
+| **Reference data file…** | one DLife workbook (`.xlsx`) **outside** the Project | Creates a member named after the file and writes a minimal config whose `data_file:` is the workbook's path relative to the new member folder. The workbook is **neither copied nor moved**: it is only ever read where it is. Refused, with nothing written, for a workbook inside the Project (use *Add experiment…*), one on another drive (no relative path exists), a member folder that already exists, and a workbook another member already reads. |
 
 A workbook validates as DLife when it has Design and RawData sheets with the columns each needs and at least one factor column after `StartTime`.
+
+#### Reading a workbook where it lies
+
+**Reference data file…** is for data that must stay where it is, such as a recording in a locked folder that several studies analyse. The member folder belongs to the Project as usual, and everything the analysis writes (`analysis/`, `qc/`, `figures/`) goes there. Nothing is ever written next to the workbook. Its config looks like this:
+
+```yaml
+experiment_type: standard_lifespan
+data_file: ../../../../../runs/lifespan/2026/R-20261020-asmith-01/data/R-20261020-asmith-01.xlsx
+```
+
+You can also write such a config by hand, or have another tool write it. Two Projects can each have a member reading the same workbook with different settings. Within one Project, a second member reading the same file is a `duplicate`. See [survival_config.yaml reference](#config-experiment) for the rules.
 
 A config written by any of these routes is **minimal**: it states the Experiment Type, plus, for an adopted workbook, the `input:` format and `assume_censored` if the workbook's PrivateData sheet disagrees with the Project's default. Everything else is inherited, so later edits to the Project Defaults keep reaching the member. A config copied in with *Copy config from…* restates whatever it contains. The log then names the keys that will no longer follow the Project.
 
@@ -1647,7 +1700,7 @@ This dialog lists every subfolder of the Project that is a member or could becom
 | **Directory** | folder name |
 | **Config** | `yes` or `missing` |
 | **Data files** | the candidate data files found (in `data/`, else the folder root), or `none` |
-| **Status** | `ok`, `no config`, `no data`, `ambiguous` (several files and no `data_file:`), `unreadable`, or `empty` |
+| **Status** | `ok`, `no config`, `no data`, `ambiguous` (several files and no `data_file:`), `conflict` (a `data_file:` outside the folder, beside a data file of its own), `duplicate` (another member reads the same file), `unreadable`, or `empty` |
 
 Hover over a row to see the detail behind its status.
 
@@ -1897,7 +1950,7 @@ One top-level row per Project, with child rows for what is wrong inside it.
 |---|---|---|
 | **Project** | checkbox and key (path relative to the Batch folder) | a blocked member's folder name, or `member · Focus` for a Blocked Focus |
 | **Members** | usable / total member folders | blank |
-| **Status** | `ok`, or `N blocked`, `N focus(es) blocked`, or both | the member's status (`no config`, `no data`, `ambiguous`, `unreadable`, `bad config`), or `focus blocked` |
+| **Status** | `ok`, or `N blocked`, `N focus(es) blocked`, or both | the member's status (`no config`, `no data`, `ambiguous`, `conflict`, `duplicate`, `unreadable`, `bad config`), or `focus blocked` |
 
 Projects with anything blocked are shown in red and expanded. Hover over a child row for the full reason.
 
@@ -1905,7 +1958,9 @@ Projects with anything blocked are shown in red and expanded. Hover over a child
 
 - **no config**: the folder holds a data file but no `survival_config.yaml`. *Fixable here.*
 - **ambiguous**: the folder has a config, but there are several candidate data files and no `data_file:` naming one. The loader refuses to guess. *Fixable here, one member at a time.*
-- **no data**: a config with no `.xlsx`/`.csv`/`.tsv` in `data/` or the folder root, or a `data_file:` naming a file that does not exist. Supply the data outside the app.
+- **no data**: a config with no `.xlsx`/`.csv`/`.tsv` in `data/` or the folder root, or a `data_file:` naming a file that does not exist (or a folder). Supply the data, or correct the path, outside the app.
+- **conflict**: the member's `data_file:` names a file outside its folder, and the folder also holds a data file of its own. Decide which is the experiment outside the app.
+- **duplicate**: an earlier member (in name order) already reads the same data file, so only that one runs. Decide which member should read it outside the app.
 - **unreadable**: the folder cannot be listed (permissions). Fix it outside the app.
 - **bad config**: the member's `survival_config.yaml` is not valid YAML; the detail names the file and line (`survival_config.yaml, line N: not valid YAML — …`). Fix the file in an editor; the rest of the Project runs.
 - **focus blocked**: a Focus names a factor or level the data file no longer contains (**stale**, for example after a level was renamed in the Design sheet), or a cell it keeps has no individuals left after the active Exclusion Group (**empty**). Finding these means reading each usable member's Design sheet. The member's other Focuses still run.
@@ -6095,7 +6150,7 @@ The words pySurvAnalysis uses, in plain language, in alphabetical order. Each en
 
 **Blocked Focus** – A Focus that cannot run as declared. Either it is *stale* (it names a factor or level the data file does not contain) or it is *empty* (a treatment the data holds has no individuals left after exclusions). The member's other Focuses still run. → [Analysed, Out of Date, Blocked and Orphaned results](#focus-status)
 
-**Blocked Member** – A Member Experiment a run cannot use yet: data with no `survival_config.yaml`, a config with no data file, or several candidate data files with none named. The Project still runs its other members. → [The Batch preflight](#preflight)
+**Blocked Member** – A Member Experiment a run cannot use yet: data with no `survival_config.yaml`, a config with no data file, several candidate data files with none named, a `data_file:` outside the folder beside a data file of its own (conflict), or a second member reading a file another member already reads (duplicate). The Project still runs its other members. → [The Batch preflight](#preflight)
 
 ### C
 
@@ -6308,6 +6363,15 @@ More than one candidate file was found, and the app never guesses. Add `data_fil
 
 **`` `data_file: <path>` does not exist (looked at <full path>). ``**
 The file named in `data_file:` is missing. Correct the path (relative paths are relative to the experiment folder).
+
+**`` `data_file: <path>` resolves to <full path>, which does not exist ``** (or **`…, which is a folder, not a file`**)
+The config names a data file outside the experiment folder, and nothing usable is there. Correct the path. It is relative to the experiment folder, so count the `../` steps. A Project copied without the folders its members reference shows this for each of them.
+
+**`` `data_file: <path>` resolves to <full path>, outside <name>, but <name> also holds a data file of its own (<file>) — which is the experiment? ``**
+The member reads a file outside its folder, and its folder holds a data file too. The app never guesses. Remove `data_file:` to analyse the local file, or move the local file out to keep the reference.
+
+**`<member> is a duplicate: it reads the same data file as <other> (…) — only <other> is analysed`**
+Two members of one Project read the same file. Only the first in name order runs, and the other is listed in red with status `duplicate`. Point it at a different file, or remove it.
 
 **`No input data file found in <name> (looked in data/ and the directory root).`**
 Shown by *Validate YAMLs* and in the Project Report when a member has a config but no data. Add the data file.

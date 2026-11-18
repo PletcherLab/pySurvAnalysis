@@ -1,6 +1,6 @@
 # The Experiments card — members
 
-The **Experiments** card is the second card in the Project panel. It lists the open Project's Member Experiments, along with any subfolders that are not members yet, and holds the five ways to make a new member. Double-click a member to load it. The card is dimmed, and all five buttons are disabled, until a Project is open.
+The **Experiments** card is the second card in the Project panel. It lists the open Project's Member Experiments, along with any subfolders that are not members yet, and holds the six ways to make a new member. Double-click a member to load it. The card is dimmed, and all five buttons are disabled, until a Project is open.
 
 ## The members table
 
@@ -12,7 +12,7 @@ There is one row per member (a subfolder with a `survival_config.yaml`), in name
 | **Config** | whether the folder has a `survival_config.yaml` | `yes`, or `missing` (in red) for a folder that is not a member yet |
 | **Focuses** | how many Focuses the member has, and the first three names | `2: Unfiltered, FemalesOnly`, `5: A, B, C …` when there are more than three; `—` when none can be resolved (no declared Focus and the data file cannot be read, for example a member with no data yet) |
 | **N** | individuals in one analysed slice | for the loaded member, the Active Focus's total when it has current results; otherwise the largest Focus with current results. Hover over the cell to see which Focus it is. `—` when no Focus has current results (an Out of Date result is not counted). It is never a sum over Focuses, which overlap |
-| **Analysed** | how far the member's Focuses are analysed (see below) | `no`, `1/3`, a timestamp, `yes`, `re-run needed`, `1/3 · 1 blocked`, `blocked: no data`, `blocked: ambiguous` |
+| **Analysed** | how far the member's Focuses are analysed (see below) | `no`, `1/3`, a timestamp, `yes`, `re-run needed`, `1/3 · 1 blocked`, `blocked: no data`, `blocked: ambiguous`, `blocked: conflict`, `blocked: duplicate` |
 | **Exclusions** | the active Exclusion Group in the member's config | the group name, or `none` |
 
 ### The Analysed column
@@ -20,6 +20,8 @@ There is one row per member (a subfolder with a `survival_config.yaml`), in name
 Hover over the **N** and **Analysed** column headers for a reminder of what they count. The first rule that applies wins:
 
 - `blocked: no data` / `blocked: ambiguous`: the member itself cannot run — its config names no data file the loader can find, or the folder holds several candidate data files and no `data_file:` says which is the experiment (see *Red rows* below).
+- `blocked: conflict`: the member's `data_file:` names a file outside its folder, but the folder also holds a data file of its own. The app will not guess which one is the experiment. Remove `data_file:` or move the local file out.
+- `blocked: duplicate`: an earlier member (in name order) already reads the same data file. Only that member is analysed. The row shows no Focuses and cannot be loaded; decide which member should read the file.
 - `k/n · b blocked`: at least one Focus is **Blocked** (it names a level the data lacks, or the active Exclusion Group empties one of its cells). Here *k* is the number of Focuses with current results, *n* the number of Focuses, and *b* the number blocked.
 - `re-run needed`: at least one analysed Focus is **Out of Date**. Its saved results were produced under a different Focus definition (factors, levels, Reference Levels) or a different Exclusion Group from the one the config now declares.
 - `k/n`: some Focuses have no current results yet.
@@ -47,14 +49,26 @@ The first three buttons cover folders inside the Project.
 | **Initialize existing directory…** | the folder is in the Project but has no config | Lists the Project's subfolders that have no config, each with its state (for example `empty`, `no config`), and scaffolds a minimal config in the one you pick. Nothing is moved, because the loader already finds a data file at the folder root or in `data/`. If the folder holds several candidate data files, it then asks which one is the experiment and writes `data_file:` into the config. When every folder already has a config it says so and points you to *Create experiment…*. A folder that cannot be listed (`unreadable`) is refused, and has to be fixed outside the app. |
 | **Experiment configs…** | to see or fix many at once | Opens the bulk view (below). |
 
-The two buttons under **Bring one in from outside** reach outside the Project.
+The three buttons under **Bring one in from outside** reach outside the Project.
 
 | Button | What it needs | What it does |
 |---|---|---|
 | **Add directory…** | a folder **outside** the Project with a `data/` subfolder holding a `.xlsx` that validates as a DLife workbook | **Copies** the whole folder into the Project. If it has no `survival_config.yaml`, a minimal one is written (with `data_file:` when `data/` holds more than one data file). A folder that is already a direct child of the Project is refused with a pointer to *Initialize existing directory…*. A destination that already exists is refused rather than merged. |
 | **Add experiment…** | one DLife workbook (`.xlsx`) | Creates a member named after the file (`cohort_a.xlsx` becomes `cohort_a/`), puts the workbook in its `data/` (**moved** if it was already inside the Project tree, **copied** otherwise), and writes a minimal config. |
+| **Reference data file…** | one DLife workbook (`.xlsx`) **outside** the Project | Creates a member named after the file and writes a minimal config whose `data_file:` is the workbook's path relative to the new member folder. The workbook is **neither copied nor moved**: it is only ever read where it is. Refused, with nothing written, for a workbook inside the Project (use *Add experiment…*), one on another drive (no relative path exists), a member folder that already exists, and a workbook another member already reads. |
 
 A workbook validates as DLife when it has Design and RawData sheets with the columns each needs and at least one factor column after `StartTime`.
+
+### Reading a workbook where it lies
+
+**Reference data file…** is for data that must stay where it is, such as a recording in a locked folder that several studies analyse. The member folder belongs to the Project as usual, and everything the analysis writes (`analysis/`, `qc/`, `figures/`) goes there. Nothing is ever written next to the workbook. Its config looks like this:
+
+```yaml
+experiment_type: standard_lifespan
+data_file: ../../../../../runs/lifespan/2026/R-20261020-asmith-01/data/R-20261020-asmith-01.xlsx
+```
+
+You can also write such a config by hand, or have another tool write it. Two Projects can each have a member reading the same workbook with different settings. Within one Project, a second member reading the same file is a `duplicate`. See [survival_config.yaml reference](help:config-experiment) for the rules.
 
 A config written by any of these routes is **minimal**: it states the Experiment Type, plus, for an adopted workbook, the `input:` format and `assume_censored` if the workbook's PrivateData sheet disagrees with the Project's default. Everything else is inherited, so later edits to the Project Defaults keep reaching the member. A config copied in with *Copy config from…* restates whatever it contains. The log then names the keys that will no longer follow the Project.
 
@@ -67,7 +81,7 @@ This dialog lists every subfolder of the Project that is a member or could becom
 | **Directory** | folder name |
 | **Config** | `yes` or `missing` |
 | **Data files** | the candidate data files found (in `data/`, else the folder root), or `none` |
-| **Status** | `ok`, `no config`, `no data`, `ambiguous` (several files and no `data_file:`), `unreadable`, or `empty` |
+| **Status** | `ok`, `no config`, `no data`, `ambiguous` (several files and no `data_file:`), `conflict` (a `data_file:` outside the folder, beside a data file of its own), `duplicate` (another member reads the same file), `unreadable`, or `empty` |
 
 Hover over a row to see the detail behind its status.
 

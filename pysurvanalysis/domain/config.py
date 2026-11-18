@@ -35,7 +35,10 @@ OMIT_KINDS = ("analyses", "plots")
 #: inherited Focus would be a Blocked Focus in every member it does not fit,
 #: and editing one would put every member's results Out of Date at once.
 #: Sharing a design is the explicit *Copy Focuses from…* instead.
-NEVER_INHERITED = ("focuses",)
+#: ``data_file`` names one member's own file (ADR-0013): inherited, it would
+#: point every member at one file — and the classifier never honoured an
+#: inherited one, so the loader and the classifier disagreed.
+NEVER_INHERITED = ("focuses", "data_file")
 
 DEFAULT_INPUT: dict[str, Any] = {
     "format": "auto",          # auto | excel | long | wide
@@ -305,6 +308,33 @@ def validate_input_block(config: dict) -> list[str]:
                             "`input.factor_levels` to say which cell each "
                             "column holds.")
     return problems
+
+
+def config_warnings(config: dict) -> list[str]:
+    """What works but is fragile — a separate channel from
+    :func:`validate_config`, whose problems stop a run.
+
+    Today one key: a ``data_file:`` written as an absolute path (it breaks
+    when the folders move, or are opened from a computer that mounts the
+    share elsewhere) or with backslashes (a separator only on Windows). Both
+    still load where they were written; neither is ever fatal (ADR-0013).
+    """
+    value = (config or {}).get("data_file") if isinstance(config, dict) else None
+    if not value or not isinstance(value, str):
+        return []
+    from pathlib import PureWindowsPath
+
+    warnings: list[str] = []
+    if os.path.isabs(value) or PureWindowsPath(value).is_absolute():
+        warnings.append(
+            f"`data_file: {value}` is an absolute path — it works, but not "
+            f"once the folders move or are opened from another computer. "
+            f"Write it relative to the experiment directory.")
+    if "\\" in value:
+        warnings.append(
+            f"`data_file: {value}` uses backslashes, which are a separator "
+            f"only on Windows — write forward slashes.")
+    return warnings
 
 
 def scripts_of(config: dict, key: str = "scripts") -> list[dict]:

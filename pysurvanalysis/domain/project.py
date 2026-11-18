@@ -143,13 +143,59 @@ class Project:
     # ── members ────────────────────────────────────────────────────────────
 
     def member_dirs(self) -> list[Path]:
-        """Immediate subdirectories holding a ``survival_config.yaml``."""
+        """Immediate subdirectories holding a ``survival_config.yaml`` — less
+        any **duplicate**: one reading a data file an earlier member already
+        reads (:meth:`duplicates`, ADR-0013)."""
+        return self._discover()[0]
+
+    def duplicates(self) -> dict[str, str]:
+        """Members left out because an earlier one, in sorted order, already
+        reads their data file: ``{skipped: kept}``. The rule
+        :func:`layout.members_in` applies, so the Project and Batch discovery
+        agree on who the duplicate is — and, as there, it applies only when
+        one of the two names its file with ``data_file:``."""
+        return {name: first for name, (first, _location)
+                in self._discover()[1].items()}
+
+    def _discover(self) -> tuple[list[Path], dict]:
+        from . import layout as layout_mod
+
         if not self.directory.is_dir():
-            return []
-        return sorted(
+            return [], {}
+        configured = sorted(
             d for d in self.directory.iterdir()
             if d.is_dir() and cfgmod.is_experiment_dir(d)
         )
+        reads = layout_mod.DataLocations()
+        kept: list[Path] = []
+        skipped: dict = {}
+        for d in configured:
+            location = layout_mod.data_location(d)
+            first = reads.claim(d.name, location)
+            if first is not None:
+                skipped[d.name] = (first, location)
+                continue
+            kept.append(d)
+        return kept, skipped
+
+    def duplicate_notes(self) -> list[str]:
+        """One sentence per duplicate, naming it and the member kept — what
+        the Hub, Validate YAMLs and the Project Report say about it."""
+        from . import layout as layout_mod
+
+        return [f"{name} is a duplicate: it "
+                + layout_mod.duplicate_detail(first, location)
+                for name, (first, location) in self._discover()[1].items()]
+
+    def warnings(self) -> list[str]:
+        """Said, never fatal: each duplicate by name (the way a Blocked
+        Member is named), and each member's :meth:`SurvivalExperiment.warnings`
+        — an absolute ``data_file:``, say. :meth:`validate`'s problems stop a
+        run; these do not."""
+        out = self.duplicate_notes()
+        for member in self.members():
+            out.extend(f"{member.name}: {w}" for w in member.warnings())
+        return out
 
     def candidate_dirs(self) -> list[Path]:
         """Subdirectories that could become members but hold no config yet.
@@ -226,6 +272,11 @@ class Project:
                 f"{cfgmod.PROJECT_FILENAME}: `defaults: factors:` predates "
                 f"Focuses. Members that inherit it become an `Interaction` Focus "
                 f"on their next analysis; remove it once each has been analysed.")
+        if "data_file" in self.defaults:
+            problems.append(
+                f"{cfgmod.PROJECT_FILENAME}: `defaults: data_file:` is ignored — "
+                f"it names one member's own file, so it belongs in that "
+                f"member's {cfgmod.CONFIG_FILENAME} and is never inherited.")
 
         for member in self.members():
             try:
@@ -403,6 +454,18 @@ class Project:
             raise ProjectError(f"{src.name} is a Project, not an experiment "
                                f"directory.")
 
+        from . import layout as layout_mod
+
+        location = layout_mod.data_location(src)
+        if location.external:
+            ## A relative path means something else once the folder is
+            ## copied, and an absolute one points the copy at a file the
+            ## Project does not own: that is Reference data file…'s job.
+            raise ProjectError(
+                f"{src.name}'s {cfgmod.CONFIG_FILENAME} reads its data from "
+                f"`data_file: {location.written}`, outside the folder — copying "
+                f"it in would change what that path points to. Use Reference "
+                f"data file… on that workbook instead.")
         data_dir = src / "data"
         if not data_dir.is_dir():
             raise ProjectError(f"{src.name} has no data/ subdirectory.")
@@ -479,6 +542,80 @@ class Project:
 
         if not cfgmod.is_experiment_dir(dest):
             cfgmod.save_config(dest, self._member_config_for(target))
+        self._members = None
+        return SurvivalExperiment(dest, defaults=self.defaults, project=self)
+
+    def reference_data_file(self, source: str | Path, *,
+                            name: str | None = None) -> SurvivalExperiment:
+        """Make a Member Experiment that reads one DLife workbook where it is
+        (ADR-0013, amending ADR-0008's "copy in, never reference").
+
+        The workbook is validated as :meth:`adopt_data_file` validates it and
+        is **never copied or moved**. The member folder — named after the
+        file unless *name* is given — gets a minimal config whose
+        ``data_file:`` is the workbook's path relative to that folder, in
+        forward slashes. The Project owns the member folder and everything
+        written to it; the workbook is only ever read.
+
+        Refused, with nothing written: a file inside the Project tree (that is
+        **Add experiment**'s, which moves it into a member); a file with no
+        relative path from the Project (another drive, on Windows); a
+        destination that already exists; and a file a member already reads —
+        one data file, one member.
+        """
+        from .. import data_loader
+        from . import layout as layout_mod
+
+        src = Path(os.path.realpath(Path(source).expanduser()))
+        problems = data_loader.validate_dlife_workbook(src)
+        if problems:
+            raise ProjectError("; ".join(problems))
+
+        root = os.path.normcase(str(self.directory))
+        try:
+            inside = os.path.commonpath([root, os.path.normcase(str(src))]) == root
+        except ValueError:                      # another drive: not inside
+            inside = False
+        if inside:
+            raise ProjectError(
+                f"{src.name} is already inside this Project. Use Add "
+                f"experiment… to make it a member: it moves the file into the "
+                f"member's data/, so the Project keeps exactly one copy.")
+
+        member_name = (name or src.stem).strip()
+        if not member_name:
+            raise ProjectError(f"{src.name} has no usable base name.")
+        dest = self.member_dir(member_name)
+        if os.path.lexists(dest):
+            raise ProjectError(f"{dest} already exists.")
+
+        identity = os.path.normcase(str(src))
+        for member in sorted(d for d in self.directory.iterdir()
+                             if d.is_dir() and cfgmod.is_experiment_dir(d)):
+            if layout_mod.data_location(member).identity == identity:
+                raise ProjectError(
+                    f"{member.name} already reads {src} — one data file, one "
+                    f"member. A second member reading it would be a duplicate.")
+
+        try:
+            value = os.path.relpath(str(src), str(dest))
+        except ValueError as exc:
+            raise ProjectError(
+                f"{src} has no relative path from {self.directory} ({exc}) — on "
+                f"Windows, it is on another drive. `data_file:` must be "
+                f"relative, so the Project and the data can move together.") from None
+        value = value.replace(os.sep, "/")
+
+        ## Minimal, like an adopted workbook's — and the key beside the type,
+        ## where a reader of the file looks first.
+        config: dict = {}
+        for key, item in self._member_config_for(src).items():
+            config[key] = item
+            if key == "experiment_type":
+                config[layout_mod.DATA_FILE_KEY] = value
+        config.setdefault(layout_mod.DATA_FILE_KEY, value)
+        dest.mkdir()
+        cfgmod.save_config(dest, config)
         self._members = None
         return SurvivalExperiment(dest, defaults=self.defaults, project=self)
 

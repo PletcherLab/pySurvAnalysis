@@ -62,7 +62,7 @@ scripts:
 | Key | Type | Default | Effect |
 |---|---|---|---|
 | `experiment_type` | string | `standard_lifespan` | The [Experiment Type](help:experiment-types). Omitted, empty, or a retired key (`interaction`, `custom`) all mean Standard Lifespan. Any other unknown value is an error. |
-| `data_file` | path | none | Names the data file, relative to the experiment directory or absolute. Overrides the search of `data/` and the root. Required when that search finds several files. |
+| `data_file` | path | none | Names the data file, relative to the experiment directory. Overrides the search of `data/` and the root. Required when that search finds several files. May name a file outside the directory (see below). Never inherited from the Project Defaults. |
 | `global` | mapping | type defaults | Time unit, axis label, censoring policy, quality threshold. See [The global: section](help:config-global). |
 | `input` | mapping | see below | How to read a CSV/TSV. See [The input: section](help:config-input). |
 | `exclusions` | mapping | none | `group: <name>` names the active [Exclusion Group](help:exclusions). Blank (`group: ''`) means no group; absent means no group unless the Project Defaults name one, which a member then inherits. |
@@ -70,6 +70,28 @@ scripts:
 | `omit` | mapping | nothing left out | Analyses and figures every run leaves out. See [The omit: section](help:config-omit). |
 | `scripts` | list | `Standard analysis` | Saved Experiment Scripts. See [Experiment and Project Scripts](help:scripts-overview). |
 | `factors` | mapping | none | **Legacy.** A pre-Focus factor block. If there is no `focuses:` block, it becomes one Focus called `Interaction`, and it is removed the next time Focuses are saved. |
+
+### data_file
+
+`data_file:` names the file this experiment reads. Write it relative to the experiment directory, with forward slashes.
+
+- **Inside the directory** (`data/cohort_b.xlsx`): it picks one of several data files in the folder. That is what **Set data file…** writes. Other data files beside it are fine.
+- **Outside the directory**: the experiment reads that file where it lies, and nothing is copied. For example:
+
+  ```yaml
+  data_file: ../../../../../runs/lifespan/2026/R-20261020-asmith-01/data/R-20261020-asmith-01.xlsx
+  ```
+
+  Everything the analysis writes still goes into the experiment directory. Nothing is ever written beside the named file. The run summary and the reports record the path as written and as resolved.
+
+An outside `data_file:` blocks the member, and the run stops with a message naming the key, the path as written and the resolved path, when:
+
+- the file does not exist, or is a folder;
+- the experiment directory also holds a data file of its own, in `data/` or at its root (a **conflict**: which one is the experiment?). An empty `data/` folder, Excel lock files (`~$…`), hidden files and `remove_chambers.csv` do not count.
+
+An absolute path works, but **Validate YAMLs** warns that it will break when the folders move or are opened from another computer. A path with backslashes gets the same warning: backslashes are a separator only on Windows.
+
+`data_file:` belongs to one member. It is never inherited from the Project's `defaults:`, and a `defaults: data_file:` is reported by Validate YAMLs as ignored. In a Project, two members whose `data_file:` resolves to the same file are one member: the first in name order is analysed and the other is reported as a `duplicate`.
 
 ### exclusions
 
@@ -103,7 +125,7 @@ A list of saved step lists, each with `name`, optional `notes` and `steps` (each
 
 ## Members and Project Defaults
 
-For a Member Experiment, this file is merged with the Project's `defaults:` before use. Anything the member states wins. `global`, `input`, `exclusions` and `omit` merge key by key, so a member can override one setting without restating the whole section. `focuses` is never inherited. A member scaffolded by the app is deliberately minimal (often just `experiment_type` and `scripts`), so later edits to the Project Defaults keep reaching it. See [project.yaml and Project Defaults](help:config-project).
+For a Member Experiment, this file is merged with the Project's `defaults:` before use. Anything the member states wins. `global`, `input`, `exclusions` and `omit` merge key by key, so a member can override one setting without restating the whole section. `focuses` and `data_file` are never inherited. A member scaffolded by the app is deliberately minimal (often just `experiment_type` and `scripts`), so later edits to the Project Defaults keep reaching it. See [project.yaml and Project Defaults](help:config-project).
 
 ## Checking the file
 

@@ -530,9 +530,9 @@ class QcViewerWindow(QMainWindow):
     def _bare_data_file(self) -> Path | None:
         """A folder with no config: the loader's own search, and a choice —
         never a silent pick — when it finds several files."""
-        from ..domain.layout import data_candidates
+        from ..domain.layout import data_location
 
-        _base, found = data_candidates(self._project_dir)
+        found = list(data_location(self._project_dir).candidates)
         if not found:
             QMessageBox.warning(
                 self, "No data",

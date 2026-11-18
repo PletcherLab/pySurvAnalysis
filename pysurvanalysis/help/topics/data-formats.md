@@ -8,7 +8,7 @@ The file type is decided by its extension. For a workbook, `input.format` in `su
 
 Each Experiment Directory has exactly one data file. The app looks for it in this order:
 
-1. The file named by `data_file:` in `survival_config.yaml`, if that key is set (a path relative to the experiment directory, or an absolute path).
+1. The file named by `data_file:` in `survival_config.yaml`, if that key is set: a path relative to the experiment directory (an absolute path works, with a warning). It may name a file outside the directory, which is then only read, never written beside. See [survival_config.yaml reference](help:config-experiment).
 2. Otherwise, any `.xlsx`, `.csv` or `.tsv` in the `data/` subdirectory.
 3. Otherwise, any such file at the directory root.
 

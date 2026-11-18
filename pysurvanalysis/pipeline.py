@@ -108,6 +108,10 @@ class AnalysisResult:
         #: ``{"chamber", "treatment", "n"}`` for every chamber of this Focus
         #: below it — a warning in the report, never an exclusion.
         self.min_n_per_chamber: int = 0
+        #: ``{"written", "resolved"}`` when the experiment reads a Referenced
+        #: Data File — a ``data_file:`` outside its directory (ADR-0013) —
+        #: else None, and nothing about the run's records changes.
+        self.data_location: dict | None = None
         self.small_chambers: list[dict] = []
         #: The ``omit:`` selection this run applied, ``{"analyses", "plots"}``
         #: as sorted ids — recorded so a later change to it reads as Out of Date.
@@ -256,8 +260,10 @@ def run_analysis(
     config = dict(experiment.config) if experiment is not None else {}
 
     # ── Resolve the input file ─────────────────────────────────────────────
+    data_location = None
     if experiment is not None:
         input_path = experiment.data_file()
+        data_location = experiment.data_location().provenance()
     else:
         input_path = Path(input_path)
         if input_path.is_dir():
@@ -297,6 +303,10 @@ def run_analysis(
         csv_format = "auto" if fmt in {"auto", "excel"} else fmt
 
     emit(f"Loading {input_path.name}…")
+    if data_location:
+        ## Where it came from, as written and as resolved (ADR-0013).
+        emit(f"  data_file: {data_location['written']} → "
+             f"{data_location['resolved']}")
     raw_data, discovered_factors = data_loader.load_experiment(
         input_path,
         assume_censored=assume_censored,
@@ -468,6 +478,7 @@ def run_analysis(
     result.experiment = experiment
     result.experiment_type = exp_type
     result.exclusion_group = exclusion_group
+    result.data_location = data_location
     result.figure_paths = {}
     result.focus = focus
     result.focus_shape = shape
@@ -891,6 +902,8 @@ def _write_run_summary(result: AnalysisResult, output_dir: Path) -> None:
     payload = {
         "analyzed_at": datetime.now().isoformat(timespec="seconds"),
         "input_file": result.input_file.name,
+        **({"data_location": dict(result.data_location)}
+           if getattr(result, "data_location", None) else {}),
         "data_sha256": _sha256(result.input_file),
         "experiment_type": getattr(result.experiment_type, "key", "standard_lifespan"),
         "focus": result.focus_record,

@@ -30,7 +30,7 @@ The words pySurvAnalysis uses, in plain language, in alphabetical order. Each en
 
 **Blocked Focus** – A Focus that cannot run as declared. Either it is *stale* (it names a factor or level the data file does not contain) or it is *empty* (a treatment the data holds has no individuals left after exclusions). The member's other Focuses still run. → [Analysed, Out of Date, Blocked and Orphaned results](help:focus-status)
 
-**Blocked Member** – A Member Experiment a run cannot use yet: data with no `survival_config.yaml`, a config with no data file, or several candidate data files with none named. The Project still runs its other members. → [The Batch preflight](help:preflight)
+**Blocked Member** – A Member Experiment a run cannot use yet: data with no `survival_config.yaml`, a config with no data file, several candidate data files with none named, a `data_file:` outside the folder beside a data file of its own (conflict), or a second member reading a file another member already reads (duplicate). The Project still runs its other members. → [The Batch preflight](help:preflight)
 
 ## C
 

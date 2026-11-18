@@ -15,7 +15,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import config as cfgmod
-from .experiment import is_data_file
 
 LEGACY_SCRIPTS_FILENAME = "survival_scripts.yaml"
 LEGACY_EXCLUSIONS_FILENAME = "remove_chambers.csv"
@@ -51,13 +50,12 @@ def needs_upgrade(directory: str | Path) -> bool:
 
 
 def _data_candidates(directory: Path) -> list[Path]:
-    out: list[Path] = []
-    for base in (directory / "data", directory):
-        if base.is_dir():
-            out.extend(sorted(p for p in base.iterdir() if is_data_file(p)))
-        if out:
-            break
-    return out
+    """The loader's own search, from the one resolver (ADR-0013) — never a
+    lookalike. Only ever asked of a directory with no config, so there is no
+    ``data_file:`` to honour."""
+    from . import layout
+
+    return list(layout.data_location(directory).candidates)
 
 
 def sniff_config(data_file: Path | None, type_key: str | None = None) -> dict:

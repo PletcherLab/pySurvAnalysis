@@ -554,15 +554,29 @@ class HubWindow(QMainWindow):
                               "named after the file, the file lands in its "
                               "data/, and a minimal config is written.")
         adopt_file.clicked.connect(self._action_add_experiment)
+        ## The third way in from outside (ADR-0013): the member folder is the
+        ## Project's, the workbook stays where it is — a locked run, say —
+        ## and is only ever read. Its own row: the panel has no room for a
+        ## third button beside the other two.
+        reference = ActionButton("Reference data file…", Category.NEUTRAL,
+                                 icon_name="excel")
+        reference.setToolTip(
+            "Make a member that reads one DLife workbook where it lies, "
+            "outside the Project: nothing is copied or moved. The member "
+            "folder is named after the file, and its minimal config names "
+            "the workbook with a relative data_file:. Everything the "
+            "analysis writes stays in the member folder.")
+        reference.clicked.connect(self._action_reference_data_file)
         for i, btn in enumerate((adopt_dir, adopt_file)):
             grid.addWidget(btn, 0, i)
+        grid.addWidget(reference, 1, 0, 1, 2)
         for col in range(2):
             grid.setColumnStretch(col, 1)
         members_card.add_body(grid)
 
         ## Nothing here has anything to inherit from until a Project is open.
         self._member_action_buttons = [create_exp, init_exp, configs_btn,
-                                       adopt_dir, adopt_file]
+                                       adopt_dir, adopt_file, reference]
         self._set_member_actions_enabled(False)
         self._panels["project"].add_card(members_card)
 
@@ -1107,6 +1121,12 @@ class HubWindow(QMainWindow):
                 self._create_member_config(name)
                 self._refresh_all()
             return
+        duplicates = dict(zip(self._project.duplicates(),
+                              self._project.duplicate_notes()))
+        if name in duplicates:
+            self._warn(f"{duplicates[name]}.\n\nNothing is loaded: one data "
+                       f"file is analysed once per Project.")
+            return
         try:
             experiment = self._project.member(name)
             label = experiment.type.label
@@ -1114,7 +1134,12 @@ class HubWindow(QMainWindow):
             self._warn(str(exc))
             return
         self._experiment = experiment
-        self._log.append_line(f"Loaded {name} ({label}).")
+        location = experiment.data_location().provenance()
+        ## Where a Referenced Data File came from, as written and resolved
+        ## (ADR-0013); every other load message is as it was.
+        where = (f" — data_file: {location['written']} → {location['resolved']}"
+                 if location else "")
+        self._log.append_line(f"Loaded {name} ({label}){where}.")
         self._refresh_all()
         ## Loading is a means, not an end, but analysing comes second: every
         ## experiment-level surface acts on the Active Focus, so the
@@ -1189,6 +1214,10 @@ class HubWindow(QMainWindow):
         problems = project.validate()
         if problems:
             parts.append(f"{len(problems)} problem(s) — run Validate YAMLs.")
+        duplicates = project.duplicates()
+        if duplicates:
+            parts.append(f"{len(duplicates)} duplicate(s), not analysed: "
+                         f"{', '.join(duplicates)}")
         self._project_summary.setText("<br>".join(parts))
         self._project_summary.setToolTip(str(project.directory))
 
@@ -1554,6 +1583,23 @@ class HubWindow(QMainWindow):
                         if cell is not None:
                             cell.setForeground(brush)
                             cell.setToolTip(detail)
+            ## A duplicate is not a member — an earlier one already reads its
+            ## data file (ADR-0013) — but it has a config, so it is listed
+            ## the way a blocked member is, and says which member is kept.
+            for note, name in zip(self._project.duplicate_notes(),
+                                  self._project.duplicates()):
+                self._append_row(self._members_table, [
+                    name, "yes", "—", "—", f"blocked: {layout_mod.DUPLICATE}",
+                    "—",
+                ])
+                row = self._members_table.rowCount() - 1
+                brush = QBrush(blocked_color())
+                for column in range(self._members_table.columnCount()):
+                    cell = self._members_table.item(row, column)
+                    if cell is not None:
+                        cell.setForeground(brush)
+                        cell.setToolTip(f"Blocked — {note}. Decide which member "
+                                        f"should read that file.")
             ## The third state, listed rather than left invisible: a folder in
             ## the Project with no survival_config.yaml is not a member, so
             ## nothing else in the Hub can see it — and a table that shows
@@ -1643,6 +1689,9 @@ class HubWindow(QMainWindow):
         if place.status == layout_mod.NO_DATA:
             return ("Put its .xlsx/.csv/.tsv in data/ (or the directory root), "
                     "or point `data_file:` at it.")
+        if place.status == layout_mod.CONFLICT:
+            return ("Remove `data_file:` to analyse the local file, or move the "
+                    "local file out to keep reading the referenced one.")
         return "It has to be sorted out by hand."
 
     def _refresh_action_panels(self) -> None:
@@ -2300,9 +2349,11 @@ class HubWindow(QMainWindow):
             ## but its one config still deserves the button — this absorbed
             ## the Tools panel's "Validate config".
             if self._experiment is not None:
+                warnings: list[str] = []
                 try:
-                    problems = SurvivalExperiment(
-                        self._experiment.directory).validate()
+                    fresh = SurvivalExperiment(self._experiment.directory)
+                    problems = fresh.validate()
+                    warnings = fresh.warnings()
                 except ValueError as exc:         # the file does not parse
                     problems = [str(exc)]
                 if problems:
@@ -2313,6 +2364,9 @@ class HubWindow(QMainWindow):
                 else:
                     self._log.append_line(
                         f"{self._experiment.name}: config is valid.")
+                ## Never fatal: it works, but will not travel (ADR-0013).
+                for warning in warnings:
+                    self._log.append_line(f"  warning — {warning}")
                 return
             self._warn("No Project selected.")
             return
@@ -2321,10 +2375,15 @@ class HubWindow(QMainWindow):
         ## exactly what this button is for, and the loaded copy cannot see it.
         ## One that escapes as a ValueError is listed, never raised.
         divergences = []
+        warnings: list[str] = []
         try:
             project = Project(self._project.directory)
             problems = project.validate()
             divergences = project.divergences()
+            ## Member warnings only: a duplicate is listed with the blocked
+            ## members below, the way the preflight lists it.
+            warnings = [f"{m.name}: {w}" for m in project.members()
+                        for w in m.warnings()]
         except (ProjectError, ValueError) as exc:
             problems = [str(exc)]
         if problems:
@@ -2335,6 +2394,8 @@ class HubWindow(QMainWindow):
             self._log.append_line("Project validation passed.")
         for divergence in divergences:
             self._log.append_line(f"  divergence — {divergence}")
+        for warning in warnings:
+            self._log.append_line(f"  warning — {warning}")
 
         ## Blocked members are a validation result too — a directory holding
         ## data with no config is not a member yet, so nothing above sees it.
@@ -2733,6 +2794,29 @@ class HubWindow(QMainWindow):
         self._log.append_line(
             f"Added member {member.name}: {verb} {source.name} into "
             f"{member.data_dir}.")
+        self._refresh_all()
+
+    def _action_reference_data_file(self) -> None:
+        """A member that reads its workbook where it is (ADR-0013). Thin on
+        purpose: the rules — validation, the relative path, the refusals —
+        are :meth:`Project.reference_data_file`'s."""
+        if self._project is None:
+            self._warn("Create or select a Project first.")
+            return
+        path, _filter = QFileDialog.getOpenFileName(
+            self, "Reference a DLife workbook where it is",
+            str(self._project.directory.parent), "DLife workbook (*.xlsx)")
+        if not path:
+            return
+        try:
+            member = self._project.reference_data_file(Path(path))
+        except (ProjectError, OSError, ValueError) as exc:
+            self._warn(str(exc))
+            return
+        location = member.data_location()
+        self._log.append_line(
+            f"Added member {member.name}: reads {location.describe()} — "
+            f"nothing copied.")
         self._refresh_all()
 
     # ── the three states a Project directory can be in ─────────────────────

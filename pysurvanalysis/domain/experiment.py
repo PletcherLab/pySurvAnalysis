@@ -293,42 +293,60 @@ class SurvivalExperiment:
 
     # ── the input file ─────────────────────────────────────────────────────
 
+    def data_location(self):
+        """Which file this experiment reads, and how that was decided — the
+        one resolver the classifier, the Project and Batch discovery ask too
+        (:func:`~pysurvanalysis.domain.layout.data_location`, ADR-0013).
+
+        From the member's own config: ``data_file:`` is never inherited from
+        the Project Defaults, because it names this member's file.
+        """
+        from . import layout
+
+        return layout.data_location(self.directory, config=self.raw_config)
+
     def data_file(self) -> Path:
         """The input workbook/CSV.
 
         A ``data_file:`` key in the config wins; otherwise ``data/`` is searched
         before the directory root. Exactly one candidate must survive — an
         ambiguous directory is an error naming what it found, never a silent
-        pick.
+        pick. A ``data_file:`` outside the directory is a Referenced Data File
+        (ADR-0013): returned resolved, and refused with a
+        :class:`~pysurvanalysis.domain.layout.DataLocationError` — naming the
+        key, the value as written and the resolved path — when it is missing,
+        a folder, or beside a data file of the directory's own. Nothing is
+        written either way.
         """
-        named = self.config.get("data_file")
-        if named:
-            candidate = Path(named)
-            if not candidate.is_absolute():
-                candidate = self.directory / candidate
-            if not candidate.is_file():
-                raise ExperimentError(
-                    f"{self.name}: `data_file: {named}` does not exist "
-                    f"(looked at {candidate})."
-                )
-            return candidate
+        from . import layout
 
-        for base in (self.data_dir, self.directory):
-            if not base.is_dir():
-                continue
-            found = sorted(p for p in base.iterdir() if is_data_file(p))
-            if len(found) == 1:
-                return found[0]
-            if len(found) > 1:
-                raise ExperimentError(
-                    f"{self.name}: {len(found)} data files in {base.name or '.'} "
-                    f"({', '.join(p.name for p in found)}). Name one with "
-                    f"`data_file:` in {cfgmod.CONFIG_FILENAME}."
-                )
+        location = layout.require_data_location(
+            self.directory, config=self.raw_config, name=self.name)
+        if location.referenced:
+            return location.path
+
+        found = list(location.candidates)
+        if len(found) == 1:
+            return found[0]
+        if len(found) > 1:
+            raise ExperimentError(
+                f"{self.name}: {len(found)} data files in "
+                f"{location.base.name or '.'} "
+                f"({', '.join(p.name for p in found)}). Name one with "
+                f"`data_file:` in {cfgmod.CONFIG_FILENAME}."
+            )
         raise ExperimentError(
             f"{self.name}: no .xlsx/.csv/.tsv found in {self.directory} or its "
             f"data/ subdirectory."
         )
+
+    def warnings(self) -> list[str]:
+        """What works but will not travel — never fatal, unlike
+        :meth:`validate`: an absolute or backslashed ``data_file:``
+        (:func:`config.config_warnings`)."""
+        if self.config_error:
+            return []
+        return cfgmod.config_warnings(self.raw_config)
 
     def has_data(self) -> bool:
         try:
@@ -712,10 +730,15 @@ class SurvivalExperiment:
             return [self.config_error]
         problems = list(cfgmod.validate_config(self.config))
         if not self.has_data():
-            problems.append(
-                f"No input data file found in {self.directory.name} "
-                f"(looked in data/ and the directory root)."
-            )
+            location = self.data_location()
+            if location.external and location.problem:
+                ## It never looked in data/: say what it did look at.
+                problems.append(f"{location.problem}.")
+            else:
+                problems.append(
+                    f"No input data file found in {self.directory.name} "
+                    f"(looked in data/ and the directory root)."
+                )
         return problems
 
     # ── blocking ───────────────────────────────────────────────────────────
@@ -814,6 +837,11 @@ class SurvivalExperiment:
                                   f"the data file readable?")
         if self.materialize_focuses():
             focus = self.focus(focus.name)
+        location = self.data_location()
+        if location.external and location.problem:
+            ## A Referenced Data File the loader refuses is refused before
+            ## anything is created (ADR-0013). Every other case is as it was.
+            self.data_file()
         self.ensure_dirs()
         result = pipeline.run_analysis(
             self.data_file(),

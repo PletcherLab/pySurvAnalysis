@@ -35,10 +35,14 @@ _Avoid_: member, batch member, replicate
 
 **Blocked Member**:
 A Member Experiment a run cannot use as it stands: a directory holding data
-with no `survival_config.yaml`, a config with no data file, or an **ambiguous**
-one holding several candidate files where the loader refuses to guess. Each
-reason names its own fix — scaffold the config, supply the data, or name one
-with `data_file:`. Blocked is a property of the Member Experiment, never of
+with no `survival_config.yaml`, a config with no data file, an **ambiguous**
+one holding several candidate files where the loader refuses to guess, a
+**conflict** — a **Referenced Data File** beside a data file of the folder's
+own — or a **duplicate**, reading a data file an earlier member already reads
+(one data file, one member; ADR-0013). Each reason names its own fix —
+scaffold the config, supply the data, name one with `data_file:` — except the
+last two, which are a person's decision about which file or which member is
+the experiment. Blocked is a property of the Member Experiment, never of
 the Project: a Project with four healthy members and one blocked member runs
 the four. Blocked members are named before a Batch Run starts and again in its
 summary — being reported is the whole point, and a run is never refused
@@ -95,13 +99,14 @@ time unit and censoring policy, input settings, the default Exclusion Group
 name, quality criteria. The data-source concerns, in other words — the same
 boundary the Experiment Type now draws. It is *not* an authority: the only
 value hard-validated across members is the **Experiment Type**. It never
-carries design: factors are discovered, and **`focuses:` is the one section a
+carries design: factors are discovered, and **`focuses:` is a section a
 member never inherits** — members rarely share factors, so an inherited Focus
 would be a Blocked Focus in every member it does not fit, and editing one
 would silently put every member's results Out of Date at once. Sharing a
 design is the explicit *Copy Focuses from…* in the Focus window, validated
 against the receiving member's discovered factors before it is written — the
-same move ADR-0005 made for Styles.
+same move ADR-0005 made for Styles. Nor is `data_file:` inherited: it names
+one member's own file (ADR-0013).
 _Avoid_: design (the PyTrackingAnalysis term, which IS an authority and
 implies pooling)
 
@@ -109,27 +114,46 @@ implies pooling)
 An Experiment that belongs to a Project — one data file, analysed apart from
 its siblings and never pooled with them, related to them by the *question*
 they address rather than by an identical design. Within it, each **Focus** is
-analysed on its own; a member is the container, the Focus the unit. The Hub's Experiments card offers five ways to get one,
+analysed on its own; a member is the container, the Focus the unit. The Hub's Experiments card offers six ways to get one,
 answering two different questions (ADR-0010). **What state is the folder in?**
 — it does not exist (**Create experiment…**), its directory is in the Project
 but has no config (**Initialize existing directory…**), or it is a member
 already (the table, and **Experiment configs…** for the bulk view). **Where
-does it come from?** — ADR-0008's two ways in from outside, and the Hub keeps
-them strictly outside: an existing directory copied in (**Add directory**
-refuses a folder already in the Project, naming Initialize instead), or one
-built around a single DLife workbook (moved in if it was already loose in the
-Project tree, copied otherwise).
+does it come from?** — the three ways in from outside, and the Hub keeps them
+strictly outside: an existing directory copied in (**Add directory** refuses a
+folder already in the Project, naming Initialize instead), one built around a
+single DLife workbook (moved in if it was already loose in the Project tree,
+copied otherwise), or one that reads a workbook where it lies, as a
+**Referenced Data File** (**Reference data file…**, ADR-0013).
 _Avoid_: replicate (implies same-design repeats and pooling — the very thing
 this app does not do), arm, variant
 
 **Experiment Directory**:
 One data file's directory — `survival_config.yaml` at its root, the input
-workbook/CSV at the root or in `data/`, outputs in `analysis/<focus>/` one
+workbook/CSV at the root or in `data/` (or wherever `data_file:` names — a
+**Referenced Data File** when that is outside it), outputs in `analysis/<focus>/` one
 subdirectory per **Focus**, QC state in `qc/` — either standalone or as a
 Member Experiment inside a Project. The file may hold several experiments; the
 directory holds them all and the Focuses tell them apart.
 _Avoid_: project directory (the pre-overhaul name), results folder,
 `<stem>_results/` (the superseded output convention)
+
+**Referenced Data File**:
+A data file a Member Experiment reads from **outside its own folder**, named
+by `data_file:` relative to that folder in forward slashes
+(`../../../../../runs/lifespan/2026/R-…/data/R-….xlsx`) — a recording kept in
+a locked folder several studies share, say (ADR-0013, amending ADR-0008's
+"copy in, never reference"). The Project owns the member folder and everything
+written to it; the referenced file is only ever read, and nothing is written
+beside it. A `data_file:` inside the member folder is not one: that is the
+key's older job, naming one of several local files (**Set data file…**), and
+it behaves exactly as it always did. A Referenced Data File beside a data file
+of the folder's own is a **conflict**, never a guess; one that is missing or
+a folder blocks the member with the resolved path as the reason. Its run
+records the path as written and as resolved; nothing else's does.
+_Avoid_: linked data, external data (says nothing about who may write),
+symlink (a different mechanism, rejected), data folder (the sister app's key
+names a folder; this one names a file)
 
 **Experiment Type**:
 A named bundle describing the **data source** — the expected input shape, the
@@ -606,7 +630,8 @@ factors, their ordered levels and its Reference Levels — the Exclusion Group
 and which chambers it actually removed — the stamp is `base + extra` when a
 script excluded more — the data file's content hash, the censoring policy, the
 `omit:` selection, the figures
-written, any **Not Applicable** actions and why, the omnibus test, and each
+written, any **Not Applicable** actions and why, where a **Referenced Data
+File** came from (`data_location:` — as written and as resolved), the omnibus test, and each
 factorial model's headline numbers). One per Focus, never one per directory: that is what keeps analysing a second
 Focus from overwriting the first. Recording the definition is what lets the Hub
 and the report notice when a Focus has changed since it was analysed — see
@@ -754,3 +779,8 @@ _Avoid_: template config, full config
 - "Member" was about to name both a Batch's Projects (following the sister
   app) and a Project's experiments — resolved: a Batch's children are **Batch
   Projects**; "member" belongs to the Project→Experiment level alone.
+- "The Project owns its members' data" (ADR-0008) meant both *the member
+  folder and its outputs* and *the recording itself* — resolved (ADR-0013): the
+  Project owns every member folder and everything written to it; a member may
+  read its data file from outside as a **Referenced Data File**, which it
+  never writes.

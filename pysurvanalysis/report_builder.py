@@ -194,6 +194,14 @@ def _cover(result, name: str) -> m.Cover:
         ("Slice", rec.get("description") or "—"),
         ("Experiment type", getattr(exp_type, "label", "Standard Lifespan")),
         ("Data file", result.input_file.name),
+    ]
+    ## A Referenced Data File says where it came from, as written and as
+    ## resolved (ADR-0013); every other report's cover is as it was.
+    location = getattr(result, "data_location", None)
+    if location:
+        meta.append(("Data location", f"data_file: {location['written']} → "
+                                      f"{location['resolved']}"))
+    meta += [
         ("Generated", datetime.now().strftime("%Y-%m-%d %H:%M")),
         ("Varying factors", ", ".join(result.factors) or "none"),
         ("Treatments", str(es.get("n_treatments", "?"))),

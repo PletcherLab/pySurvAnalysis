@@ -18,7 +18,7 @@ One top-level row per Project, with child rows for what is wrong inside it.
 |---|---|---|
 | **Project** | checkbox and key (path relative to the Batch folder) | a blocked member's folder name, or `member · Focus` for a Blocked Focus |
 | **Members** | usable / total member folders | blank |
-| **Status** | `ok`, or `N blocked`, `N focus(es) blocked`, or both | the member's status (`no config`, `no data`, `ambiguous`, `unreadable`, `bad config`), or `focus blocked` |
+| **Status** | `ok`, or `N blocked`, `N focus(es) blocked`, or both | the member's status (`no config`, `no data`, `ambiguous`, `conflict`, `duplicate`, `unreadable`, `bad config`), or `focus blocked` |
 
 Projects with anything blocked are shown in red and expanded. Hover over a child row for the full reason.
 
@@ -26,7 +26,9 @@ Projects with anything blocked are shown in red and expanded. Hover over a child
 
 - **no config**: the folder holds a data file but no `survival_config.yaml`. *Fixable here.*
 - **ambiguous**: the folder has a config, but there are several candidate data files and no `data_file:` naming one. The loader refuses to guess. *Fixable here, one member at a time.*
-- **no data**: a config with no `.xlsx`/`.csv`/`.tsv` in `data/` or the folder root, or a `data_file:` naming a file that does not exist. Supply the data outside the app.
+- **no data**: a config with no `.xlsx`/`.csv`/`.tsv` in `data/` or the folder root, or a `data_file:` naming a file that does not exist (or a folder). Supply the data, or correct the path, outside the app.
+- **conflict**: the member's `data_file:` names a file outside its folder, and the folder also holds a data file of its own. Decide which is the experiment outside the app.
+- **duplicate**: an earlier member (in name order) already reads the same data file, so only that one runs. Decide which member should read it outside the app.
 - **unreadable**: the folder cannot be listed (permissions). Fix it outside the app.
 - **bad config**: the member's `survival_config.yaml` is not valid YAML; the detail names the file and line (`survival_config.yaml, line N: not valid YAML — …`). Fix the file in an editor; the rest of the Project runs.
 - **focus blocked**: a Focus names a factor or level the data file no longer contains (**stale**, for example after a level was renamed in the Design sheet), or a cell it keeps has no individuals left after the active Exclusion Group (**empty**). Finding these means reading each usable member's Design sheet. The member's other Focuses still run.
