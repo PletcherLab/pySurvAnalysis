@@ -2724,9 +2724,12 @@ class HubWindow(QMainWindow):
             self._warn(f"{item.name}'s config could not be read, so nothing "
                        f"was written:\n{exc}")
             return
-        config["data_file"] = choice
+        ## Relative to the member folder (data/a.csv), not the bare name the
+        ## choice was offered under — that named a file at the root.
+        value = layout_mod.data_file_value(item.directory, choice)
+        config["data_file"] = value
         cfgmod.save_config(item.directory, config)
-        self._log.append_line(f"{item.name}: data_file: {choice}")
+        self._log.append_line(f"{item.name}: data_file: {value}")
 
     def _action_member_configs(self) -> None:
         """The bulk view over every subdirectory's config."""

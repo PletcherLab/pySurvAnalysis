@@ -1708,7 +1708,7 @@ Hover over a row to see the detail behind its status.
 |---|---|---|
 | **Create config** | scaffolds the selected folder's config from the Project Defaults | the selected row has no config |
 | **Create all missing** | scaffolds every missing config, after confirming the list | any row has no config |
-| **Set data file…** | asks which candidate file is the experiment and writes `data_file:` | the selected row is `ambiguous` |
+| **Set data file…** | asks which candidate file is the experiment and writes `data_file:` as a path relative to the member folder (for example `data_file: data/b.xlsx`) | the selected row is `ambiguous` |
 | **Edit config…** | opens the member's `survival_config.yaml` in your system's YAML editor (there is no built-in config editor) | the selected row has a config |
 
 Double-clicking a row edits it if it has a config, or creates one if it does not.

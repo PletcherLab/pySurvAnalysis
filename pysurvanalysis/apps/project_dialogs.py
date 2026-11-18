@@ -636,9 +636,12 @@ class MemberConfigsDialog(QDialog):
                                 f"{item.name}'s config could not be read, so "
                                 f"nothing was written:\n{exc}")
             return
-        config["data_file"] = choice
+        ## Relative to the member folder (data/a.csv), not the bare name the
+        ## choice was offered under — that named a file at the root.
+        value = layout_mod.data_file_value(item.directory, choice)
+        config["data_file"] = value
         cfgmod.save_config(item.directory, config)
-        self._log(f"{item.name}: data_file: {choice}")
+        self._log(f"{item.name}: data_file: {value}")
         self.changed = True
         self._finish()
 

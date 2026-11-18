@@ -158,6 +158,26 @@ def data_candidates(directory: Path) -> tuple[Path, list[Path]]:
     return directory, []
 
 
+def data_file_value(directory: Path | str, name: str) -> str:
+    """What ``data_file:`` must say to name the candidate *name* — its path
+    relative to the member folder, in forward slashes: ``data/a.csv`` for a
+    file the loader found in ``data/``, ``a.csv`` for one at the root.
+
+    The answer **Set data file…** writes. A candidate is listed by its bare
+    name, and writing that name alone named a file at the root — which, for
+    the usual two workbooks in ``data/``, does not exist, so the repair turned
+    an ambiguous member into one with no data. Looked up in the loader's
+    order, ``data/`` before the root; a name found in neither is returned as
+    given.
+    """
+    directory = Path(directory)
+    for base in (directory / "data", directory):
+        for path in _candidates(base):
+            if path.name == name:
+                return path.relative_to(directory).as_posix()
+    return name
+
+
 def has_config(directory: Path | str) -> bool:
     """``survival_config.yaml`` at the root — the membership test.
 

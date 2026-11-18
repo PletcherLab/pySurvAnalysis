@@ -461,9 +461,12 @@ class BatchPreflightDialog(QDialog):
             self._log(f"[preflight] {member.name}: {exc}")
             QMessageBox.warning(self, "Could not name the data file", str(exc))
             return
-        config["data_file"] = choice
+        ## Relative to the member folder (data/a.csv), not the bare name the
+        ## choice was offered under — that named a file at the root.
+        value = layout_mod.data_file_value(member.directory, choice)
+        config["data_file"] = value
         cfgmod.save_config(member.directory, config)
-        self._log(f"[preflight] {member.name}: data_file: {choice}")
+        self._log(f"[preflight] {member.name}: data_file: {value}")
 
     def focus_member(self, key: str) -> None:
         """Select and reveal the Project *key* — the entry point used by the
