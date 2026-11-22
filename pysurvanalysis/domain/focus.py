@@ -80,7 +80,7 @@ class DiscoveredDesign:
 
     ``cells`` holds full-factor tuples (in :attr:`factors` order) that the file
     populates. For a DLife workbook that is the Design sheet's chambers; for a
-    CSV, the rows themselves.
+    CSV, the rows themselves. A blank factor cell is ``None`` in its tuple.
     """
 
     factors: tuple[str, ...]
@@ -114,35 +114,50 @@ def norm_chamber(value: Any) -> Any:
     return normalize_chamber(value)
 
 
+def _level_text(value: Any) -> str | None:
+    """A factor value as discovery records it — text, or ``None`` for a
+    blank cell (the loader's NaN)."""
+    if value is None:
+        return None
+    try:
+        if value != value:              # NaN, NaT — however it arrived
+            return None
+    except TypeError:                   # pandas.NA has no truth value: blank
+        return None
+    return str(value)
+
+
 def _unique_in_order(values: Iterable[Any]) -> tuple[str, ...]:
+    """The distinct non-blank values, as text, in first-appearance order."""
     seen: dict[str, None] = {}
     for value in values:
-        if value is None:
-            continue
-        try:
-            import math
-
-            if isinstance(value, float) and math.isnan(value):
-                continue
-        except Exception:  # noqa: BLE001
-            pass
-        seen.setdefault(str(value), None)
+        text = _level_text(value)
+        if text is not None:
+            seen.setdefault(text, None)
     return tuple(seen)
 
 
 def design_from_frame(frame, factors: Iterable[str],
                       chamber_col: str | None = None) -> DiscoveredDesign:
-    """Discover factors, levels and cells from a frame, in row order."""
+    """Discover factors, levels and cells from a frame, in row order.
+
+    A row with a blank factor cell is kept, its cell holding ``None`` for
+    that factor: its individuals belong to no level of the factor, so no
+    Focus *naming* it contains them (:meth:`Focus.contains`), but a Focus
+    pooling over it does — and analyses them. Dropping the row hid its
+    chamber from every check that asks which chambers a Focus holds: an
+    Exclusion Group removing it changed the numbers yet read as current,
+    went unstamped, and the cell it kept populated was called empty.
+    """
     names = tuple(str(f) for f in factors)
     if frame is None or not len(frame) or not names:
         return DiscoveredDesign(names, {f: () for f in names}, frozenset())
-    work = frame.dropna(subset=list(names))
-    levels = {f: _unique_in_order(work[f].tolist()) for f in names}
-    rows = [tuple(str(v) for v in row)
-            for row in work[list(names)].itertuples(index=False, name=None)]
+    levels = {f: _unique_in_order(frame[f].tolist()) for f in names}
+    rows = [tuple(_level_text(v) for v in row)
+            for row in frame[list(names)].itertuples(index=False, name=None)]
     chamber_cells: tuple = ()
-    if chamber_col and chamber_col in work.columns:
-        chamber_cells = tuple(zip(work[chamber_col].tolist(), rows))
+    if chamber_col and chamber_col in frame.columns:
+        chamber_cells = tuple(zip(frame[chamber_col].tolist(), rows))
     return DiscoveredDesign(names, levels, frozenset(rows), chamber_cells)
 
 
@@ -325,9 +340,13 @@ class Focus:
         chosen = self.reference.get(factor)
         return str(chosen) if chosen is not None and str(chosen) in levels else levels[0]
 
-    def contains(self, cell: dict[str, str]) -> bool:
-        """True when a full cell (factor → level) lies inside this Focus."""
-        return all(str(cell.get(f)) in levels for f, levels in self.factors.items())
+    def contains(self, cell: dict[str, str | None]) -> bool:
+        """True when a full cell (factor → level) lies inside this Focus. A
+        cell with no level (``None``, a blank in the file) for a factor the
+        Focus names lies outside it — as the run leaves those individuals
+        out of every treatment."""
+        return all(cell.get(f) is not None and str(cell.get(f)) in levels
+                   for f, levels in self.factors.items())
 
     def label_of(self, cell: dict[str, str]) -> str:
         return "/".join(str(cell[f]) for f in self.label_factors)

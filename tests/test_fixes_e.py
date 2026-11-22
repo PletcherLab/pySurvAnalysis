@@ -165,3 +165,70 @@ def test_python_dash_m_reaches_the_same_command_line():
     from pysurvanalysis.cli import main
 
     assert entry.main is main
+
+
+# ---------------------------------------------------------------------------
+# A chamber with a blank factor cell is still a chamber of the file
+# ---------------------------------------------------------------------------
+
+BY_GENOTYPE = {"ByGenotype": {"factors": {"Genotype": ["a", "b"]}}}
+
+
+def _blank_treatment_member(directory, excluded=()):
+    """Four chambers (1: b/a, 2: a/b, 3: b/b, 4: a/–): chamber 4's Treatment
+    cell is blank. A Focus over Genotype alone pools over Treatment, so
+    chamber 4's flies are in its ``a`` treatment."""
+    import openpyxl
+
+    from pysurvanalysis import exclusions
+
+    from conftest import write_dlife_workbook
+
+    path = write_dlife_workbook(directory / "data" / "cohort.xlsx", chambers=4)
+    book = openpyxl.load_workbook(path)
+    sheet = book["Design"]
+    header = [c.value for c in sheet[1]]
+    ## .value, not cell(value=None): openpyxl's cell() ignores a None value.
+    sheet.cell(row=5, column=header.index("Treatment") + 1).value = None
+    book.save(path)
+    cfgmod.save_config(directory, {"experiment_type": "standard_lifespan",
+                                   "input": {"format": "excel"},
+                                   "exclusions": {"group": "default"},
+                                   "focuses": BY_GENOTYPE})
+    exclusions.write_exclusions(directory, "default", list(excluded))
+    return SurvivalExperiment(directory)
+
+
+def test_discovery_keeps_a_chamber_whose_factor_cell_is_blank(tmp_path):
+    exp = _blank_treatment_member(tmp_path / "m")
+    design = exp.design()
+    assert design.levels["Treatment"] == ("a", "b")
+    assert {fm.norm_chamber(c) for c, _cell in design.chamber_cells} == {1, 2, 3, 4}
+    assert fm.focus_chambers(exp.focus("ByGenotype"), design) == {"1", "2", "3", "4"}
+
+
+def test_unfiltered_still_leaves_out_the_chamber_with_no_treatment(tmp_path):
+    exp = _blank_treatment_member(tmp_path / "m")
+    whole = fm.unfiltered(exp.design())
+    assert "4" not in fm.focus_chambers(whole, exp.design())
+
+
+def test_excluding_a_blank_factor_chamber_is_stamped_and_read_as_a_change(tmp_path):
+    from pysurvanalysis import exclusions
+
+    exp = _blank_treatment_member(tmp_path / "m", excluded=[4])
+    result = exp.run_analysis("ByGenotype")
+    assert result.excluded_applied() == ["4"]
+    assert not exp.status().focuses[0].out_of_date
+
+    exclusions.write_exclusions(exp.directory, "default", [])
+    [status] = SurvivalExperiment(exp.directory).status().focuses
+    assert status.out_of_date
+    assert any("no longer excludes 4" in r for r in status.out_of_date_reasons)
+
+
+def test_a_cell_kept_alive_by_a_blank_factor_chamber_is_not_blocked(tmp_path):
+    exp = _blank_treatment_member(tmp_path / "m", excluded=[2])
+    [status] = exp.status().focuses
+    assert status.blocked == ()
+    assert exp.run_analysis("ByGenotype").focus_shape.populated == ("a", "b")

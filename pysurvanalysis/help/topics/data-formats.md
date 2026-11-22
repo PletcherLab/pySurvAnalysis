@@ -35,7 +35,7 @@ Other sheets and extra columns are ignored.
 - `StartTime` — marks where the factor columns begin. Its value is not used in any calculation.
 - **Every column after `StartTime` is a treatment factor** (for example `Sex`, `Genotype`, `Diet`). You never declare factors anywhere else; they are *discovered* from these columns. There must be at least one.
 
-The levels of each factor are discovered in **order of first appearance** down the Design sheet, not alphabetically. That order becomes the default display order and, through it, the default Reference Level of each factor, so put the control level in the first rows if you want it to be the baseline. A blank factor cell means "no level recorded": those individuals belong to no treatment of any Focus that names that factor, and each run says how many there were.
+The levels of each factor are discovered in **order of first appearance** down the Design sheet, not alphabetically. That order becomes the default display order and, through it, the default Reference Level of each factor, so put the control level in the first rows if you want it to be the baseline. A blank factor cell means "no level recorded": those individuals belong to no treatment of any Focus that names that factor, and each run says how many there were. A Focus that does not name the factor pools over it, so it does analyse them — and their chamber counts as one of its chambers wherever that matters: excluding it makes that Focus's results Out of Date, the report counts it as removed, and it keeps its treatment from being called empty.
 
 ### RawData sheet
 
