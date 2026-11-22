@@ -37,7 +37,7 @@ dev = [
 ]
 
 [project.scripts]
-pysurvanalysis = "main:main"
+pysurvanalysis = "pysurvanalysis.cli:main"
 pysurv = "pysurvanalysis.apps.hub:main"
 pysurv-hub = "pysurvanalysis.apps.hub:main"
 pysurv-qc = "pysurvanalysis.apps.qc_viewer:main"

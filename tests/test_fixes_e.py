@@ -137,3 +137,31 @@ def test_copy_config_from_another_member_leaves_its_data_file_behind(
     assert "data_file" not in copied
     assert copied["global_"] == {"note": "kept"}
     assert Project(project.directory).duplicates() == {}
+
+
+# ---------------------------------------------------------------------------
+# Every console script resolves inside the package the wheel ships
+# ---------------------------------------------------------------------------
+
+def test_every_console_script_lives_in_the_shipped_package():
+    """The wheel ships ``pysurvanalysis/`` alone, so ``main:main`` (the
+    repository's root ``main.py``) made the installed ``pysurvanalysis``
+    command fail with ModuleNotFoundError."""
+    import importlib
+    import tomllib
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    meta = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    shipped = meta["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"]
+    for command, target in meta["project"]["scripts"].items():
+        module, _, func = target.partition(":")
+        assert module.split(".")[0] in shipped, f"{command} = {target}"
+        assert callable(getattr(importlib.import_module(module), func)), command
+
+
+def test_python_dash_m_reaches_the_same_command_line():
+    from pysurvanalysis import __main__ as entry
+    from pysurvanalysis.cli import main
+
+    assert entry.main is main
