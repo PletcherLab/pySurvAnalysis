@@ -6,8 +6,6 @@ never trigger a modal.
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from pysurvanalysis.domain import SurvivalExperiment, config as cfgmod
@@ -99,14 +97,9 @@ def test_a_focus_save_keeps_a_hand_written_key_inside_the_focus(tmp_path):
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def quiet_hub():
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    pytest.importorskip("PyQt6")
-    from PyQt6.QtWidgets import QApplication
-
+def quiet_hub(qapp):
     from pysurvanalysis.apps.hub import HubWindow
 
-    app = QApplication.instance() or QApplication([])  # noqa: F841 - kept alive
     window = HubWindow()
     window._warned = []
     window._warn = lambda message: window._warned.append(message)
@@ -232,3 +225,28 @@ def test_a_cell_kept_alive_by_a_blank_factor_chamber_is_not_blocked(tmp_path):
     [status] = exp.status().focuses
     assert status.blocked == ()
     assert exp.run_analysis("ByGenotype").focus_shape.populated == ("a", "b")
+
+
+# ---------------------------------------------------------------------------
+# The Project and Batch discovery agree on who the members are
+# ---------------------------------------------------------------------------
+
+def test_a_symlinked_copy_of_a_member_is_one_member_to_the_project_too(project):
+    from pysurvanalysis.domain import Project, layout
+
+    (project.directory / "rep_a_link").symlink_to(project.directory / "rep_a",
+                                                  target_is_directory=True)
+    listed = [m.name for m in layout.members_in(project.directory)]
+    members = [d.name for d in Project(project.directory).member_dirs()]
+    assert listed == members == ["rep_a", "rep_b"]
+
+
+def test_a_hidden_folder_is_no_member_of_the_project_either(project):
+    import shutil
+
+    from pysurvanalysis.domain import Project, layout
+
+    shutil.copytree(project.directory / "rep_a", project.directory / ".old_rep_a")
+    listed = [m.name for m in layout.members_in(project.directory)]
+    members = [d.name for d in Project(project.directory).member_dirs()]
+    assert listed == members == ["rep_a", "rep_b"]

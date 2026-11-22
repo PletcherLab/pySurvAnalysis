@@ -144,8 +144,11 @@ class Project:
 
     def member_dirs(self) -> list[Path]:
         """Immediate subdirectories holding a ``survival_config.yaml`` — less
-        any **duplicate**: one reading a data file an earlier member already
-        reads (:meth:`duplicates`, ADR-0013)."""
+        a hidden (dot) folder, a symlinked copy of a member already listed
+        (ADR-0009), and any **duplicate**: one reading a data file an earlier
+        member already reads (:meth:`duplicates`, ADR-0013). The same members
+        :func:`layout.members_in` finds, so the Batch Preflight's count is
+        what a run analyses."""
         return self._discover()[0]
 
     def duplicates(self) -> dict[str, str]:
@@ -162,10 +165,20 @@ class Project:
 
         if not self.directory.is_dir():
             return [], {}
-        configured = sorted(
-            d for d in self.directory.iterdir()
-            if d.is_dir() and cfgmod.is_experiment_dir(d)
-        )
+        ## members_in's rules, so the two cannot disagree: no dot folders, and
+        ## one member per real directory — a symlinked copy analysed under a
+        ## second name would be bound into the Project Report twice.
+        configured: list[Path] = []
+        seen: set[str] = set()
+        for d in sorted(self.directory.iterdir(), key=lambda p: p.name):
+            if d.name.startswith(".") or not d.is_dir() \
+                    or not cfgmod.is_experiment_dir(d):
+                continue
+            real = os.path.realpath(d)
+            if real in seen:
+                continue
+            seen.add(real)
+            configured.append(d)
         reads = layout_mod.DataLocations()
         kept: list[Path] = []
         skipped: dict = {}
