@@ -112,7 +112,12 @@ def qapp():
     pytest.importorskip("PyQt6")
     from PyQt6.QtWidgets import QApplication
 
-    return QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])
+    _KEEP_ALIVE.append(app)     # never collected, whoever made it
+    return app
+
+
+_KEEP_ALIVE: list = []
 
 
 #: The 2×2 Focus most fixtures declare.
