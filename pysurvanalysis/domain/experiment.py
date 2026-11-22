@@ -234,6 +234,21 @@ class SurvivalExperiment:
         if self.config_error:
             raise ExperimentError(f"{self.name}: {self.config_error}")
 
+    def _config_on_disk(self) -> dict:
+        """The member's own config as the file holds it *now* — the base every
+        write starts from.
+
+        :attr:`raw_config` is the copy read at construction, and the Hub and
+        the Plot Editor keep an experiment for a whole session: writing that
+        copy back would drop whatever was written to the file since — a
+        script saved in the Script Editor, a key typed in by hand. A file
+        that no longer parses is refused, never written over.
+        """
+        try:
+            return cfgmod.load_config(self.directory)
+        except ValueError as exc:
+            raise ExperimentError(f"{self.name}: {exc}") from None
+
     @property
     def type(self):
         if self._type_error is not None:
@@ -417,7 +432,9 @@ class SurvivalExperiment:
 
         A legacy ``factors:`` block is dropped (its content lives on in the
         Focus it migrated to) and a retired ``experiment_type`` is rewritten,
-        so the file says what the app now does with it.
+        so the file says what the app now does with it. Every other key is
+        the file's as it is now (:meth:`_config_on_disk`), not as it was
+        when this experiment was loaded.
         """
         from ..experiment_types import STANDARD, is_retired
 
@@ -429,7 +446,7 @@ class SurvivalExperiment:
         if len(set(slugs)) != len(slugs):
             raise ExperimentError("Two Focuses would write to the same output "
                                   "directory; rename one.")
-        config = dict(self.raw_config)
+        config = self._config_on_disk()
         config["focuses"] = focusmod.focuses_to_config(focuses)
         config.pop("factors", None)
         if is_retired(config.get("experiment_type")):
@@ -443,11 +460,21 @@ class SurvivalExperiment:
 
         ``Unfiltered`` and a migrated ``Interaction`` are materialised on first
         use, so they can be seen and renamed, and so a later re-sort of the
-        Design sheet cannot move a Reference Level. Returns whether anything
-        was written.
+        Design sheet cannot move a Reference Level.
+
+        Decided against the file as it is now: a ``focuses:`` block written
+        since this experiment was loaded (by hand, say, while the Hub held
+        it) is the declaration, and is read rather than replaced by the
+        ``Unfiltered`` the loaded copy implies. Returns whether the declared
+        Focuses changed — written here, or found on disk — so a caller
+        holding a Focus resolves it again.
         """
-        if focusmod.has_focus_block(self.raw_config):
+        if self.config_error or focusmod.has_focus_block(self.raw_config):
             return False
+        if self._config_on_disk() != self.raw_config:
+            self._reload_config()
+            if focusmod.has_focus_block(self.raw_config):
+                return True
         focuses = self.focuses()
         if not focuses:
             return False
