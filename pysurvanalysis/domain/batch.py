@@ -504,9 +504,12 @@ class Batch:
         (ADR-0007): choosing "each project's own" removes it, and when no
         ``batch.yaml`` exists nothing is written — the file still appears only
         once someone deliberately designates one script for all. Anything else
-        in the file (the central ``project_scripts:``) is carried through.
+        in the file (the central ``project_scripts:``) is carried through —
+        as the file is now: the Hub holds a Batch for a session, and writing
+        back the copy it loaded would drop what was written there since.
         """
         name = str(name).strip() if name else None
+        self._read_config()
         if self.config_error:
             raise ValueError(f"{self.config_error} — fix {cfgmod.BATCH_FILENAME} "
                              f"before designating a script here.")

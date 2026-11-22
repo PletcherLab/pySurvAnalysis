@@ -441,3 +441,22 @@ def test_add_experiment_refuses_a_name_that_escapes_the_project(project, tmp_pat
             project.adopt_data_file(book, name=name)
     assert not (project.directory.parent / "escaped").exists()
     assert not (project.directory / "a").exists()
+
+
+# ---------------------------------------------------------------------------
+# The Batch designation writes over batch.yaml as it is now
+# ---------------------------------------------------------------------------
+
+def test_designating_a_script_keeps_what_was_written_to_batch_yaml_since(tmp_path):
+    from pysurvanalysis.domain import Batch, Project
+
+    Project.create(tmp_path / "batch" / "P1", name="P1")
+    make_experiment_dir(tmp_path / "batch" / "P1" / "rep_a", minimal=True)
+    batch = Batch(tmp_path / "batch")
+    script = {"name": "Central", "steps": [{"action": "build_report"}]}
+    cfgmod.write_yaml(batch.config_path, {"project_scripts": [script]})
+
+    assert batch.designate("Central")
+
+    on_disk = cfgmod.read_yaml(batch.config_path)
+    assert on_disk == {"project_scripts": [script], "script": "Central"}
