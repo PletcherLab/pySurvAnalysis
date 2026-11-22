@@ -92,3 +92,48 @@ def test_a_focus_save_keeps_a_hand_written_key_inside_the_focus(tmp_path):
     exp.rename_focus(name, "Renamed")
 
     assert cfgmod.load_config(exp.directory)["focuses"]["Renamed"]["note"] == "why this slice"
+
+
+# ---------------------------------------------------------------------------
+# Copy config from… never copies another member's data file
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def quiet_hub():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PyQt6")
+    from PyQt6.QtWidgets import QApplication
+
+    from pysurvanalysis.apps.hub import HubWindow
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841 - kept alive
+    window = HubWindow()
+    window._warned = []
+    window._warn = lambda message: window._warned.append(message)
+    yield window
+    window.close()
+
+
+def test_copy_config_from_another_member_leaves_its_data_file_behind(
+        quiet_hub, tmp_path, monkeypatch):
+    import PyQt6.QtWidgets as qtw
+
+    from pysurvanalysis.domain import Project
+
+    from conftest import write_dlife_workbook
+
+    recording = write_dlife_workbook(tmp_path / "runs" / "R1.xlsx")
+    project = Project.create(tmp_path / "proj", name="P")
+    source = project.reference_data_file(recording)
+    _hand_edit(source.directory, global_={"note": "kept"})
+    new = project.add_member("rep_new")
+    quiet_hub._set_selection(project.directory)
+    monkeypatch.setattr(qtw.QFileDialog, "getOpenFileName", staticmethod(
+        lambda *a, **k: (str(source.config_path), "")))
+
+    assert quiet_hub._copy_member_config("rep_new", new.directory)
+
+    copied = cfgmod.load_config(new.directory)
+    assert "data_file" not in copied
+    assert copied["global_"] == {"note": "kept"}
+    assert Project(project.directory).duplicates() == {}

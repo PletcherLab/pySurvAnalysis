@@ -2602,7 +2602,9 @@ class HubWindow(QMainWindow):
         held to at load time (ADR-0001): a config of the wrong Experiment Type
         makes the whole Project refuse to load, and the user would otherwise
         have to find and undo the copy by hand. Differing factors and levels
-        are Divergence, not error, so they are not grounds to refuse.
+        are Divergence, not error, so they are not grounds to refuse. The
+        source's ``data_file:`` is never copied: it names that member's own
+        file (ADR-0013).
         """
         import shutil
 
@@ -2636,12 +2638,27 @@ class HubWindow(QMainWindow):
                 + "\n\nNothing was copied; the scaffolded config is still in "
                 "place.")
             return False
+        ## `data_file:` names the source member's own file (ADR-0013), so it
+        ## is never copied: resolved from this folder it points at the same
+        ## outside recording — a duplicate of the source — or at a file this
+        ## member does not have. This member finds its own data, as a
+        ## scaffold does. A config without the key is copied as it is.
+        names_its_file = layout_mod.DATA_FILE_KEY in config
+        config.pop(layout_mod.DATA_FILE_KEY, None)
         try:
-            shutil.copyfile(source, target)
+            if names_its_file:
+                cfgmod.save_config(directory, config)
+            else:
+                shutil.copyfile(source, target)
         except OSError as exc:
             self._warn(f"Could not copy '{source.name}':\n{exc}")
             return False
         self._log.append_line(f"Copied {source} to {target}")
+        if names_its_file:
+            self._log.append_line(
+                f"[config] {name}: `{layout_mod.DATA_FILE_KEY}:` was not copied "
+                f"— it names {source.parent.name}'s own data file. {name} reads "
+                f"what is in its own folder.")
         ## Conforming is not the same as usable. Report what is left rather
         ## than let the member fail at run time — the same split upstream
         ## makes between "would break the Project" (refused above) and "would

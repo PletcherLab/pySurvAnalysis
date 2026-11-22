@@ -83,8 +83,9 @@ upstream's did not: discovery reaches the rule through `project_kind` →
 `members_in`. Not ported, because there is nothing here to port it to:
 filing (none here), clock repair, Arena's CSV exports, the Config Editor's
 Data folder field (no member Config Editor), and `scaffold_replicate_config`'s
-key-dropping (here `data_file` is in `NEVER_INHERITED`, and no scaffold
-copies another member's config).
+key-dropping (here `data_file` is in `NEVER_INHERITED`, and the Hub's
+*Copy config from…* — the one place a member's config is copied from
+another's — leaves `data_file:` behind, as upstream's scaffold does).
 
 ## Not mirrored — deliberate divergences
 
