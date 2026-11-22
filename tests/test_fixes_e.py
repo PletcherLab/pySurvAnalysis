@@ -397,3 +397,30 @@ def test_every_chamber_excluded_gives_an_empty_frame_not_a_key_error():
                                            excluded_chambers={1})
     assert len(df) == 0
     assert list(df.columns) == ["time", "event", "chamber", "treatment", "Genotype"]
+
+
+# ---------------------------------------------------------------------------
+# The command line's --exclusion-group names both groups, as a script does
+# ---------------------------------------------------------------------------
+
+def test_the_command_lines_extra_group_is_stamped_beside_the_configs(
+        tmp_path, monkeypatch, capsys):
+    import json
+    import sys
+
+    from pysurvanalysis import cli, exclusions
+
+    directory = make_experiment_dir(tmp_path / "lone", exclusion_group="default",
+                                    n_per_cell=8)
+    exclusions.write_exclusions(directory, "default", [3])
+    exclusions.write_exclusions(directory, "extra", [5])
+    monkeypatch.setattr(sys, "argv", ["pysurvanalysis", "run", str(directory),
+                                      "--exclusion-group", "extra"])
+    with pytest.raises(SystemExit) as stop:
+        cli.main()
+    assert stop.value.code == 0, capsys.readouterr().out
+    [summary] = (directory / "analysis").rglob("run_summary_*.json")
+    assert json.loads(summary.read_text())["exclusion_group"] == "default + extra"
+    ## The config alone would not reproduce it, so it reads as Out of Date.
+    [status] = SurvivalExperiment(directory).status().focuses
+    assert status.out_of_date

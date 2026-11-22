@@ -121,6 +121,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
             for problem in problems:
                 print(f"  - {problem}")
             return 2
+        if args.exclusion_group:
+            ## Stamped as a script's apply_exclusions is (`base + extra`): a
+            ## report naming the config's group alone while removing the
+            ## chambers of two would describe a run the config cannot redo.
+            from pysurvanalysis.script_editor.actions import applied_experiment
+            from pysurvanalysis.script_editor.spec import RunContext
+
+            experiment, extra_excluded = applied_experiment(RunContext(
+                experiment=experiment, script_groups=[args.exclusion_group],
+                excluded_chambers=extra_excluded))
         ## Never fatal: it works, but will not travel (ADR-0013).
         for warning in experiment.warnings():
             print(f"  warning — {warning}")

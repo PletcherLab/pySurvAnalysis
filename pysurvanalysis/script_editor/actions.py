@@ -96,7 +96,7 @@ def applied_exclusion_group(ctx: RunContext) -> str | None:
     return " + ".join(names) or None
 
 
-def _applied_experiment(ctx: RunContext):
+def applied_experiment(ctx: RunContext):
     """``(experiment, extra_excluded)`` for an analysis this step runs.
 
     With no extra group, the experiment itself. With one, a shallow copy whose
@@ -107,7 +107,7 @@ def _applied_experiment(ctx: RunContext):
     experiment while the run happens, and must never see the script's group
     as the config's. The Run Summary then differs from the config, so the
     Hub shows the result as Out of Date — true: the config alone would not
-    reproduce it.
+    reproduce it. The command line's ``run --exclusion-group`` uses it too.
     """
     import copy
 
@@ -123,7 +123,7 @@ def _applied_experiment(ctx: RunContext):
     config = dict(experiment.config)
     config["exclusions"] = {"group": label}
     applied.config = config
-    return applied, set(experiment.excluded_chambers()) | extra
+    return applied, set(experiment.excluded_chambers(strict=True)) | extra
 
 
 # ---------------------------------------------------------------------------
@@ -463,7 +463,7 @@ def _exec_run_analysis(params: dict, ctx: RunContext) -> None:
             "run_analysis: no experiment loaded — this action needs an "
             "Experiment Directory."
         )
-    experiment, extra = _applied_experiment(ctx)
+    experiment, extra = applied_experiment(ctx)
     if ctx.focus is not None:
         result = experiment.run_analysis(
             focus=ctx.focus, log=ctx.log, extra_excluded=extra,
@@ -518,7 +518,7 @@ def _exec_report(params: dict, ctx: RunContext) -> None:
     if ctx.experiment is not None:
         results = []
         if ctx.result is None:
-            experiment, extra = _applied_experiment(ctx)
+            experiment, extra = applied_experiment(ctx)
             targets = ([ctx.focus] if ctx.focus is not None
                        else ctx.experiment.focuses())
             for focus in targets:

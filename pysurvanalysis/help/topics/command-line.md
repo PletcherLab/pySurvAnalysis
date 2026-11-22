@@ -27,7 +27,7 @@ The command-line runs read the same configuration files as the Hub — `survival
 | Option | Applies to | Meaning |
 |---|---|---|
 | `--focus NAME` | Experiment Directory | Analyse only this Focus. Repeat to name several. Naming a Focus that is not declared is an error (exit 1). |
-| `--exclusion-group NAME` | both | Also exclude this group's chambers, in addition to the config's active group. |
+| `--exclusion-group NAME` | both | Also exclude this group's chambers, in addition to the config's active group. For an Experiment Directory the report and Run Summary name both groups (`default + NAME`), as a script's `apply_exclusions` does, so the Hub then shows those results as Out of Date. |
 | `--figures` | Experiment Directory | Also render the Publication Figures (see [Publication Figures, Specs and Styles](help:publication-figures)). |
 | `--output-dir DIR`, `-o DIR` | bare file | Where to write the results. |
 | `--no-assume-censored` | bare `.xlsx` | Do not treat individuals unaccounted for at the last census as censored (see [Censoring policy](help:censoring)). For an Experiment Directory the config's `global: assume_censored` decides. |
