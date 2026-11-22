@@ -99,6 +99,22 @@ def _isolated_ui_settings(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path_factory.mktemp("xdg")))
 
 
+@pytest.fixture(scope="session")
+def qapp():
+    """One QApplication for the whole session. One that a fixture creates and
+    then drops is destroyed while its windows still exist, which aborts the
+    interpreter — invisibly in the full suite, where another module's
+    session-wide application is already alive, but whenever a file runs
+    alone."""
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PyQt6")
+    from PyQt6.QtWidgets import QApplication
+
+    return QApplication.instance() or QApplication([])
+
+
 #: The 2×2 Focus most fixtures declare.
 FACTORIAL = "Factorial"
 

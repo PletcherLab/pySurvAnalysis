@@ -673,16 +673,11 @@ def test_v5_adr_0013_exists_and_amends_adr_0008():
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def ref_hub(managed):
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    pytest.importorskip("PyQt6")
-    from PyQt6.QtWidgets import QApplication
-
+def ref_hub(managed, qapp):
     from pysurvanalysis.apps.hub import HubWindow
     from pysurvanalysis.ui import apply_theme
 
-    app = QApplication.instance() or QApplication([])
-    apply_theme(app, "light")
+    apply_theme(qapp, "light")
     window = HubWindow(str(analysis_dir(managed)))
     window._warned = []
     window._warn = lambda message: window._warned.append(message)
@@ -718,15 +713,10 @@ def test_hub_reference_button_says_why_it_refuses(ref_hub, managed, monkeypatch)
     assert not (analysis_dir(managed) / "loose").exists()
 
 
-def test_hub_lists_a_duplicate_as_a_blocked_row(managed):
+def test_hub_lists_a_duplicate_as_a_blocked_row(managed, qapp):
     write_member(analysis_dir(managed), "R-dup", key_for(RUN_1))
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    pytest.importorskip("PyQt6")
-    from PyQt6.QtWidgets import QApplication
-
     from pysurvanalysis.apps.hub import HubWindow
 
-    QApplication.instance() or QApplication([])
     window = HubWindow(str(analysis_dir(managed)))
     try:
         table = window._members_table
