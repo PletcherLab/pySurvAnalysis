@@ -90,6 +90,15 @@ def write_dlife_workbook(path, *, chambers=4, censuses=6, sample_size=20,
     return Path(path)
 
 
+@pytest.fixture(autouse=True)
+def _isolated_ui_settings(tmp_path_factory, monkeypatch):
+    """Point the persisted UI preferences (``ui.json``) at a folder of the
+    test's own. The Hub adds every Project it selects to the recent list, so
+    without this the suite wrote its temporary folders into the user's real
+    ``~/.config/pysurvanalysis/ui.json``."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path_factory.mktemp("xdg")))
+
+
 #: The 2×2 Focus most fixtures declare.
 FACTORIAL = "Factorial"
 

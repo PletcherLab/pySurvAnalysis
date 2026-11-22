@@ -1,8 +1,12 @@
 """Persisted UI preferences (theme mode, recent projects).
 
-Stored as JSON at ``~/.config/pysurvanalysis/ui.json``. No external deps;
-failures are silent so the apps keep working even when the config dir is
-unwritable.
+Stored as JSON at ``$XDG_CONFIG_HOME/pysurvanalysis/ui.json`` (by default
+``~/.config/pysurvanalysis/ui.json``). No external deps; failures are silent
+so the apps keep working even when the config dir is unwritable.
+
+The location is worked out on every call rather than once at import, so a
+caller that points ``XDG_CONFIG_HOME`` elsewhere — the test suite does, for
+every test — is obeyed whenever this module was first imported.
 """
 
 from __future__ import annotations
@@ -12,11 +16,17 @@ import os
 from pathlib import Path
 from typing import Any
 
-_CONFIG_DIR = (
-    Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
-    / "pysurvanalysis"
-)
-_CONFIG_FILE = _CONFIG_DIR / "ui.json"
+
+def config_dir() -> Path:
+    """Where the preferences live. An empty ``XDG_CONFIG_HOME`` counts as
+    unset, as the XDG rule says — never as the current directory."""
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "pysurvanalysis"
+
+
+def config_file() -> Path:
+    return config_dir() / "ui.json"
+
 
 _DEFAULTS: dict[str, Any] = {
     "theme": "auto",
@@ -26,10 +36,11 @@ _DEFAULTS: dict[str, Any] = {
 
 
 def load() -> dict[str, Any]:
-    if not _CONFIG_FILE.is_file():
+    path = config_file()
+    if not path.is_file():
         return dict(_DEFAULTS)
     try:
-        data = json.loads(_CONFIG_FILE.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             return dict(_DEFAULTS)
         merged = dict(_DEFAULTS)
@@ -41,8 +52,9 @@ def load() -> dict[str, Any]:
 
 def save(data: dict[str, Any]) -> None:
     try:
-        _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        _CONFIG_FILE.write_text(
+        path = config_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
             json.dumps(data, indent=2, sort_keys=True), encoding="utf-8"
         )
     except Exception:  # noqa: BLE001
