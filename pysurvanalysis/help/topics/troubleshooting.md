@@ -54,6 +54,12 @@ A wide-format CSV needs `factor_names` (two of them) and either `factor_levels` 
 **`Chamber <id>: RawData records <n> deaths and censorings but its SampleSize is <s> …`** (log, report's Data quality section)
 More individuals were scored in that chamber than the Design sheet says were set up. The run uses the recorded count. Correct `SampleSize` or the RawData rows.
 
+**`Chamber <id>: in RawData (<n> deaths and censorings) but not in the Design sheet …`** (log, report's Data quality section)
+RawData scores a chamber the Design sheet has no row for, so it has no treatment and its flies are not analysed. Add the chamber's row to the Design sheet, or correct the chamber number in RawData.
+
+**`Chamber <id>: SampleSize is blank, so no survivors are assumed …`** (log, report's Data quality section)
+With assumed censoring on, survivors are `SampleSize` minus those scored; a blank `SampleSize` gives no number to assume, so N is what RawData recorded. Fill in `SampleSize`.
+
 **`N row(s) dropped: their time or event is blank or not a number.`** (log, report's Data quality section)
 Some CSV rows could not be read as an individual. Fix or delete them.
 

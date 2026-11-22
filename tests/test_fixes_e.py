@@ -350,3 +350,50 @@ def test_the_interaction_plot_keeps_a_slashed_genotype_whole():
     points = sum(len(c.get_children()) and len(c.lines[0].get_xdata())
                  for c in ax.containers)
     assert points == 4, pd.Series([c.lines[0].get_xdata() for c in ax.containers])
+
+
+# ---------------------------------------------------------------------------
+# The census loader says what it cannot use, and survives an empty result
+# ---------------------------------------------------------------------------
+
+def _census(design_rows, raw_rows):
+    import pandas as pd
+
+    design = pd.DataFrame(design_rows, columns=["Chamber", "SampleSize", "StartTime",
+                                                "Genotype"])
+    raw = pd.DataFrame(raw_rows, columns=["AgeH", "Chamber", "IntDeaths", "Censored"])
+    return raw, design
+
+
+def test_a_rawdata_chamber_missing_from_the_design_sheet_is_said():
+    from pysurvanalysis import data_loader
+
+    raw, design = _census([(1, 5, 0, "wt")],
+                          [(24, 1, 2, 0), (48, 1, 3, 0), (24, 9, 4, 0)])
+    df = data_loader.build_individual_data(raw, design, ["Genotype"])
+    assert len(df) == 5
+    assert any("Chamber 9" in w and "Design sheet" in w
+               for w in df.attrs["load_warnings"]), df.attrs["load_warnings"]
+
+
+def test_a_blank_sample_size_assumes_no_survivors_and_says_so():
+    from pysurvanalysis import data_loader
+
+    raw, design = _census([(1, None, 0, "wt"), (2, 6, 0, "wt")],
+                          [(24, 1, 2, 0), (24, 2, 2, 0)])
+    df = data_loader.build_individual_data(raw, design, ["Genotype"],
+                                           assume_censored=True)
+    assert (df["chamber"] == 1).sum() == 2          # what RawData recorded
+    assert (df["chamber"] == 2).sum() == 6          # 2 deaths + 4 assumed censored
+    assert any("Chamber 1" in w and "SampleSize" in w
+               for w in df.attrs["load_warnings"])
+
+
+def test_every_chamber_excluded_gives_an_empty_frame_not_a_key_error():
+    from pysurvanalysis import data_loader
+
+    raw, design = _census([(1, 5, 0, "wt")], [(24, 1, 2, 0)])
+    df = data_loader.build_individual_data(raw, design, ["Genotype"],
+                                           excluded_chambers={1})
+    assert len(df) == 0
+    assert list(df.columns) == ["time", "event", "chamber", "treatment", "Genotype"]

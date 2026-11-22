@@ -249,6 +249,14 @@ def build_individual_data(
         grp = grp.sort_values("AgeH")
 
         if chamber_id not in design_lookup.index:
+            ## No design row, so no treatment: its flies cannot be analysed,
+            ## and leaving them out without a word is a silently smaller N.
+            scored = int(pd.to_numeric(grp["IntDeaths"], errors="coerce").fillna(0).sum()
+                         + pd.to_numeric(grp["Censored"], errors="coerce").fillna(0).sum())
+            warnings.append(
+                f"Chamber {chamber_id}: in RawData ({scored} deaths and "
+                f"censorings) but not in the Design sheet — it has no "
+                f"treatment and is not analysed; add its row to the Design sheet.")
             continue
 
         chamber_design = design_lookup.loc[chamber_id]
@@ -285,9 +293,16 @@ def build_individual_data(
                 f"censorings but its SampleSize is {int(n0)} — N uses the "
                 f"{accounted} recorded; check the Design sheet or RawData.")
 
-        if assume_censored:
+        if assume_censored and pd.isna(n0):
+            ## Assumed censoring counts survivors as SampleSize minus those
+            ## scored; with no SampleSize there is no number to assume.
+            warnings.append(
+                f"Chamber {chamber_id}: SampleSize is blank, so no survivors "
+                f"are assumed — N is the {accounted} recorded in RawData; "
+                f"check the Design sheet.")
+        elif assume_censored:
             # Remaining individuals are right-censored at the last census time
-            n0 = int(chamber_design["SampleSize"])
+            n0 = int(n0)
             last_time = grp["AgeH"].max()
             remaining = n0 - accounted
             for _ in range(remaining):
@@ -295,7 +310,9 @@ def build_individual_data(
                 rec.update(factor_vals)
                 rows.append(rec)
 
-    df = pd.DataFrame(rows)
+    ## Every chamber excluded (or none scored) is an empty cohort, which the
+    ## run then reports as a Focus with no individuals — not a KeyError.
+    df = pd.DataFrame(rows, columns=["time", "event", "chamber"] + list(factors))
 
     # Build treatment label from factor columns. Blanks join as empty text:
     # under pandas 3 ``astype(str)`` keeps a missing value missing, and the
