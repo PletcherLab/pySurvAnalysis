@@ -64,3 +64,31 @@ def test_a_focus_save_refuses_a_file_that_no_longer_parses(tmp_path):
     with pytest.raises(ExperimentError, match="not valid YAML"):
         exp.save_focuses([focus])
     assert exp.config_path.read_text(encoding="utf-8") == broken
+
+
+# ---------------------------------------------------------------------------
+# Unknown keys inside a Focus ride through a write
+# ---------------------------------------------------------------------------
+
+def test_a_focus_keeps_keys_it_does_not_know_through_a_round_trip():
+    body = {"factors": {"Sex": ["F", "M"]}, "note": "the crowding arm",
+            "future": {"a": [1, 2]}}
+    [focus] = fm.parse_focuses({"focuses": {"Crowding": body}})
+    renamed = focus.copy(name="Crowding2", colours={"F": "#112233"})
+    out = fm.focuses_to_config([renamed])["Crowding2"]
+    assert out["note"] == "the crowding arm"
+    assert out["future"] == {"a": [1, 2]}
+    assert out["colours"] == {"F": "#112233"}
+
+
+def test_a_focus_save_keeps_a_hand_written_key_inside_the_focus(tmp_path):
+    exp = SurvivalExperiment(make_experiment_dir(tmp_path / "lone"))
+    config = cfgmod.load_config(exp.directory)
+    [name] = config["focuses"]
+    config["focuses"][name]["note"] = "why this slice"
+    cfgmod.save_config(exp.directory, config)
+    exp = SurvivalExperiment(exp.directory)
+
+    exp.rename_focus(name, "Renamed")
+
+    assert cfgmod.load_config(exp.directory)["focuses"]["Renamed"]["note"] == "why this slice"

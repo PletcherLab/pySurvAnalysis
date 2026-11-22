@@ -34,6 +34,7 @@ Batch Preflight use it without the analysis stack.
 
 from __future__ import annotations
 
+import copy
 import difflib
 import itertools
 import re
@@ -244,6 +245,10 @@ def _discover_csv(path: Path, opts: dict) -> DiscoveredDesign:
 
 _SLUG_BAD = re.compile(r"[^A-Za-z0-9._-]+")
 
+#: The keys of a Focus's config body this version reads; any other rides
+#: through a write in :attr:`Focus.extra`.
+_KNOWN_BODY_KEYS = frozenset({"factors", "reference", "display_names", "colours"})
+
 
 def slugify(name: str) -> str:
     """A file-system-safe rendering of a Focus name, used in every output path.
@@ -269,6 +274,11 @@ class Focus:
     #: data because nothing was declared) or ``migrated`` (lifted from a
     #: pre-Focus ``factors:`` block). Only ``declared`` is on disk as-is.
     origin: str = "declared"
+    #: Keys of the Focus's config body this version does not know — a note
+    #: typed by hand, a field a later version added. Carried through every
+    #: write untouched, as the config's own unknown keys are; never part of
+    #: the analytic definition.
+    extra: dict[str, Any] = field(default_factory=dict)
 
     # ── identity ───────────────────────────────────────────────────────────
 
@@ -372,6 +382,8 @@ class Focus:
             body["display_names"] = dict(self.display_names)
         if self.colours:
             body["colours"] = dict(self.colours)
+        for key, value in self.extra.items():
+            body.setdefault(key, copy.deepcopy(value))
         return body
 
     @classmethod
@@ -392,8 +404,11 @@ class Focus:
             raw = body.get(key) or {}
             return {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
 
+        extra = {str(k): copy.deepcopy(v) for k, v in body.items()
+                 if str(k) not in _KNOWN_BODY_KEYS}
         return cls(name=str(name), factors=factors, reference=_strmap("reference"),
-                   display_names=_strmap("display_names"), colours=_strmap("colours"))
+                   display_names=_strmap("display_names"), colours=_strmap("colours"),
+                   extra=extra)
 
     def copy(self, **changes) -> "Focus":
         data = {
@@ -403,6 +418,7 @@ class Focus:
             "display_names": dict(self.display_names),
             "colours": dict(self.colours),
             "origin": self.origin,
+            "extra": copy.deepcopy(self.extra),
         }
         data.update(changes)
         return Focus(**data)
