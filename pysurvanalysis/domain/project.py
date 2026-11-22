@@ -538,7 +538,10 @@ class Project:
         member_name = (name or src.stem).strip()
         if not member_name:
             raise ProjectError(f"{src.name} has no usable base name.")
-        dest = self.directory / member_name
+        ## One folder inside the Project, as every other way in requires: a
+        ## separator or `..` here put the member — and the moved workbook —
+        ## outside it.
+        dest = self.member_dir(member_name)
         target = dest / "data" / src.name
         inside = self.directory in src.parents
 

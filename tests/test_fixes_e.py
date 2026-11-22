@@ -424,3 +424,20 @@ def test_the_command_lines_extra_group_is_stamped_beside_the_configs(
     ## The config alone would not reproduce it, so it reads as Out of Date.
     [status] = SurvivalExperiment(directory).status().focuses
     assert status.out_of_date
+
+
+# ---------------------------------------------------------------------------
+# Every way a member is named checks it is one folder inside the Project
+# ---------------------------------------------------------------------------
+
+def test_add_experiment_refuses_a_name_that_escapes_the_project(project, tmp_path):
+    from pysurvanalysis.domain.project import ProjectError
+
+    from conftest import write_dlife_workbook
+
+    book = write_dlife_workbook(tmp_path / "outside" / "cohort.xlsx")
+    for name in ("../escaped", "a/b", ".."):
+        with pytest.raises(ProjectError, match="not a member name"):
+            project.adopt_data_file(book, name=name)
+    assert not (project.directory.parent / "escaped").exists()
+    assert not (project.directory / "a").exists()
