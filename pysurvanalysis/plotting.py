@@ -789,10 +789,20 @@ def _require_crossing(factors: dict[str, list]) -> list[str]:
 def _level_combos(factors: dict[str, list]) -> list[str]:
     """Every combination of *factors*' levels, joined with ``/``, in display
     order (first factor outermost) — the label a curve or line carries."""
+    return list(_combos_by_label(factors))
+
+
+def _combos_by_label(factors: dict[str, list]) -> dict[str, tuple[str, ...]]:
+    """Each combination's label → its levels, in display order.
+
+    Labels are read back through this rather than split on ``/``: a fly
+    genotype is often written with one (``UAS-InR/+``), and splitting it
+    cut the level in two, so its panel and its curves went missing.
+    """
     import itertools
 
-    return ["/".join(map(str, combo))
-            for combo in itertools.product(*(list(v) for v in factors.values()))]
+    return {"/".join(map(str, combo)): tuple(map(str, combo))
+            for combo in itertools.product(*(list(v) for v in factors.values()))}
 
 
 def plot_km_faceted(
@@ -815,13 +825,20 @@ def plot_km_faceted(
     names = _require_crossing(factors)
     lt = lifetable.copy()
     lt["treatment"] = lt["treatment"].astype(str)
-    parts = lt["treatment"].str.split("/", n=1, expand=True)
-    if parts.shape[1] < 2:
-        raise ValueError(
-            "Faceted KM needs treatment labels crossing factors, of the form "
-            "'<level1>/<level2>'."
-        )
-    lt["_f1"], lt["_f2"] = parts[0], parts[1]
+    known = _combos_by_label(factors)
+    if lt["treatment"].isin(list(known)).all():
+        lt["_f1"] = lt["treatment"].map(lambda t: known[t][0])
+        lt["_f2"] = lt["treatment"].map(lambda t: "/".join(known[t][1:]))
+    else:
+        ## Labels from somewhere other than these factors' product: the
+        ## first "/" is the only boundary left to go by.
+        parts = lt["treatment"].str.split("/", n=1, expand=True)
+        if parts.shape[1] < 2:
+            raise ValueError(
+                "Faceted KM needs treatment labels crossing factors, of the form "
+                "'<level1>/<level2>'."
+            )
+        lt["_f1"], lt["_f2"] = parts[0], parts[1]
     f1, rest = names[0], names[1:]
     l2 = _level_combos({f: factors[f] for f in rest})
     f2 = " × ".join(rest)
@@ -955,7 +972,8 @@ def plot_lifespan_interaction(
     """
     names = _require_crossing(factors)
     f_x, line_factors = names[0], names[1:]
-    l1 = _level_combos({f: factors[f] for f in line_factors})
+    line_levels = _combos_by_label({f: factors[f] for f in line_factors})
+    l1 = list(line_levels)
     l2 = [str(lv) for lv in factors[f_x]]
     f1 = " × ".join(line_factors)
     metric = metric.lower()
@@ -964,7 +982,7 @@ def plot_lifespan_interaction(
 
     def _cell(level_x: str, line: str) -> pd.DataFrame:
         mask = individual_data[f_x].astype(str) == str(level_x)
-        for factor, level in zip(line_factors, line.split("/")):
+        for factor, level in zip(line_factors, line_levels[line]):
             mask &= individual_data[factor].astype(str) == str(level)
         return individual_data[mask]
 

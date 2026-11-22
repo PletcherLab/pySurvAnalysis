@@ -288,3 +288,65 @@ def test_a_run_refuses_an_exclusion_file_it_cannot_read(tmp_path):
         assert exp.excluded_chambers() == set()
     finally:
         path.chmod(0o644)
+
+
+# ---------------------------------------------------------------------------
+# A level with a slash in it (fly genotypes) is one level
+# ---------------------------------------------------------------------------
+
+def test_a_genotype_with_a_slash_is_still_fully_crossed():
+    focus = fm.Focus("GxD", {"Genotype": ["UAS-InR/+", "da-GS/UAS-InR"],
+                             "Diet": ["AL", "DR"]})
+    shape = fm.shape_of(focus, focus.implied_labels())
+    assert shape.crossing_gaps == ()
+    assert shape.admits(fm.FACTORIAL_MODEL) == (True, "")
+
+    partial = fm.shape_of(focus, [t for t in focus.implied_labels()
+                                  if t != "da-GS/UAS-InR/DR"])
+    assert partial.crossing_gaps == ("Genotype=da-GS/UAS-InR × Diet=DR",)
+
+
+def _slashed_frame():
+    import numpy as np
+    import pandas as pd
+
+    rng = np.random.default_rng(3)
+    rows = []
+    for g in ("UAS-InR/+", "da-GS/UAS-InR"):
+        for d in ("AL", "DR"):
+            for t in rng.gamma(6.0, 6.0, size=30):
+                rows.append({"time": round(float(t), 2), "event": 1,
+                             "chamber": "N/A", "Genotype": g, "Diet": d})
+    focus = fm.Focus("GxD", {"Genotype": ["UAS-InR/+", "da-GS/UAS-InR"],
+                             "Diet": ["AL", "DR"]})
+    return fm.apply_focus(pd.DataFrame(rows), focus), focus
+
+
+def test_the_faceted_km_keeps_a_slashed_genotype_whole():
+    from pysurvanalysis import lifetable, plotting
+    from pysurvanalysis.experiment_types.factorial import factor_levels
+
+    data, focus = _slashed_frame()
+    fig = plotting.plot_km_faceted(lifetable.compute_lifetables(data),
+                                   factor_levels(focus))
+    axes = [ax for ax in fig.axes if ax.get_title()]
+    assert [ax.get_title() for ax in axes] == ["Genotype: UAS-InR/+",
+                                               "Genotype: da-GS/UAS-InR"]
+    assert all(len(ax.get_lines()) >= 2 for ax in axes)
+
+
+def test_the_interaction_plot_keeps_a_slashed_genotype_whole():
+    import pandas as pd
+
+    from pysurvanalysis import plotting
+    from pysurvanalysis.experiment_types.factorial import factor_levels
+
+    data, focus = _slashed_frame()
+    levels = factor_levels(focus)
+    ## The slashed factor on the lines: the second factor varies along x.
+    swapped = {"Diet": levels["Diet"], "Genotype": levels["Genotype"]}
+    fig = plotting.plot_lifespan_interaction(data, swapped)
+    [ax] = fig.axes
+    points = sum(len(c.get_children()) and len(c.lines[0].get_xdata())
+                 for c in ax.containers)
+    assert points == 4, pd.Series([c.lines[0].get_xdata() for c in ax.containers])

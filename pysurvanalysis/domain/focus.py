@@ -933,8 +933,13 @@ def _crossing_gaps(focus: Focus, populated: Iterable[str]) -> tuple[str, ...]:
     varying = focus.varying_factors
     if len(varying) < 2:
         return ()
-    cells = [label.split("/") for label in populated]
-    cells = [c for c in cells if len(c) == len(varying)]
+    ## Each label back to its levels through the product that built it, never
+    ## by splitting on "/": a fly genotype is often written with one
+    ## (`UAS-InR/+`), and splitting it lost every cell — a fully crossed
+    ## design read as all gaps, and its Factorial Battery as Not Applicable.
+    by_label = {"/".join(combo): combo for combo in
+                itertools.product(*(focus.factors[f] for f in varying))}
+    cells = [by_label[label] for label in populated if label in by_label]
     gaps: list[str] = []
     for i, j in itertools.combinations(range(len(varying)), 2):
         seen = {(c[i], c[j]) for c in cells}
