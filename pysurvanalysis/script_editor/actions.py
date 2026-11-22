@@ -215,7 +215,7 @@ def _exec_apply_exclusions(params: dict, ctx: RunContext) -> None:
     if directory is None:
         raise RuntimeError("apply_exclusions: no experiment directory in context")
     group = str(params.get("group") or "default").strip()
-    chambers = exclusions.chambers_for_group(directory, group)
+    chambers = exclusions.chambers_for_group(directory, group, strict=True)
     ctx.excluded_chambers = (ctx.excluded_chambers or set()) | chambers
     if group not in ctx.script_groups:
         ctx.script_groups.append(group)

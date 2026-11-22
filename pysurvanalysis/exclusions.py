@@ -19,6 +19,7 @@ absence of a ``dfm_id`` column — survival projects don't have DFMs.
 from __future__ import annotations
 
 import csv
+import io
 import math
 import numbers
 from pathlib import Path
@@ -89,19 +90,38 @@ def _sort_key(chamber: Any) -> tuple:
             str(chamber))
 
 
+def _decode(raw: bytes) -> str:
+    """The file's text. utf-8-sig first: a spreadsheet's "CSV UTF-8" save
+    starts with a BOM, which would turn the `group` header into `\ufeffgroup`
+    and silently drop every row. Then cp1252 — Excel's plain "CSV (Comma
+    delimited)" on Windows — so one accented note does not make the whole
+    file unreadable, and latin-1 last, which decodes any byte."""
+    for encoding in ("utf-8-sig", "cp1252"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("latin-1")
+
+
 def _read_rows(path: Path) -> list[dict]:
-    ## utf-8-sig: a spreadsheet's "CSV UTF-8" save starts with a BOM, which
-    ## would turn the `group` header into `﻿group` and silently drop
-    ## every row.
-    with path.open(newline="", encoding="utf-8-sig") as f:
-        return [dict(row) for row in csv.DictReader(f)]
+    text = _decode(path.read_bytes())
+    return [dict(row) for row in csv.DictReader(io.StringIO(text, newline=""))]
 
 
-def read_exclusions(project_dir: str | Path) -> dict[str, list]:
+class ExclusionsUnreadable(ValueError):
+    """``remove_chambers.csv`` exists but cannot be read. A run refuses it:
+    analysing as if no chamber were excluded, under the group's name, would
+    be a wrong result that looks right."""
+
+
+def read_exclusions(project_dir: str | Path, *, strict: bool = False) -> dict[str, list]:
     """Read ``remove_chambers.csv`` and return ``{group: [chamber, ...]}``.
 
-    Returns an empty dict if the file does not exist or cannot be parsed.
-    Chamber lists are sorted (numerically when possible).
+    Returns an empty dict if the file does not exist. One that cannot be
+    read is empty too for a listing surface, and an
+    :class:`ExclusionsUnreadable` naming the file when *strict* — what a run
+    asks for. Chamber lists are sorted (numerically when possible).
     """
     path = read_path(project_dir)
     if not path.exists():
@@ -109,7 +129,11 @@ def read_exclusions(project_dir: str | Path) -> dict[str, list]:
     result: dict[str, list] = {}
     try:
         rows = _read_rows(path)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        if strict:
+            raise ExclusionsUnreadable(
+                f"{path} cannot be read ({exc}) — its exclusions are unknown, "
+                f"so nothing is analysed as if it excluded none.") from None
         return {}
     for row in rows:
         group = str(row.get("group", "") or "").strip()
@@ -231,6 +255,9 @@ def write_exclusions(
     return path.resolve()
 
 
-def chambers_for_group(project_dir: str | Path, group: str) -> set:
-    """Convenience: return the set of chambers excluded by *group*."""
-    return set(read_exclusions(project_dir).get(group, []))
+def chambers_for_group(project_dir: str | Path, group: str, *,
+                       strict: bool = False) -> set:
+    """The set of chambers excluded by *group*. *strict*: a file that exists
+    but cannot be read raises :class:`ExclusionsUnreadable` (a run), rather
+    than reading as empty (a listing)."""
+    return set(read_exclusions(project_dir, strict=strict).get(group, []))

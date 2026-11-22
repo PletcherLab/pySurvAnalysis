@@ -680,13 +680,21 @@ class SurvivalExperiment:
     def exclusion_group(self) -> str | None:
         return cfgmod.exclusion_group(self.config)
 
-    def excluded_chambers(self) -> set:
+    def excluded_chambers(self, *, strict: bool = False) -> set:
+        """The active Exclusion Group's chambers. *strict* (a run): an
+        exclusion file that cannot be read is an :class:`ExperimentError`
+        naming it, never an empty group; a listing surface gets the empty
+        set and goes on answering."""
         from .. import exclusions
 
         group = self.exclusion_group
         if not group:
             return set()
-        return exclusions.chambers_for_group(self.directory, group)
+        try:
+            return exclusions.chambers_for_group(self.directory, group,
+                                                 strict=strict)
+        except exclusions.ExclusionsUnreadable as exc:
+            raise ExperimentError(f"{self.name}: {exc}") from None
 
     def all_excluded_chambers(self) -> set:
         """The Exclusion Group's chambers plus the workbook's ChamberFlags —
@@ -822,7 +830,8 @@ class SurvivalExperiment:
         path = self.data_file()
         excluded: set = set()
         if apply_exclusions:
-            excluded = set(self.excluded_chambers()) | set(extra_excluded or set())
+            excluded = (set(self.excluded_chambers(strict=True))
+                        | set(extra_excluded or set()))
             if path.suffix.lower() == ".xlsx":
                 excluded |= set(data_loader.load_chamber_flags(path))
 
@@ -872,14 +881,16 @@ class SurvivalExperiment:
             ## it cannot read, a data/ it cannot list — is refused before
             ## anything is created (ADR-0013). Every other case is as it was.
             self.data_file()
+        ## Read before anything is created: an exclusion file that cannot be
+        ## read refuses the run rather than reading as "exclude nothing".
+        excluded = set(extra_excluded or set()) | set(self.excluded_chambers(strict=True))
         self.ensure_dirs()
         result = pipeline.run_analysis(
             self.data_file(),
             output_dir=self.focus_dir(focus),
             experiment=self,
             focus=focus,
-            extra_excluded_chambers=set(extra_excluded or set())
-            | set(self.excluded_chambers()),
+            extra_excluded_chambers=excluded,
             log=log,
         )
         self.result = result

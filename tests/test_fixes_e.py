@@ -6,6 +6,8 @@ never trigger a modal.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from pysurvanalysis.domain import SurvivalExperiment, config as cfgmod
@@ -250,3 +252,39 @@ def test_a_hidden_folder_is_no_member_of_the_project_either(project):
     listed = [m.name for m in layout.members_in(project.directory)]
     members = [d.name for d in Project(project.directory).member_dirs()]
     assert listed == members == ["rep_a", "rep_b"]
+
+
+# ---------------------------------------------------------------------------
+# An exclusion file that cannot be read never means "exclude nothing"
+# ---------------------------------------------------------------------------
+
+def test_an_exclusion_file_saved_by_excel_as_plain_csv_still_excludes(tmp_path):
+    """Excel's "CSV (Comma delimited)" on Windows writes cp1252: one accented
+    note made the UTF-8 read fail, and the whole file read as empty."""
+    from pysurvanalysis import exclusions
+
+    qc = tmp_path / "qc"
+    qc.mkdir()
+    (qc / "remove_chambers.csv").write_bytes(
+        "group,chamber,note\ndefault,3,mouche écrasée\ndefault,7,\n".encode("cp1252"))
+    assert exclusions.chambers_for_group(tmp_path, "default") == {3, 7}
+    assert exclusions.read_notes(tmp_path, "default") == {3: "mouche écrasée"}
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root reads any file")
+def test_a_run_refuses_an_exclusion_file_it_cannot_read(tmp_path):
+    from pysurvanalysis import exclusions
+
+    exp = SurvivalExperiment(make_experiment_dir(tmp_path / "lone",
+                                                 exclusion_group="default"))
+    path = exclusions.write_exclusions(exp.directory, "default", [3])
+    path.chmod(0)
+    try:
+        with pytest.raises(ExperimentError, match="remove_chambers.csv"):
+            exp.run_analysis()
+        assert not list(exp.analysis_dir.rglob("run_summary_*.json"))
+        ## Listing surfaces still answer rather than raise.
+        assert exp.excluded_chambers() == set()
+    finally:
+        path.chmod(0o644)

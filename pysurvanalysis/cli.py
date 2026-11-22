@@ -107,7 +107,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         from pysurvanalysis import exclusions
 
         base = path if path.is_dir() else path.parent
-        extra_excluded = exclusions.chambers_for_group(base, args.exclusion_group)
+        extra_excluded = exclusions.chambers_for_group(base, args.exclusion_group,
+                                                       strict=True)
         if extra_excluded:
             print(f"Excluding {len(extra_excluded)} chamber(s) from group "
                   f"'{args.exclusion_group}'.")
