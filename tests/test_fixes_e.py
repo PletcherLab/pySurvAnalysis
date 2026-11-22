@@ -460,3 +460,13 @@ def test_designating_a_script_keeps_what_was_written_to_batch_yaml_since(tmp_pat
 
     on_disk = cfgmod.read_yaml(batch.config_path)
     assert on_disk == {"project_scripts": [script], "script": "Central"}
+
+
+def test_a_tick_keeps_what_was_unticked_in_the_file_since_loading(tmp_path):
+    exp = SurvivalExperiment(make_experiment_dir(tmp_path / "lone"))
+    _hand_edit(exp.directory, omit={"analyses": ["parametric_aft"]})
+
+    exp.set_included("analyses", "gehan_wilcoxon", False)
+
+    assert cfgmod.load_config(exp.directory)["omit"]["analyses"] == [
+        "gehan_wilcoxon", "parametric_aft"]

@@ -720,12 +720,15 @@ class SurvivalExperiment:
         if kind not in cfgmod.OMIT_KINDS:
             raise ValueError(f"Unknown omit kind {kind!r}.")
         self._require_config()
-        left_out = set(self.omitted(kind))
+        ## The file as it is now, for the selection as much as for the rest:
+        ## a box unticked by hand since loading stays unticked.
+        config = cfgmod.load_config(self.directory)
+        left_out = set(cfgmod.omitted(cfgmod.merge_defaults(config, self.defaults),
+                                      kind))
         if included:
             left_out.discard(item_id)
         else:
             left_out.add(item_id)
-        config = cfgmod.load_config(self.directory)
         section = config.get("omit") if isinstance(config.get("omit"), dict) else {}
         inherited = (self.defaults.get("omit") or {}) if isinstance(
             self.defaults.get("omit"), dict) else {}
