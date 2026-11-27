@@ -506,11 +506,24 @@ class MemberConfigsDialog(QDialog):
             f"Open this member's {cfgmod.CONFIG_FILENAME} in your desktop's "
             f"editor for YAML files.")
         self._btn_edit.clicked.connect(self._edit_selected)
+        ## What the recording is (ADR-0014), in pysurv-config: the one editor
+        ## of a member's config here, and it writes about: alone.
+        self._btn_about = ActionButton("Edit About…", Category.TOOLS,
+                                       icon_name="info")
+        self._btn_about.setToolTip(
+            "Describe this member's recording — its title, purpose, flies, "
+            "protocol and what each level means — in the about: section of "
+            f"its {cfgmod.CONFIG_FILENAME}. Nothing else in the file is "
+            "changed, and no analysis reads it.")
+        self._btn_about.clicked.connect(self._edit_about_selected)
+        #: The About editors this dialog opened, kept alive while shown.
+        self._about_windows: list = []
         for i, (btn, topic) in enumerate((
                 (self._btn_create, "project-members"),
                 (self._btn_create_all, "project-members"),
                 (self._btn_data_file, "config-input"),
-                (self._btn_edit, "config-experiment"))):
+                (self._btn_edit, "config-experiment"),
+                (self._btn_about, "config-about"))):
             grid.addWidget(with_help(btn, topic), i // 2, i % 2)
         for col in range(2):
             grid.setColumnStretch(col, 1)
@@ -565,6 +578,7 @@ class MemberConfigsDialog(QDialog):
         item = self._selected()
         self._btn_create.setEnabled(item is not None and not item.configured)
         self._btn_edit.setEnabled(item is not None and item.configured)
+        self._btn_about.setEnabled(item is not None and item.configured)
         self._btn_data_file.setEnabled(
             item is not None and item.fix == "data_file")
         self._btn_create_all.setEnabled(
@@ -658,6 +672,21 @@ class MemberConfigsDialog(QDialog):
                 self, self.windowTitle(),
                 f"No editor is registered for YAML files here.\n\nThe config "
                 f"is at:\n{path}")
+
+    def _edit_about_selected(self):
+        """Open pysurv-config on the selected member's folder."""
+        from .config_editor import ConfigEditorWindow
+
+        item = self._selected()
+        if item is None or not item.configured:
+            return None
+        window = ConfigEditorWindow(item.directory)
+        window.aboutSaved.connect(
+            lambda path, name=item.name: self._log(f"{name}: saved its About in {path}"))
+        self._about_windows = [w for w in self._about_windows if w.isVisible()]
+        self._about_windows.append(window)
+        window.show()
+        return window
 
     def _finish(self) -> None:
         self._project.members(reload=True)

@@ -9,6 +9,7 @@ Subcommands::
     pysurvanalysis hub [path]             # launch the Analysis Hub
     pysurvanalysis qc [experiment_dir]    # launch the QC Viewer
     pysurvanalysis plots <experiment_dir> # launch the Plot Editor
+    pysurvanalysis config [folder]        # launch the About Editor (pysurv-config)
     pysurvanalysis run <path> [opts]      # analyse one experiment
     pysurvanalysis project <dir> [--script NAME]
     pysurvanalysis batch <dir> [--script NAME]
@@ -81,6 +82,12 @@ def _cmd_plots(args: argparse.Namespace) -> int:
     sys.argv = [sys.argv[0], str(args.path)]
     plots_main()
     return 0
+
+
+def _cmd_config(args: argparse.Namespace) -> int:
+    from pysurvanalysis.apps.config_editor import main as config_main
+
+    return config_main([str(args.path)] if args.path else [])
 
 
 def _load_experiment(path: Path):
@@ -264,6 +271,12 @@ def main() -> None:
     sp_plots = sub.add_parser("plots", help="Launch the Plot Editor.")
     sp_plots.add_argument("path", help="Experiment Directory.")
 
+    sp_config = sub.add_parser(
+        "config", help="Launch the About Editor: describe one recording folder.")
+    sp_config.add_argument("path", nargs="?",
+                           help="Recording folder (a DLife workbook at its root "
+                                "or in data/).")
+
     sp_run = sub.add_parser("run", help="Analyse one experiment.")
     _add_run_args(sp_run)
 
@@ -288,6 +301,7 @@ def main() -> None:
     handlers = {
         "qc": _cmd_qc,
         "plots": _cmd_plots,
+        "config": _cmd_config,
         "run": _cmd_run,
         "project": _cmd_project,
         "batch": _cmd_batch,

@@ -484,8 +484,8 @@ def about_warnings(config: dict, directory: str | Path | None = None, *,
     section = config.get(about_mod.ABOUT_KEY) if isinstance(config, dict) else None
     if section is None:
         return []
+    declared = None
     try:
-        declared = None
         if directory is not None and _describes_factors(section):
             from . import layout
 
@@ -495,6 +495,22 @@ def about_warnings(config: dict, directory: str | Path | None = None, *,
             if design is not None:
                 declared = {str(f): list(design.levels.get(f, ()))
                             for f in design.factors}
+    except Exception:  # noqa: BLE001 — checked without the design instead
+        declared = None
+    return check_about(section, declared)
+
+
+def check_about(section: Any, declared: dict | None = None) -> list[str]:
+    """:func:`about.about_problems` for *section*, in this package's words.
+
+    *declared* is the data file's ``{factor: [levels]}``; ``None`` when it is
+    unknown, and then the section is checked on its own — its factors and
+    levels taken as declared, so none is called undeclared. A check that
+    fails is one more warning, never an exception.
+    """
+    if section is None:
+        return []
+    try:
         if declared is None:
             declared = _declared_by(section)
         problems = about_mod.about_problems(section, declared)

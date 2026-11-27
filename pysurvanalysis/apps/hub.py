@@ -483,9 +483,18 @@ class HubWindow(QMainWindow):
                     "when the member or a Focus cannot run as it stands.")):
             self._members_table.horizontalHeaderItem(column).setToolTip(tip)
         self._members_table.doubleClicked.connect(self._on_member_double_clicked)
+        ## Right-click a member to describe it (ADR-0014): what the recording
+        ## is, in pysurv-config — beside the members, since an About belongs
+        ## to one member, never to the Project.
+        self._members_table.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self._members_table.customContextMenuRequested.connect(self._members_menu)
+        #: Open About editors, kept alive while they are shown.
+        self._about_windows: list = []
         members_card.add_body(self._members_table)
         hint = QLabel("A row marked Config: missing is a folder with no "
-                      "survival_config.yaml — double-click it to scaffold one.")
+                      "survival_config.yaml — double-click it to scaffold one. "
+                      "Right-click a member to edit its About.")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: palette(mid); font-style: italic;")
         members_card.add_body(hint)
@@ -1098,6 +1107,53 @@ class HubWindow(QMainWindow):
                     f"[batch] the scan of {p} stopped early — this folder is "
                     "larger than a batch should be, and projects deeper in it "
                     "were not found. Choose one closer to the projects.")
+
+    def _members_menu(self, point) -> None:
+        """Right-click on a member row: describe it in pysurv-config."""
+        item = self._members_table.itemAt(point)
+        if item is None or self._project is None:
+            return
+        row = item.row()
+        name_cell = self._members_table.item(row, 0)
+        config_cell = self._members_table.item(row, 1)
+        if name_cell is None:
+            return
+        menu = QMenu(self)
+        edit_about = menu.addAction(f"Edit About… ({name_cell.text()})")
+        ## A folder with no config is not a member yet: scaffold it first.
+        is_member = config_cell is not None and config_cell.text() == "yes"
+        edit_about.setEnabled(is_member)
+        edit_about.setToolTip(
+            "What this recording is, in your own words — its title, purpose, "
+            "flies, protocol and what each level means — written to the "
+            "about: section of its survival_config.yaml and nowhere else. No "
+            "analysis reads it.")
+        chosen = menu.exec(self._members_table.viewport().mapToGlobal(point))
+        if chosen is edit_about:
+            self._action_edit_about(self._project.directory / name_cell.text())
+
+    def _action_edit_about(self, directory):
+        """Open pysurv-config on one member's folder (ADR-0014).
+
+        The editor writes ``about:`` and nothing else, reading the rest of the
+        file as it is at save time, so it cannot undo a Focus or a script
+        saved here meanwhile. Nothing the Hub shows depends on the section;
+        the refresh after a save is for the warnings it may draw.
+        """
+        from .config_editor import ConfigEditorWindow
+
+        window = ConfigEditorWindow(directory)
+
+        def _saved(path: str) -> None:
+            self._log.append_line(f"Saved the About of {Path(path).parent.name} "
+                                  f"in {path}.")
+            self._refresh_all()
+
+        window.aboutSaved.connect(_saved)
+        self._about_windows = [w for w in self._about_windows if w.isVisible()]
+        self._about_windows.append(window)
+        window.show()
+        return window
 
     def _on_member_double_clicked(self, index) -> None:
         if self._project is None:
@@ -2384,6 +2440,9 @@ class HubWindow(QMainWindow):
             ## members below, the way the preflight lists it.
             warnings = [f"{m.name}: {w}" for m in project.members()
                         for w in m.warnings()]
+            ## Members describing one level differently, and a defaults:
+            ## about: no member inherits (ADR-0014) — said, never a problem.
+            warnings += project.about_warnings()
         except (ProjectError, ValueError) as exc:
             problems = [str(exc)]
         if problems:
@@ -2645,9 +2704,24 @@ class HubWindow(QMainWindow):
         ## scaffold does. A config without the key is copied as it is.
         names_its_file = layout_mod.DATA_FILE_KEY in config
         config.pop(layout_mod.DATA_FILE_KEY, None)
+        ## `about:` describes the SOURCE recording (ADR-0014). What members
+        ## share of it comes along — who ran it, the series, the flies, the
+        ## protocol, each factor's kind and each level's whole entry — limited
+        ## to this member's factors and levels when its data file can be read.
+        ## Its title, purpose, notes and run: describe that recording alone.
+        ## A config with neither key is still copied byte for byte.
+        from .. import about as about_mod
+
+        shared, described = None, False
+        if about_mod.ABOUT_KEY in config:
+            design = layout_mod.folder_design(directory)
+            factors = ({f: list(design.levels.get(f, ())) for f in design.factors}
+                       if design is not None else None)
+            shared = about_mod.shared_about(config[about_mod.ABOUT_KEY], factors) or None
+            described = shared != config[about_mod.ABOUT_KEY]
         try:
-            if names_its_file:
-                cfgmod.save_config(directory, config)
+            if names_its_file or described:
+                cfgmod.save_config(directory, config, about=shared)
             else:
                 shutil.copyfile(source, target)
         except OSError as exc:
@@ -2659,6 +2733,12 @@ class HubWindow(QMainWindow):
                 f"[config] {name}: `{layout_mod.DATA_FILE_KEY}:` was not copied "
                 f"— it names {source.parent.name}'s own data file. {name} reads "
                 f"what is in its own folder.")
+        if described:
+            self._log.append_line(
+                f"[config] {name}: of `{about_mod.ABOUT_KEY}:` only what members "
+                f"share was copied — the title, the purpose, the notes and run: "
+                f"describe {source.parent.name} alone. Right-click {name} → "
+                f"Edit About… to describe it.")
         ## Conforming is not the same as usable. Report what is left rather
         ## than let the member fail at run time — the same split upstream
         ## makes between "would break the Project" (refused above) and "would
@@ -2828,8 +2908,16 @@ class HubWindow(QMainWindow):
             str(self._project.directory.parent), "DLife workbook (*.xlsx)")
         if not path:
             return
+        ## The member's own name, offered as the workbook's stem: several
+        ## analyses of one recording are told apart by their Project, and a
+        ## member named after the run says which recording it reads.
+        name = self._prompt_text("Reference data file",
+                                 "Member name (a folder in this Project):",
+                                 default=Path(path).stem)
+        if not name:
+            return
         try:
-            member = self._project.reference_data_file(Path(path))
+            member = self._project.reference_data_file(Path(path), name=name)
         except (ProjectError, OSError, ValueError) as exc:
             self._warn(str(exc))
             return
@@ -3163,10 +3251,11 @@ class HubWindow(QMainWindow):
         self._log.append_line(f"! {message}")
         QMessageBox.warning(self, "pySurvAnalysis", message)
 
-    def _prompt_text(self, title: str, label: str) -> str | None:
+    def _prompt_text(self, title: str, label: str, default: str = "") -> str | None:
         from PyQt6.QtWidgets import QInputDialog
 
-        text, ok = QInputDialog.getText(self, title, label, QLineEdit.EchoMode.Normal)
+        text, ok = QInputDialog.getText(self, title, label, QLineEdit.EchoMode.Normal,
+                                        default)
         return text.strip() if ok else None
 
     def _prompt_choice(self, title: str, label: str,

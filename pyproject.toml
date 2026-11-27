@@ -42,6 +42,7 @@ pysurv = "pysurvanalysis.apps.hub:main"
 pysurv-hub = "pysurvanalysis.apps.hub:main"
 pysurv-qc = "pysurvanalysis.apps.qc_viewer:main"
 pysurv-plots = "pysurvanalysis.apps.plot_editor:main"
+pysurv-config = "pysurvanalysis.apps.config_editor:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

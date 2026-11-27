@@ -29,6 +29,7 @@ CHAPTERS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("config-global", "The global: section"),
         ("censoring", "Censoring policy"),
         ("config-omit", "The omit: section — leaving analyses and figures out"),
+        ("config-about", "The about: section and pysurv-config"),
         ("config-project", "project.yaml and Project Defaults"),
         ("experiment-types", "Experiment Types"),
         ("validation", "Validating configuration"),
