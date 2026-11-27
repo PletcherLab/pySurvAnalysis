@@ -67,6 +67,22 @@ def read_assume_censored(path: Union[str, Path]) -> bool:
     return True
 
 
+def read_is_completed(path: Union[str, Path]) -> bool | None:
+    """The PrivateData sheet's IsCompleted flag: False while DLife still
+    counts the lifespan as running, True once it is marked complete, and
+    None when the sheet, the column or a number in it is missing — a
+    workbook that does not say is not called unfinished."""
+    try:
+        priv = pd.read_excel(path, sheet_name="PrivateData")
+        if "IsCompleted" in priv.columns and len(priv) > 0:
+            value = pd.to_numeric(priv["IsCompleted"].iloc[0], errors="coerce")
+            if pd.notna(value):
+                return int(value) != 0
+    except Exception:  # noqa: BLE001 — a flag that cannot be read says nothing
+        pass
+    return None
+
+
 def load_chamber_flags(path: Union[str, Path]) -> set:
     """Return the set of excluded chamber IDs from the ChamberFlags sheet.
 

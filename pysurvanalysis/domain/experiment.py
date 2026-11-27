@@ -358,12 +358,35 @@ class SurvivalExperiment:
         )
 
     def warnings(self) -> list[str]:
-        """What works but will not travel — never fatal, unlike
-        :meth:`validate`: an absolute or backslashed ``data_file:``
-        (:func:`config.config_warnings`)."""
+        """What works but is worth saying — never fatal, unlike
+        :meth:`validate`: an absolute or backslashed ``data_file:``, anything
+        odd in ``about:`` checked against this folder's data file
+        (:func:`config.config_warnings`, ADR-0014), and a DLife workbook
+        whose PrivateData sheet says the lifespan is still running."""
         if self.config_error:
             return []
-        return cfgmod.config_warnings(self.raw_config)
+        out = cfgmod.config_warnings(self.raw_config, self.directory,
+                                     defaults=self.defaults)
+        return out + self._unfinished_warning()
+
+    def _unfinished_warning(self) -> list[str]:
+        """One line when the workbook's ``PrivateData.IsCompleted`` is 0: its
+        survivors so far are censored at the last census, so every number is
+        provisional until the lifespan is finished."""
+        try:
+            path = self.data_file()
+        except ExperimentError:
+            return []
+        if path.suffix.lower() != ".xlsx":
+            return []
+        from .. import data_loader
+
+        if data_loader.read_is_completed(path) is not False:
+            return []
+        return [f"{path.name}: the lifespan is still running (PrivateData "
+                f"IsCompleted is 0) — its survivors are censored at the last "
+                f"census, so its results are provisional until it is complete "
+                f"and analysed again."]
 
     def has_data(self) -> bool:
         try:

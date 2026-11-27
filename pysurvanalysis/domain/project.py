@@ -202,12 +202,34 @@ class Project:
 
     def warnings(self) -> list[str]:
         """Said, never fatal: each duplicate by name (the way a Blocked
-        Member is named), and each member's :meth:`SurvivalExperiment.warnings`
-        — an absolute ``data_file:``, say. :meth:`validate`'s problems stop a
-        run; these do not."""
+        Member is named), each member's :meth:`SurvivalExperiment.warnings`
+        — an absolute ``data_file:``, say — and :meth:`about_warnings`.
+        :meth:`validate`'s problems stop a run; these do not. Nothing here
+        goes on a report: ``about:`` text never does (ADR-0014)."""
         out = self.duplicate_notes()
         for member in self.members():
             out.extend(f"{member.name}: {w}" for w in member.warnings())
+        return out + self.about_warnings()
+
+    def about_warnings(self) -> list[str]:
+        """Where ``about:`` is worth a word at the Project level (ADR-0014):
+        members that describe one factor's kind or one level differently
+        (:func:`config.about_spread`) — their Focus sections sit side by side
+        in the Project Report under the same level names — and a
+        ``defaults: about:``, which no member inherits. Never an error, and
+        never on a report."""
+        out: list[str] = []
+        if cfgmod.about_mod.ABOUT_KEY in self.defaults:
+            out.append(
+                f"{cfgmod.PROJECT_FILENAME}: `defaults: about:` is ignored — an "
+                f"About describes one recording, so it belongs in that member's "
+                f"{cfgmod.CONFIG_FILENAME} and is never inherited.")
+        abouts = {member.name: member.raw_config.get(cfgmod.about_mod.ABOUT_KEY)
+                  for member in self.members()
+                  if isinstance(member.raw_config, dict)
+                  and cfgmod.about_mod.ABOUT_KEY in member.raw_config}
+        if len(abouts) > 1:
+            out.extend(cfgmod.about_spread(abouts))
         return out
 
     def candidate_dirs(self) -> list[Path]:

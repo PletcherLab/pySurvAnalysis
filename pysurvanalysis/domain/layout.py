@@ -455,6 +455,29 @@ def require_data_location(directory: Path | str, *, config: dict | None = None,
     raise DataLocationError(f"{label}: {location.problem}{source}.")
 
 
+def folder_design(directory: Path | str, config: dict | None = None, *,
+                  input_opts: dict | None = None):
+    """The factors and levels of the data file *directory* reads, or None
+    when it reads no single file, or that file cannot be read.
+
+    For describing a folder (ADR-0014): the file is the one
+    :func:`data_location` names, and a DLife workbook is read from its Design
+    sheet alone (:func:`focus.discover_design`). No Experiment is constructed
+    — loading one creates ``analysis/`` and ``qc/`` — and nothing is written.
+    *config* is the folder's own config, as for :func:`data_location`;
+    *input_opts* says how to read a CSV.
+    """
+    from . import focus as focusmod
+
+    try:
+        location = data_location(directory, config=config)
+        if location.path is None or location.problem:
+            return None
+        return focusmod.discover_design(location.path, input_opts)
+    except Exception:  # noqa: BLE001 — a folder that cannot be read is described without it
+        return None
+
+
 class DataLocations:
     """The data files a Project's members read, first come first served.
 

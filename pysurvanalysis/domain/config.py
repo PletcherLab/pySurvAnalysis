@@ -8,6 +8,13 @@ leaves out (``omit:``, ADR-0012). Factors themselves are never declared.
 
 Unknown keys ride through a write untouched, so a config edited by a future
 version of the app — or by hand — is never silently truncated.
+
+One top-level key is not the analysis's at all: ``about:``, what the
+recording is in a person's own words (ADR-0014, :mod:`pysurvanalysis.about`).
+No analysis reads it, it is never inherited, and every writer here writes the
+section the file holds at that moment rather than the copy it loaded — a
+catalogue that files the recording may have rewritten it since. Only
+:func:`write_about` (``pysurv-config``) edits it.
 """
 
 from __future__ import annotations
@@ -18,6 +25,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+from .. import about as about_mod
 
 CONFIG_FILENAME = "survival_config.yaml"
 PROJECT_FILENAME = "project.yaml"
@@ -37,8 +46,9 @@ OMIT_KINDS = ("analyses", "plots")
 #: Sharing a design is the explicit *Copy Focuses from…* instead.
 #: ``data_file`` names one member's own file (ADR-0013): inherited, it would
 #: point every member at one file — and the classifier never honoured an
-#: inherited one, so the loader and the classifier disagreed.
-NEVER_INHERITED = ("focuses", "data_file")
+#: inherited one, so the loader and the classifier disagreed. ``about``
+#: describes one recording (ADR-0014): a Project's defaults never carry one.
+NEVER_INHERITED = ("focuses", "data_file", about_mod.ABOUT_KEY)
 
 DEFAULT_INPUT: dict[str, Any] = {
     "format": "auto",          # auto | excel | long | wide
@@ -114,18 +124,49 @@ def _yaml_problem(exc: yaml.YAMLError) -> tuple[int | None, str]:
     return line, text
 
 
+class ConfigEncodingError(ValueError):
+    """A YAML file whose bytes are text in neither encoding a config is read
+    in. A :class:`ValueError` naming the file, like :class:`ConfigSyntaxError`,
+    so every caller that reports a bad config reports this too — where a bare
+    ``UnicodeDecodeError`` named no file and stopped a whole Project."""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        super().__init__(f"{self.path.name}: cannot be read as text — it is "
+                         f"neither UTF-8 nor Windows-1252. Save it again as "
+                         f"UTF-8. ({self.path})")
+
+
+def read_text(path: str | Path) -> str:
+    """A YAML file's text: UTF-8, with or without a Byte Order Mark, else
+    Windows-1252 — what Notepad on a lab PC saves a config in, so one accented
+    name does not make the file unreadable (the rule ``exclusions`` applies to
+    CSV). Bytes that are neither raise :class:`ConfigEncodingError`, naming
+    the file. Every write is UTF-8 (:func:`write_yaml`).
+    """
+    p = Path(path)
+    raw = p.read_bytes()
+    for encoding in ("utf-8-sig", "cp1252"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    raise ConfigEncodingError(p)
+
+
 def read_yaml(path: str | Path) -> dict:
     """Read a YAML mapping, returning ``{}`` for an empty or absent file.
 
     A file that is not valid YAML raises :class:`ConfigSyntaxError` (a
-    ``ValueError``) naming the file and line, never ``yaml.YAMLError``.
+    ``ValueError``) naming the file and line, never ``yaml.YAMLError``; one
+    that is not text, :class:`ConfigEncodingError` (:func:`read_text`).
     """
     p = Path(path)
     if not p.is_file():
         return {}
+    text = read_text(p)
     try:
-        with p.open(encoding="utf-8") as fh:
-            data = yaml.safe_load(fh) or {}
+        data = yaml.safe_load(text) or {}
     except yaml.YAMLError as exc:
         raise ConfigSyntaxError(p, *_yaml_problem(exc)) from None
     if not isinstance(data, dict):
@@ -143,7 +184,12 @@ def write_yaml(path: str | Path, data: dict) -> Path:
     return p.resolve()
 
 
-def save_config(directory: str | Path, config: dict) -> Path:
+#: :func:`save_config`'s default for ``about=``: whatever the file holds.
+ABOUT_ON_DISK = object()
+
+
+def save_config(directory: str | Path, config: dict, *,
+                about: Any = ABOUT_ON_DISK) -> Path:
     """Write a directory's ``survival_config.yaml``.
 
     A config with no ``scripts:`` key at all is seeded with the default
@@ -153,12 +199,86 @@ def save_config(directory: str | Path, config: dict) -> Path:
     ``batch`` script runs in each member. An existing block is never touched —
     an empty list is a deliberate deletion, and re-seeding it would undo the
     user's edit. The config is updated in place so memory matches disk.
+
+    ``about:`` is not the writer's (ADR-0014). By default the section written
+    is the one the file holds **now**, read again at save time, wherever the
+    *config* came from: a catalogue may have rewritten it since the writer
+    loaded the file, and writing the loaded copy back would undo that. A file
+    that holds none gets none. Only where there is no file yet — or one that
+    cannot be read, which no writer here overwrites anyway — does *config*'s
+    own ``about:`` stand. A writer that sets the section — scaffolding a
+    member from another's config — passes it as *about* (``None`` for none).
     """
     if "scripts" not in config:
         from ..script_editor.project_actions import default_experiment_script
 
         config["scripts"] = [default_experiment_script()]
-    return write_yaml(config_path(directory), config)
+    path = config_path(directory)
+    if about is ABOUT_ON_DISK:
+        _keep_about_on_disk(path, config)
+    elif about:
+        _place_about(config, about, ())
+    else:
+        config.pop(about_mod.ABOUT_KEY, None)
+    return write_yaml(path, config)
+
+
+def _keep_about_on_disk(path: Path, config: dict) -> None:
+    """Give *config* the ``about:`` the file at *path* holds now — in place,
+    where the file has it — or none when the file has none."""
+    if not path.is_file():
+        return
+    try:
+        on_disk = read_yaml(path)
+    except (OSError, ValueError):
+        return
+    if about_mod.ABOUT_KEY in on_disk:
+        _place_about(config, on_disk[about_mod.ABOUT_KEY], list(on_disk))
+    else:
+        config.pop(about_mod.ABOUT_KEY, None)
+
+
+def _place_about(config: dict, section: Any, disk_order: list) -> None:
+    """Set *config*'s ``about:`` to *section*, in place. A config that has
+    the key keeps it where it is. Otherwise it goes after the key that came
+    before it in *disk_order* (the file's key order), or first — what the
+    recording is reads before how it is analysed."""
+    key = about_mod.ABOUT_KEY
+    if key in config:
+        config[key] = copy.deepcopy(section)
+        return
+    before = disk_order[:disk_order.index(key)] if key in disk_order else []
+    anchor = next((k for k in reversed(before) if k in config), None)
+    items = list(config.items())
+    at = 0 if anchor is None else [k for k, _v in items].index(anchor) + 1
+    items.insert(at, (key, copy.deepcopy(section)))
+    config.clear()
+    config.update(items)
+
+
+def write_about(directory: str | Path, section: Any) -> Path | None:
+    """Write *section* as the ``about:`` of *directory*'s config and change
+    nothing else — the one writer that edits the section (``pysurv-config``).
+
+    The rest of the file is taken as it is on disk at this moment and written
+    back equal in value: ``focuses:``, ``scripts:``, ``exclusions:``,
+    ``omit:``, ``global:`` and any key this version does not know. Nothing is
+    seeded — a file the editor creates holds ``about:`` alone. A blank
+    *section* removes the key; with no file to remove it from, nothing is
+    written and ``None`` is returned. A file that cannot be read is never
+    written over: its :class:`ValueError` is raised.
+    """
+    path = config_path(directory)
+    config = read_yaml(path) if path.is_file() else None
+    if config is None:
+        if not section:
+            return None
+        config = {}
+    if section:
+        _place_about(config, section, ())
+    else:
+        config.pop(about_mod.ABOUT_KEY, None)
+    return write_yaml(path, config)
 
 
 def merge_defaults(member: dict, defaults: dict | None) -> dict:
@@ -310,15 +430,25 @@ def validate_input_block(config: dict) -> list[str]:
     return problems
 
 
-def config_warnings(config: dict) -> list[str]:
+def config_warnings(config: dict, directory: str | Path | None = None, *,
+                    defaults: dict | None = None) -> list[str]:
     """What works but is fragile — a separate channel from
     :func:`validate_config`, whose problems stop a run.
 
-    Today one key: a ``data_file:`` written as an absolute path (it breaks
-    when the folders move, or are opened from a computer that mounts the
-    share elsewhere) or with backslashes (a separator only on Windows). Both
-    still load where they were written; neither is ever fatal (ADR-0013).
+    A ``data_file:`` written as an absolute path (it breaks when the folders
+    move, or are opened from a computer that mounts the share elsewhere) or
+    with backslashes (a separator only on Windows). Both still load where
+    they were written; neither is ever fatal (ADR-0013).
+
+    Anything odd in ``about:`` (:func:`about_warnings`), checked against the
+    factors and levels of the data file in *directory* when one is given.
+    No analysis reads the section, so nothing in it is more than advice.
     """
+    return _data_file_warnings(config) + about_warnings(config, directory,
+                                                        defaults=defaults)
+
+
+def _data_file_warnings(config: dict) -> list[str]:
     value = (config or {}).get("data_file") if isinstance(config, dict) else None
     if not value or not isinstance(value, str):
         return []
@@ -335,6 +465,93 @@ def config_warnings(config: dict) -> list[str]:
             f"`data_file: {value}` uses backslashes, which are a separator "
             f"only on Windows — write forward slashes.")
     return warnings
+
+
+def about_warnings(config: dict, directory: str | Path | None = None, *,
+                   defaults: dict | None = None) -> list[str]:
+    """What is odd about *config*'s ``about:`` (ADR-0014): a field of the
+    wrong type, an unknown factor kind, a title over 60 characters, and —
+    when *directory*'s data file can be read — a factor or level that file
+    does not have. Never an error: nothing in the section may stop a load, a
+    save or a run, and that holds for a check that fails, too.
+
+    The data file is found and read the way the classifier reads it
+    (:func:`layout.folder_design`), never by constructing an Experiment,
+    which would create ``analysis/`` and ``qc/``. A config without the key
+    reads nothing. Without a readable file the section is checked on its
+    own: its factors and levels are taken as declared.
+    """
+    section = config.get(about_mod.ABOUT_KEY) if isinstance(config, dict) else None
+    if section is None:
+        return []
+    try:
+        declared = None
+        if directory is not None and _describes_factors(section):
+            from . import layout
+
+            design = layout.folder_design(
+                directory, config,
+                input_opts=input_options(merge_defaults(config, defaults)))
+            if design is not None:
+                declared = {str(f): list(design.levels.get(f, ()))
+                            for f in design.factors}
+        if declared is None:
+            declared = _declared_by(section)
+        problems = about_mod.about_problems(section, declared)
+    except Exception as err:  # noqa: BLE001 — nothing in about: may stop a load
+        return [f"{about_mod.ABOUT_KEY}: could not be checked "
+                f"({type(err).__name__}: {err})"]
+    return [_in_our_words(message) for _where, message in problems]
+
+
+def _describes_factors(section: Any) -> bool:
+    return isinstance(section, dict) and section.get(about_mod.FACTORS_KEY) is not None
+
+
+def _declared_by(section: Any) -> dict:
+    """The factors and levels *section* describes, as if a design declared
+    them: what the section is checked against when the data file cannot be
+    read, so a check without the design never calls a factor undeclared."""
+    raw = section.get(about_mod.FACTORS_KEY) if isinstance(section, dict) else None
+    if not isinstance(raw, dict):
+        return {}
+    return {name: (list(body["levels"]) if isinstance(body.get("levels"), dict) else [])
+            for name, body in raw.items() if isinstance(body, dict)}
+
+
+def _in_our_words(message: str) -> str:
+    """A line of the mirrored module, in this package's language: factors and
+    levels are the data file's here, never declared in a config."""
+    message = message.replace(
+        "which experimental_design_factors does not declare",
+        "which is not a factor of the data file")
+    head, sep, factor = message.rpartition(", which ")
+    if sep and " describes level " in head and factor.endswith(" does not declare"):
+        factor = factor[:-len(" does not declare")]
+        return f"{head}, which is not a level of {factor} in the data file"
+    return message
+
+
+#: The closing words of a :func:`about_mod.meaning_spread` line. True of
+#: pyflic, which pools members' levels by name; false here (ADR-0001).
+_POOLED = "; the pooled results treat them as one level"
+
+
+def about_spread(abouts: dict[str, Any]) -> list[str]:
+    """Where Member Experiments describe one factor's kind or one level
+    differently in ``about:`` — *abouts* is each member's section by name.
+    Worth a word, because members' Focus sections sit side by side in the
+    Project Report under the same level names; never an error. A comparison
+    that fails is one more line, never an exception."""
+    try:
+        lines = about_mod.meaning_spread(
+            {name: about_mod.read_about({about_mod.ABOUT_KEY: section})
+             for name, section in abouts.items()})
+    except Exception as err:  # noqa: BLE001 — nothing in about: may stop a load
+        return [f"{about_mod.ABOUT_KEY}: the members' descriptions could not be "
+                f"compared ({type(err).__name__}: {err})"]
+    return [line[:-len(_POOLED)] if line.endswith(_POOLED) else line
+            for line in lines]
 
 
 def scripts_of(config: dict, key: str = "scripts") -> list[dict]:
