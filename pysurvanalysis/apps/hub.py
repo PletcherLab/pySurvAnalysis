@@ -2908,16 +2908,8 @@ class HubWindow(QMainWindow):
             str(self._project.directory.parent), "DLife workbook (*.xlsx)")
         if not path:
             return
-        ## The member's own name, offered as the workbook's stem: several
-        ## analyses of one recording are told apart by their Project, and a
-        ## member named after the run says which recording it reads.
-        name = self._prompt_text("Reference data file",
-                                 "Member name (a folder in this Project):",
-                                 default=Path(path).stem)
-        if not name:
-            return
         try:
-            member = self._project.reference_data_file(Path(path), name=name)
+            member = self._project.reference_data_file(Path(path))
         except (ProjectError, OSError, ValueError) as exc:
             self._warn(str(exc))
             return
@@ -3251,11 +3243,10 @@ class HubWindow(QMainWindow):
         self._log.append_line(f"! {message}")
         QMessageBox.warning(self, "pySurvAnalysis", message)
 
-    def _prompt_text(self, title: str, label: str, default: str = "") -> str | None:
+    def _prompt_text(self, title: str, label: str) -> str | None:
         from PyQt6.QtWidgets import QInputDialog
 
-        text, ok = QInputDialog.getText(self, title, label, QLineEdit.EchoMode.Normal,
-                                        default)
+        text, ok = QInputDialog.getText(self, title, label, QLineEdit.EchoMode.Normal)
         return text.strip() if ok else None
 
     def _prompt_choice(self, title: str, label: str,

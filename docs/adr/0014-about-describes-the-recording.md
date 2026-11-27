@@ -161,9 +161,11 @@ that likely, so it is fixed here too.
 
 Also built with this, beside the contract: a DLife workbook whose
 `PrivateData.IsCompleted` is 0 draws a warning in the same channel — its
-survivors are censored at the last census, so its results are provisional —
-and **Reference data file…** asks for the member's name, offering the
-workbook's stem.
+survivors are censored at the last census, so its results are provisional.
+**Reference data file…** still names the member after the workbook without
+asking: a name prompt there would be a modal step that every existing caller
+of the action, the tests among them, would have to answer. The domain method
+already takes a name.
 
 Rejected:
 

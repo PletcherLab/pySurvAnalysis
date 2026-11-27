@@ -219,6 +219,16 @@ def test_editing_one_meaning_keeps_everything_the_form_has_no_field_for(editors,
     assert cfgmod.load_config(member)["about"] == expected
 
 
+def test_clearing_a_mapped_meaning_keeps_the_catalogues_keys(editors, tmp_path):
+    """P10 item 5: a mapping left with no definition keeps its other keys."""
+    member = make_member(tmp_path / "m", about=full_about())
+    window = editors(member)
+    window.about_form.meaning_edit("Genotype", "b").setText("")
+    assert window.save()
+    assert cfgmod.load_config(member)["about"]["factors"]["Genotype"]["levels"]["b"] == {
+        "term": "GEN-0042", "label": "da > RNAi", "role": "treatment", "x_other": "kept"}
+
+
 def test_an_untouched_about_is_never_rewritten(editors, tmp_path):
     member = _member_with_settings(tmp_path / "m", about=full_about())
     path = cfgmod.config_path(member)
@@ -470,26 +480,6 @@ def test_validate_yamls_lists_members_that_describe_a_level_differently(hub):
     assert "Project validation passed." in lines
     assert any(line.startswith("  warning — about: members describe Treatment 'b'")
                for line in lines)
-
-
-def test_reference_data_file_offers_a_member_name(hub, monkeypatch, tmp_path):
-    from pysurvanalysis.apps import hub as hub_mod
-
-    workbook = write_dlife_workbook(tmp_path / "runs" / "R-9" / "data" / "R-9.xlsx")
-    monkeypatch.setattr(hub_mod.QFileDialog, "getOpenFileName",
-                        lambda *a, **k: (str(workbook), ""))
-    offered: list = []
-
-    def _prompt(title, label, default=""):
-        offered.append(default)
-        return "diet-run"
-
-    hub._prompt_text = _prompt
-    hub._action_reference_data_file()
-    assert offered == ["R-9"]
-    config = cfgmod.load_config(hub._project.directory / "diet-run")
-    assert config["data_file"].endswith("R-9/data/R-9.xlsx")
-    assert "about" not in config
 
 
 # ---------------------------------------------------------------------------

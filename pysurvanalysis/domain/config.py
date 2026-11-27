@@ -274,6 +274,8 @@ def write_about(directory: str | Path, section: Any) -> Path | None:
         if not section:
             return None
         config = {}
+    elif not section and about_mod.ABOUT_KEY not in config:
+        return path.resolve()                   # nothing to remove: untouched
     if section:
         _place_about(config, section, ())
     else:
