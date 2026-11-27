@@ -11,6 +11,7 @@ The command-line runs read the same configuration files as the Hub — `survival
 | `hub [path]` | Open the Analysis Hub, optionally with a Project, Batch folder or Experiment Directory selected. |
 | `qc [path]` | Open the Chamber QC viewer. |
 | `plots path` | Open the Plot Editor on an Experiment Directory. |
+| `config [path]` | Open the About Editor (also `pysurv-config`) on a recording folder, to describe it in the `about:` section of its config. See [The about: section and pysurv-config](help:config-about). |
 | `run INPUT [options]` | Analyse one experiment (see below). |
 | `project path [--script NAME]` | Run a Project Script in a Project. Default script: `Report pipeline`. |
 | `batch path [--script NAME]` | Run a Project Script in every Project found under a Batch folder, continue-on-error. Without `--script`, the Batch's designation in `batch.yaml` is used; with none, each Project runs its own `batch` script. Exit code 1 if any Project failed. |

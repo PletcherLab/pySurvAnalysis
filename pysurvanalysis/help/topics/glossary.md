@@ -4,6 +4,10 @@ The words pySurvAnalysis uses, in plain language, in alphabetical order. Each en
 
 ## A
 
+**About** – The optional `about:` section of a recording's `survival_config.yaml`: what the recording is, in your own words — title, purpose, experimenter, the flies, the protocol, what each level means. Edited in the About Editor (`pysurv-config`). Never read by an analysis, never inherited, never on a report. → [The about: section and pysurv-config](help:config-about)
+
+**About Editor** – `pysurv-config`, the window that edits a recording folder's About and shows its workbook's design. It writes `about:` and nothing else, and never creates `analysis/` or `qc/`. Opened from the command line or with **Edit About…** on a member. → [The about: section and pysurv-config](help:config-about)
+
 **Active Focus** – The Focus the Hub is currently showing. QC, Analyze, Plots and AI act on it. You choose it in the Focus card of the Experiment panel. Switching it changes nothing on disk, because every Focus's results are kept under their own name. → [What a Focus is](help:focus)
 
 **AI Narrative** – An optional AI-written summary attached to the Project Report: one paragraph per Focus from that Focus's own numbers, plus a qualitative "across Focuses" paragraph. It only summarises the pipeline's results, never performs its own analysis, and is deleted when the analysis is re-run. → [The AI narrative](help:ai-narrative)

@@ -71,6 +71,12 @@ Save the file in one of the supported formats.
 **`<file>, line N: not valid YAML — <problem>. (<path>)`**
 The file is not YAML at all: often a tab used for indentation ("YAML indents with spaces, never tabs"), an unclosed quote or bracket, or a key missing its colon. Fix that line. A member with a broken `survival_config.yaml` is listed with this problem (and as a `bad config` Blocked Member) while the rest of the Project carries on; nothing runs or saves for that member until it is fixed. A broken `project.yaml` stops the Project opening at all: the Hub shows this message when you select it and keeps the folder selected, so **Validate YAMLs** still reports the line to fix. See [Validating configuration](help:validation).
 
+**`<file>: cannot be read as text — it is neither UTF-8 nor Windows-1252. Save it again as UTF-8. (<path>)`**
+The file's bytes are not text in either encoding a config is read in, often a file saved as UTF-16 or a binary file given the config's name. Open it in a text editor and save it as UTF-8. Like a YAML error, it blocks that member only. A config with an accented name saved by Windows Notepad ("ANSI") is read without this message.
+
+**`about.…`** (in Validate YAMLs, as a `warning —` line)
+Something odd in the recording's description. No analysis reads `about:`, so nothing needs fixing for a run. See [The about: section and pysurv-config](help:config-about).
+
 **`` `input.format` must be auto, excel, long or wide (got '…'). ``** Fix the value in `input:`.
 
 **`` `exclusions:` must be a mapping, e.g. `{group: default}`. ``** Write `exclusions: {group: <name>}`.

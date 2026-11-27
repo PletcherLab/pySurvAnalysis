@@ -39,13 +39,17 @@ A member row turns red when the member is blocked, or any Focus is blocked or an
 
 Selecting a row (single click) also tells **Plot editor…** on the Actions card which member to open.
 
+### Right-click
+
+On a member row, **Edit About…** opens the About Editor (pysurv-config) on that member's folder, to describe the recording: its title, purpose, flies, protocol and what each level means. It writes the `about:` section of the member's config and nothing else, and no analysis reads it. See [The about: section and pysurv-config](help:config-about).
+
 ## Making a member
 
 The first three buttons cover folders inside the Project.
 
 | Button | When | What it does |
 |---|---|---|
-| **Create experiment…** | the member folder does not exist yet | Asks for a folder name, creates it with an empty `data/`, and writes a minimal `survival_config.yaml` that inherits everything from the Project Defaults. It then offers **Add data file…** (copies a `.xlsx`, `.csv` or `.tsv` into `data/`), **Copy config from…** (replaces the scaffold with another member's config, refused if its Experiment Type differs; its `data_file:` is left behind, because it names that member's own file), or **Later**. It refuses a name that is not a single folder name, and a folder that already exists (use *Initialize* for that). |
+| **Create experiment…** | the member folder does not exist yet | Asks for a folder name, creates it with an empty `data/`, and writes a minimal `survival_config.yaml` that inherits everything from the Project Defaults. It then offers **Add data file…** (copies a `.xlsx`, `.csv` or `.tsv` into `data/`), **Copy config from…** (replaces the scaffold with another member's config, refused if its Experiment Type differs; its `data_file:` is left behind, because it names that member's own file, and of its `about:` only what members share comes along, never its title, purpose, notes or `run:`), or **Later**. It refuses a name that is not a single folder name, and a folder that already exists (use *Initialize* for that). |
 | **Initialize existing directory…** | the folder is in the Project but has no config | Lists the Project's subfolders that have no config, each with its state (for example `empty`, `no config`), and scaffolds a minimal config in the one you pick. Nothing is moved, because the loader already finds a data file at the folder root or in `data/`. If the folder holds several candidate data files, it then asks which one is the experiment and writes `data_file:` into the config. When every folder already has a config it says so and points you to *Create experiment…*. A folder that cannot be listed (`unreadable`) is refused, and has to be fixed outside the app. |
 | **Experiment configs…** | to see or fix many at once | Opens the bulk view (below). |
 
@@ -55,7 +59,7 @@ The three buttons under **Bring one in from outside** reach outside the Project.
 |---|---|---|
 | **Add directory…** | a folder **outside** the Project with a `data/` subfolder holding a `.xlsx` that validates as a DLife workbook | **Copies** the whole folder into the Project. If it has no `survival_config.yaml`, a minimal one is written (with `data_file:` when `data/` holds more than one data file). A folder that is already a direct child of the Project is refused with a pointer to *Initialize existing directory…*. A destination that already exists is refused rather than merged. |
 | **Add experiment…** | one DLife workbook (`.xlsx`) | Creates a member named after the file (`cohort_a.xlsx` becomes `cohort_a/`), puts the workbook in its `data/` (**moved** if it was already inside the Project tree, **copied** otherwise), and writes a minimal config. |
-| **Reference data file…** | one DLife workbook (`.xlsx`) **outside** the Project | Creates a member named after the file and writes a minimal config whose `data_file:` is the workbook's path relative to the new member folder. The workbook is **neither copied nor moved**: it is only ever read where it is. Refused, with nothing written, for a workbook inside the Project (use *Add experiment…*), one on another drive (no relative path exists), a member folder that already exists, and a workbook another member already reads. |
+| **Reference data file…** | one DLife workbook (`.xlsx`) **outside** the Project | Asks for the member's name, offering the workbook's name, creates that member folder and writes a minimal config whose `data_file:` is the workbook's path relative to the new member folder. The workbook is **neither copied nor moved**: it is only ever read where it is. Refused, with nothing written, for a workbook inside the Project (use *Add experiment…*), one on another drive (no relative path exists), a member folder that already exists, and a workbook another member already reads. |
 
 A workbook validates as DLife when it has Design and RawData sheets with the columns each needs and at least one factor column after `StartTime`.
 
@@ -90,7 +94,8 @@ Hover over a row to see the detail behind its status.
 | **Create config** | scaffolds the selected folder's config from the Project Defaults | the selected row has no config |
 | **Create all missing** | scaffolds every missing config, after confirming the list | any row has no config |
 | **Set data file…** | asks which candidate file is the experiment and writes `data_file:` as a path relative to the member folder (for example `data_file: data/b.xlsx`) | the selected row is `ambiguous` |
-| **Edit config…** | opens the member's `survival_config.yaml` in your system's YAML editor (there is no built-in config editor) | the selected row has a config |
+| **Edit config…** | opens the member's `survival_config.yaml` in your system's YAML editor (there is no built-in editor for the whole file) | the selected row has a config |
+| **Edit About…** | opens the About Editor (pysurv-config) on the member's folder, which writes the `about:` section and nothing else ([details](help:config-about)) | the selected row has a config |
 
 Double-clicking a row edits it if it has a config, or creates one if it does not.
 

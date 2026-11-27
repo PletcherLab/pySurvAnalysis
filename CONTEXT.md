@@ -106,7 +106,8 @@ would silently put every member's results Out of Date at once. Sharing a
 design is the explicit *Copy Focuses from…* in the Focus window, validated
 against the receiving member's discovered factors before it is written — the
 same move ADR-0005 made for Styles. Nor is `data_file:` inherited: it names
-one member's own file (ADR-0013).
+one member's own file (ADR-0013). Nor, ever, is an **About**: it describes one
+recording, so `defaults: about:` is ignored with a warning (ADR-0014).
 _Avoid_: design (the PyTrackingAnalysis term, which IS an authority and
 implies pooling)
 
@@ -154,6 +155,42 @@ records the path as written and as resolved; nothing else's does.
 _Avoid_: linked data, external data (says nothing about who may write),
 symlink (a different mechanism, rejected), data folder (the sister app's key
 names a folder; this one names a file)
+
+**About**:
+The optional `about:` section of a recording's `survival_config.yaml`: what
+the recording is, in the person's own words — a title, why it was run, who
+ran it, the flies, the protocol, notes, and for each factor of the data file a
+kind and a line on what each level means. Every field is optional, and so is
+the section (ADR-0014). **No analysis reads it**: no number, Focus, Run
+Summary, Divergence Note or Out of Date verdict depends on it, and none of it
+goes on a report or to an AI provider. It holds no analysis setting either —
+Focuses, scripts, the Exclusion Group and `omit:` stay where they are, in each
+analysis's own member config. It belongs to the recording: never inherited,
+never an error, and a Project only warns when two members describe one level
+differently. Its shape and helpers are pyflic's `about.py`, copied verbatim. A
+catalogue that files the recording (labdata) may rewrite it, adding `run:` —
+the catalogue's id for the recording, unrelated to a **Batch Run** or an
+analysis run — and keys inside a level's entry; every writer here therefore
+writes back the About the file holds at save time, never the one it loaded.
+_Avoid_: description block, metadata (says nothing about who writes it), notes
+(one field of it)
+
+**Shared About**:
+The part of an **About** that recordings of one series share — experimenter,
+series, organism, sex, age at start, protocol, and each factor's kind and each
+level's whole entry — and never the title, purpose, notes or `run:`. What
+**Start from another recording…** and **Copy config from…** carry over.
+_Avoid_: template, defaults (a Project's defaults never carry one)
+
+**About Editor**:
+`pysurv-config`, the window that edits one folder's **About**: a lone
+recording folder holding only a DLife workbook as readily as a Member
+Experiment (**Edit About…** in the Hub). It shows the workbook's design
+read-only, writes `about:` and nothing else, and asks before writing over a
+file that changed on disk. It never constructs an Experiment, so it never
+creates `analysis/` or `qc/`.
+_Avoid_: config editor (it edits one section, not the config), metadata
+editor
 
 **Experiment Type**:
 A named bundle describing the **data source** — the expected input shape, the
@@ -701,6 +738,11 @@ _Avoid_: template config, full config
   that lives with the Project.
 - A **Project Report** binds one section per **Focus**, across every Member
   Experiment; it never combines their numbers.
+- An **About** belongs to a recording's folder, a **Focus** to an analysis of
+  it. Several Projects may each hold a member that reads one recording's
+  workbook as a **Referenced Data File**; each member's config keeps its own
+  Focuses, and the recording's own config, beside the workbook, holds its
+  About and is never analysed.
 
 ## Example dialogue
 
@@ -784,3 +826,9 @@ _Avoid_: template config, full config
   Project owns every member folder and everything written to it; a member may
   read its data file from outside as a **Referenced Data File**, which it
   never writes.
+- "run" names a **Batch Run**, an analysis run, and — since the **About** —
+  labdata's id for a filed recording (`about.run:`). Resolved by never using
+  the bare word for the last: it is "the catalogue's `run:`", shown and never
+  typed, and nothing here acts on it. The shared contract's "replicate" and
+  "member" read as **Member Experiment** here, and its "design" as the data
+  file's discovered factors: nothing here declares one.

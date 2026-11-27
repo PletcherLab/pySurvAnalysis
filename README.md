@@ -16,7 +16,7 @@ Batch/                          a folder of Projects (structural; batch.yaml opt
 └── Project/                    project.yaml — defaults, scripts
     ├── plot_specs.yaml         the Project's Plot Specs and Styles
     ├── rep_a/                  a Member Experiment — one data file
-    │   ├── survival_config.yaml    input, censoring, exclusions, and its Focuses
+    │   ├── survival_config.yaml    input, censoring, exclusions, its Focuses — and its About
     │   ├── data/                   the workbook or CSV
     │   ├── analysis/
     │   │   ├── Crowding20v40/      one directory per Focus, every file named for it
@@ -45,6 +45,27 @@ Two members of one Project that read the same file are one member: the second
 is reported as a duplicate. An absolute path works, but Validate YAMLs warns
 about it. Without an outside `data_file:`, nothing changes
 ([ADR-0013](docs/adr/0013-a-member-may-reference-its-data-file.md)).
+
+### Describing a recording
+
+A recording's folder can say what the recording is, in the person's own words,
+in an optional `about:` section of its `survival_config.yaml`: a title, why it
+was run, who ran it, the flies, the protocol, and what each level of each
+factor means. `pysurv-config` edits it for one folder, even one that holds
+only a DLife workbook and no config yet, and shows the workbook's design
+beside it. It writes `about:` and nothing else:
+
+```bash
+uv run pysurv-config path/to/recording
+```
+
+No analysis reads the section. No number, Focus or "re-run needed" verdict
+depends on it, and none of it goes on a report or to an AI provider. A
+Project's defaults never carry one, and nothing is inherited. A catalogue that
+files the recording may rewrite the section, so every writer in the app writes
+back the About the file holds at save time. In the Hub, right-click a member
+for **Edit About…**
+([ADR-0014](docs/adr/0014-about-describes-the-recording.md)).
 
 Factors are never declared: they are **discovered** from the data file (the
 Design sheet's columns after `StartTime`, or a CSV's factor columns), with each
@@ -90,9 +111,10 @@ uv run python main.py batch   path/to/Batch
 # Turn a pre-overhaul folder into an Experiment Directory (nothing is deleted)
 uv run python main.py upgrade path/to/old_folder --dry-run
 
-# The other two apps
+# The other apps
 uv run python main.py qc    path/to/rep_a
 uv run python main.py plots path/to/rep_a
+uv run pysurv-config        path/to/recording   # its About
 ```
 
 ## Focuses

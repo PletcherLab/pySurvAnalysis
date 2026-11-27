@@ -13,8 +13,9 @@ The Hub writes most of this file for you:
 - The Focus window writes `focuses:`.
 - The Analyze and Plots checkboxes write `omit:`.
 - The Script Editor writes `scripts:`.
+- **pysurv-config** (the About Editor) writes `about:`, which describes the recording and is never read by an analysis. See [The about: section and pysurv-config](help:config-about).
 
-To edit the file by hand, use **Edit config…** in the Project panel's *Experiment configs…* dialog. It opens the file in your desktop's YAML editor. Keys the app does not recognise are kept untouched when the app rewrites the file.
+To edit the file by hand, use **Edit config…** in the Project panel's *Experiment configs…* dialog. It opens the file in your desktop's YAML editor. Keys the app does not recognise are kept untouched when the app rewrites the file. The file is read as UTF-8 or, failing that, Windows-1252, and always saved as UTF-8.
 
 ## A complete example
 
@@ -69,6 +70,7 @@ scripts:
 | `focuses` | mapping | `Unfiltered` | Named Focuses (below). |
 | `omit` | mapping | nothing left out | Analyses and figures every run leaves out. See [The omit: section](help:config-omit). |
 | `scripts` | list | `Standard analysis` | Saved Experiment Scripts. See [Experiment and Project Scripts](help:scripts-overview). |
+| `about` | mapping | none | What the recording is, in your own words: title, purpose, experimenter, the flies, the protocol, what each level means. Never read by an analysis, never inherited, never on a report. See [The about: section and pysurv-config](help:config-about). |
 | `factors` | mapping | none | **Legacy.** A pre-Focus factor block. If there is no `focuses:` block, it becomes one Focus called `Interaction`, and it is removed the next time Focuses are saved. |
 
 ### data_file

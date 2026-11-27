@@ -21,6 +21,7 @@ Member problems are prefixed with the member's name (`cohort_a: …`).
 | Message | What to do |
 |---|---|
 | `survival_config.yaml, line N: not valid YAML — <problem>. (<path>)` | The file is not YAML at all, so none of the checks below can run (see *YAML syntax errors* below). |
+| `survival_config.yaml: cannot be read as text — it is neither UTF-8 nor Windows-1252. Save it again as UTF-8. (<path>)` | Open the file in a text editor and save it as UTF-8. A config saved by Notepad as "ANSI" is read without this; only bytes in neither encoding draw it. |
 | `Config must be a YAML mapping.` / `… must contain a YAML mapping, got list.` | The file must be `key: value` lines at the top level, not a list or a single value. |
 | `Unknown experiment_type '…'. Known types: standard_lifespan, or omit the key.` | Correct or delete `experiment_type`. When this appears, the other checks are skipped until it is fixed. |
 | `` `input.format` must be auto, excel, long or wide (got '…'). `` | Fix the value. See [The input: section](help:config-input). |
@@ -97,6 +98,10 @@ A warning is something that works but is fragile. It never stops a run. Validate
 |---|---|
 | `` `data_file: …` is an absolute path — it works, but not once the folders move or are opened from another computer. `` | Write the path relative to the experiment directory. |
 | `` `data_file: …` uses backslashes, which are a separator only on Windows — write forward slashes. `` | Replace `\` with `/`. |
+| `about.…` (a field of the wrong type, an unknown kind, a title over 60 characters, a factor or level the data file does not have) | Nothing to do for the analysis, which never reads `about:`. Correct it in pysurv-config, or leave it. See [The about: section and pysurv-config](help:config-about). |
+| `about: members describe <factor> '<level>' differently (…)` | Two members say different things about one level. Make them agree if they are the same thing; rename the level in one workbook if they are not. |
+| `` project.yaml: `defaults: about:` is ignored — … `` | An About describes one recording. Move it into the member's `survival_config.yaml`. |
+| `<workbook>: the lifespan is still running (PrivateData IsCompleted is 0) — …` | The workbook is not marked complete in DLife, so its survivors are censored at the last census. Analyse it again once it is finished. |
 
 ## Blocked Focuses (need the data)
 

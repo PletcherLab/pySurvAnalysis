@@ -38,6 +38,7 @@ From the repository folder:
 | `uv run pysurv-hub path/to/Project` | The Hub with that Project, Batch folder or Experiment Directory already selected |
 | `uv run pysurv-qc path/to/experiment` | The Chamber QC viewer on one experiment |
 | `uv run pysurv-plots path/to/experiment` | The Plot Editor on one experiment |
+| `uv run pysurv-config path/to/recording` | The About Editor: describe one recording folder in the `about:` section of its `survival_config.yaml` ([details](help:config-about)) |
 | `uv run python main.py` | The Hub (the same program, through the script in the repository) |
 
 The Hub opens with nothing selected unless a path is given: choose **Open project…** on the Project panel, or **Recent** in the top bar. Everything else — analysis, figures, reports, scripts, batches — is done from the Hub. The same work can also be run without the interface; see [Command-line use](help:command-line).
