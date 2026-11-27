@@ -57,7 +57,7 @@ The folder holds a DLife workbook at its root or in `data/`, or names one with `
 
 The window has two tabs.
 
-- **About** holds the fields above. The title shows its length against 60. `run:` is shown when present and cannot be typed. Under *Factors and levels* there is one row per factor of the workbook for its kind, and one row per level for what it means. A factor or level the file describes that the workbook lacks has no row; it is kept as it is and listed under *Checks*.
+- **About** holds the fields above. Three are already typed in when the file gives none, because they are what the lab's lifespans almost always are: **Organism** *Drosophila melanogaster*, **Age at start** *2-3 days old* and **Protocol** *DLife Lifespan*. Change or clear them as needed. They are saved only with the rest of the About, once you have edited something; a folder you open and close untouched gains nothing. The title shows its length against 60. `run:` is shown when present and cannot be typed. Under *Factors and levels* there is one row per factor of the workbook for its kind, and one row per level for what it means. A factor or level the file describes that the workbook lacks has no row; it is kept as it is and listed under *Checks*.
 - **Design** shows what the workbook says, read-only: the data file, its factors and their levels in the order the Design sheet first lists them, each chamber with its sample size and levels, and the chambers its ChamberFlags sheet excludes. A workbook whose PrivateData sheet says the lifespan is not finished (`IsCompleted` is 0) is flagged here.
 
 **Start from another recording…** fills in what recordings of one series share, from another recording's `survival_config.yaml`: the experimenter, the series, the organism, the sex, the age at start, the protocol, and each factor's kind and each level's whole entry, for the factors and levels this workbook has. The title, the purpose and the notes stay this recording's own, and `run:` is never taken. Nothing is written until you save.
@@ -70,7 +70,7 @@ The editor never loads the folder as an experiment, so it never creates `analysi
 
 ## From the Hub
 
-- Right-click a member in the Project panel's members table and choose **Edit About…**, or select it in *Experiment configs…* and press **Edit About…**. Either opens pysurv-config on that member's folder. A member with no About opens with every field blank.
+- Right-click a member in the Project panel's members table and choose **Edit About…**, or select it in *Experiment configs…* and press **Edit About…**. Either opens pysurv-config on that member's folder. A member with no About opens with blank fields, apart from the three defaults below.
 - **Copy config from…**, offered after **Create experiment…**, copies another member's config into the new one. Of its `about:` only the shared part comes along: never the title, the purpose, the notes or `run:`. Its factors and levels are limited to the new member's workbook when that can be read.
 - **Reference data file…** writes no About into the member. A recording described in its own folder keeps that description there; each analysis that reads it holds its own config, with its own Focuses.
 

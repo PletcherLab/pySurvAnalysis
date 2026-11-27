@@ -131,6 +131,14 @@ that likely, so it is fixed here too.
   written. Only a level's meaning is edited (`about.with_meaning`), so a
   mapping keeps its other keys. A section nobody touched is not rewritten, so
   opening and saving a config does not strip its comments.
+  - Three fields are already typed in whenever the file gives none, because
+    they are what the lab's lifespans almost always are: Organism
+    *Drosophila melanogaster*, Age at start *2-3 days old*, Protocol
+    *DLife Lifespan* (Scott, 2026-11-27, departing from P15's "opens with
+    blank fields"). They belong to the form as opened, so a folder never
+    looks changed for them and nothing is written until something is
+    edited; then they are saved like any field, and clearing one leaves it
+    out. A value the file gives is never replaced.
 
 - **A change on disk is never overwritten silently.** The editor keeps the
   config's bytes as it last read or wrote them and compares before saving. If
@@ -141,7 +149,8 @@ that likely, so it is fixed here too.
 
 - **Reachable from the Hub.** Right-click a member in the members table, or
   select it in *Experiment configs…*: **Edit About…** opens the same window on
-  the member's folder. A member with no About opens blank.
+  the member's folder. A member with no About opens blank, apart from
+  three of the lab's usual values (below).
 
 - **A Project warns when members describe one level differently**
   (`about.meaning_spread`, as `Project.about_warnings`, which

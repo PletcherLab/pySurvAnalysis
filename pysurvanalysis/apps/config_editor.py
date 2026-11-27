@@ -97,6 +97,16 @@ START_FROM_TOOLTIP = (
     "notes stay this recording's own, and run: is never taken. Nothing is "
     "written until you save.")
 
+#: What the lab's lifespans usually are, already typed into their fields
+#: whenever the file gives none: the organism, the age at the start, and the
+#: protocol's name. Part of the form as opened, so a folder never looks
+#: changed for them; written with the first edit and save, like any field.
+FIELD_DEFAULTS: dict[str, str] = {
+    "organism": "Drosophila melanogaster",
+    "age_at_start": "2-3 days old",
+}
+DEFAULT_PROTOCOL = "DLife Lifespan"
+
 #: ``about:`` absent from the file — distinct from a section that is blank.
 _NO_ABOUT = object()
 #: The file is there but cannot be read: equal to nothing this window read,
@@ -370,6 +380,9 @@ class AboutForm(QWidget):
         form.addRow(_section_label("The flies"))
         self.organism = QLineEdit()
         self.organism.setPlaceholderText("Such as Drosophila melanogaster")
+        self.organism.setToolTip(
+            f"Filled in as {FIELD_DEFAULTS['organism']} when the file names "
+            "none. Change it, or clear it to leave it out.")
         form.addRow("Organism:", self.organism)
         sex_row = QHBoxLayout()
         self.sex_checks: dict[str, QCheckBox] = {}
@@ -385,11 +398,17 @@ class AboutForm(QWidget):
         self.age_at_start = QLineEdit()
         self.age_at_start.setPlaceholderText(
             "At the start of the lifespan, such as 2-3 days")
+        self.age_at_start.setToolTip(
+            f"Filled in as {FIELD_DEFAULTS['age_at_start']} when the file says "
+            "nothing. Change it, or clear it to leave it out.")
         form.addRow("Age at start:", self.age_at_start)
 
         form.addRow(_section_label("Protocol and notes"))
         self.protocol_edits = {name: QLineEdit() for name in about_mod.PROTOCOL_FIELDS}
-        self.protocol_edits["name"].setPlaceholderText("Such as DLife lifespan")
+        self.protocol_edits["name"].setPlaceholderText("Such as DLife Lifespan")
+        self.protocol_edits["name"].setToolTip(
+            f"Filled in as {DEFAULT_PROTOCOL} when the file names no protocol. "
+            "Change it, or clear it to leave it out.")
         self.protocol_edits["version"].setPlaceholderText("Such as 4")
         self.protocol_edits["link"].setPlaceholderText(
             "Where the protocol is written down")
@@ -592,6 +611,16 @@ class AboutForm(QWidget):
             protocol = protocol if isinstance(protocol, Mapping) else {}
             for name, edit in self.protocol_edits.items():
                 edit.setText(about_mod._text(protocol.get(name)))
+
+            ## The lab's usual values, where the file gives none. Filled before
+            ## load() notes what the form says, so they never make a folder
+            ## look changed; a field the file gives keeps the file's value.
+            for key, value in FIELD_DEFAULTS.items():
+                widget = self._text_widgets[key]
+                if not widget.text().strip():
+                    widget.setText(value)
+            if not self.protocol_edits["name"].text().strip():
+                self.protocol_edits["name"].setText(DEFAULT_PROTOCOL)
 
             notes = about_mod.factor_notes(section)
             kinds = {name: body["kind"] for name, body in notes.items() if body["kind"]}

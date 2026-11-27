@@ -17,6 +17,18 @@ from pysurvanalysis.domain import Project, config as cfgmod
 from tests.conftest import write_dlife_workbook
 from tests.test_about_config import full_about, make_member, snapshot
 
+#: What the About tab has typed in for a file that gives none of them.
+DEFAULTS = {"organism": "Drosophila melanogaster", "age_at_start": "2-3 days old",
+            "protocol": {"name": "DLife Lifespan"}}
+
+
+def with_defaults(about: dict) -> dict:
+    """*about* as saved from a form opened on a file that gave no organism,
+    age or protocol: the defaults, in the section's written order."""
+    from pysurvanalysis import about as about_mod
+
+    return about_mod.clean_about({**DEFAULTS, **about})
+
 
 @pytest.fixture
 def editors(qapp):
@@ -91,9 +103,9 @@ def test_a_workbook_folder_shows_its_design_and_saves_only_the_about(editors, re
     assert window.is_dirty()
     assert window.save()
 
-    assert cfgmod.load_config(recording) == {"about": {
+    assert cfgmod.load_config(recording) == {"about": with_defaults({
         "title": "Lifespan on two diets",
-        "factors": {"Treatment": {"kind": "diet", "levels": {"b": "15% SY"}}}}}
+        "factors": {"Treatment": {"kind": "diet", "levels": {"b": "15% SY"}}}})}
     after = snapshot(recording)
     assert set(after) - set(before) == {cfgmod.CONFIG_FILENAME}
     assert not (recording / "analysis").exists() and not (recording / "qc").exists()
@@ -111,17 +123,49 @@ def test_a_blank_about_writes_no_file(editors, recording):
 
 
 def test_a_section_left_blank_is_not_written(editors, recording):
+    """No ``sex: []``, no protocol version or link, no ``factors: {}``."""
     window = editors(recording)
     window.about_form.experimenter.setText("tester")
     window.save()
-    assert cfgmod.load_config(recording) == {"about": {"experimenter": "tester"}}
+    assert cfgmod.load_config(recording) == {"about": {
+        "experimenter": "tester", "organism": "Drosophila melanogaster",
+        "age_at_start": "2-3 days old", "protocol": {"name": "DLife Lifespan"}}}
+
+
+def test_the_lab_defaults_are_typed_in_and_written_only_with_an_edit(editors, recording):
+    window = editors(recording)
+    form = window.about_form
+    assert form.organism.text() == "Drosophila melanogaster"
+    assert form.age_at_start.text() == "2-3 days old"
+    assert form.protocol_edits["name"].text() == "DLife Lifespan"
+    assert not window.is_dirty()
+    assert not window.save()                       # nothing typed: nothing written
+    assert not cfgmod.config_path(recording).exists()
+    form.organism.setText("Drosophila simulans")
+    form.age_at_start.setText("")                  # cleared: left out
+    assert window.save()
+    assert cfgmod.load_config(recording) == {"about": {
+        "organism": "Drosophila simulans", "protocol": {"name": "DLife Lifespan"}}}
+
+
+def test_a_file_that_gives_a_field_keeps_its_own_value(editors, tmp_path):
+    member = make_member(tmp_path / "m", about={
+        "organism": "Drosophila simulans", "age_at_start": "5 days",
+        "protocol": "Another protocol"})
+    form = editors(member).about_form
+    assert form.organism.text() == "Drosophila simulans"
+    assert form.age_at_start.text() == "5 days"
+    assert form.protocol_edits["name"].text() == "Another protocol"
 
 
 def test_blanking_every_field_removes_the_section_and_nothing_else(editors, tmp_path):
     member = make_member(tmp_path / "m", about={"title": "Gone soon"})
     before = cfgmod.load_config(member)
     window = editors(member)
-    window.about_form.title.setText("")
+    form = window.about_form
+    for edit in (form.title, form.organism, form.age_at_start,
+                 form.protocol_edits["name"]):
+        edit.setText("")
     assert window.save()
     after = cfgmod.load_config(member)
     assert "about" not in after
@@ -144,12 +188,12 @@ def test_a_folder_named_by_a_file_inside_it_opens(editors, recording):
     assert window.design.data_file is not None
 
 
-def test_a_member_with_no_about_opens_blank(editors, tmp_path):
+def test_a_member_with_no_about_opens_blank_but_for_the_defaults(editors, tmp_path):
     member = make_member(tmp_path / "m")
     window = editors(member)
     form = window.about_form
-    assert form.section() == {}
-    assert form.title.text() == "" and form.organism.text() == ""
+    assert form.section() == DEFAULTS
+    assert form.title.text() == "" and form.purpose.toPlainText() == ""
     assert not form.run_value.text()
     assert not window.is_dirty()
 
@@ -162,7 +206,7 @@ def test_a_folder_with_no_workbook_still_describes(editors, tmp_path):
     assert window.about_form.kinds() == {}
     window.about_form.title.setText("Planned")
     assert window.save()
-    assert cfgmod.load_config(folder) == {"about": {"title": "Planned"}}
+    assert cfgmod.load_config(folder) == {"about": with_defaults({"title": "Planned"})}
 
 
 def test_a_config_that_cannot_be_read_is_never_written_over(editors, tmp_path):
@@ -199,7 +243,7 @@ def test_saving_the_about_leaves_every_other_key_equal(editors, tmp_path):
     window.about_form.title.setText("A title")
     assert window.save()
     after = cfgmod.load_config(member)
-    assert after.pop("about") == {"title": "A title"}
+    assert after.pop("about") == with_defaults({"title": "A title"})
     assert after == before
     assert list(cfgmod.load_config(member))[0] == "about"      # new: first
 
@@ -266,7 +310,8 @@ def test_a_sex_or_protocol_the_form_has_no_field_for_is_kept(editors, tmp_path):
     window.about_form.title.setText("T")
     window.save()
     assert cfgmod.load_config(member)["about"] == {
-        "title": "T", "sex": ["female", "mated"],
+        "title": "T", "organism": "Drosophila melanogaster",
+        "sex": ["female", "mated"], "age_at_start": "2-3 days old",
         "protocol": {"name": "P", "x": 1}, "x_lab": {"a": 1}}
 
 
@@ -379,7 +424,8 @@ def test_start_from_a_config_with_nothing_to_share(editors, tmp_path, recording)
     other = make_member(tmp_path / "earlier", about={"title": "Only a title"})
     window = editors(recording)
     assert not window.about_form.start_from_file(cfgmod.config_path(other))
-    assert window.about_form.section() == {}
+    assert window.about_form.section() == DEFAULTS
+    assert not window.is_dirty()
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +456,8 @@ def test_edit_about_opens_pysurv_config_on_the_member(hub):
     window = hub._action_edit_about(hub._project.directory / "m2")
     assert isinstance(window, ConfigEditorWindow)
     assert window.directory == (hub._project.directory / "m2").resolve()
-    assert window.about_form.section() == {}           # no About: blank
+    assert window.about_form.section() == DEFAULTS     # no About: the defaults
+    assert not window.is_dirty()
     window = hub._action_edit_about(hub._project.directory / "m1")
     assert window.about_form.title.text() == full_about()["title"]
 
