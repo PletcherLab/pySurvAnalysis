@@ -16,7 +16,7 @@ about:
   experimenter: scott
   series: diet-inr-2026
   organism: Drosophila melanogaster
-  sex: [female]
+  sex: [mixed]                    # female, male or mixed
   age_at_start: 2-3 days
   protocol: {name: DLife lifespan, version: "4", link: https://example.org/dlife}
   notes: Incubator 3; food changed every 2-3 days.
@@ -38,7 +38,7 @@ about:
 | `title` | One line. Up to 60 characters fit on one line in a list of recordings; a longer title is still saved, with a warning. |
 | `purpose`, `notes` | Free text. |
 | `experimenter`, `series`, `organism`, `age_at_start` | A word or a short phrase. A series names recordings that belong together. |
-| `sex` | A list such as `[female]` or `[female, male]`. One word reads as a list of one. |
+| `sex` | One word: `female` or `male` when every fly is that sex, or `mixed` when the recording holds more than one sex. With a Sex factor in the Design sheet the sex is `mixed`, and the factor's levels say which chambers are which; a chamber housing both sexes is a level of that factor, described under `factors`. It is written as a list of one, `[mixed]`. An older file's `[female, male]` reads as `mixed`. |
 | `protocol` | `name`, `version` and `link`. Plain text reads as the name. |
 | `factors` | For each factor of the workbook: its `kind`, and a few words for each level. A level's entry may also be a mapping whose `definition:` is that text. |
 | `run` | The recording's id in the catalogue that filed it. Written by the catalogue only. |
@@ -57,7 +57,7 @@ The folder holds a DLife workbook at its root or in `data/`, or names one with `
 
 The window has two tabs.
 
-- **About** holds the fields above. Three are already typed in when the file gives none, because they are what the lab's lifespans almost always are: **Organism** *Drosophila melanogaster*, **Age at start** *2-3 days old* and **Protocol** *DLife Lifespan*. Change or clear them as needed. They are saved only with the rest of the About, once you have edited something; a folder you open and close untouched gains nothing. The title shows its length against 60. `run:` is shown when present and cannot be typed. Under *Factors and levels* there is one row per factor of the workbook for its kind, and one row per level for what it means. A factor or level the file describes that the workbook lacks has no row; it is kept as it is and listed under *Checks*.
+- **About** holds the fields above. Three are already typed in when the file gives none, because they are what the lab's lifespans almost always are: **Organism** *Drosophila melanogaster*, **Age at start** *2-3 days old* and **Protocol** *DLife Lifespan*. Change or clear them as needed. They are saved only with the rest of the About, once you have edited something; a folder you open and close untouched gains nothing. **Sex** is one of *female*, *male* or *mixed*; click the chosen one again to clear it. When the workbook has a factor named Sex, or the About gives a factor the kind *sex*, *mixed* is chosen for you where the file says nothing, and the form says why. A file that lists more than one sex shows as *mixed*, and is rewritten as `[mixed]` only when you save an edit. A word that is not a sex (such as `mated`) is kept beside the choice. The title shows its length against 60. `run:` is shown when present and cannot be typed. Under *Factors and levels* there is one row per factor of the workbook for its kind, and one row per level for what it means. A factor or level the file describes that the workbook lacks has no row; it is kept as it is and listed under *Checks*.
 - **Design** shows what the workbook says, read-only: the data file, its factors and their levels in the order the Design sheet first lists them, each chamber with its sample size and levels, and the chambers its ChamberFlags sheet excludes. A workbook whose PrivateData sheet says the lifespan is not finished (`IsCompleted` is 0) is flagged here.
 
 **Start from another recording…** fills in what recordings of one series share, from another recording's `survival_config.yaml`: the experimenter, the series, the organism, the sex, the age at start, the protocol, and each factor's kind and each level's whole entry, for the factors and levels this workbook has. The title, the purpose and the notes stay this recording's own, and `run:` is never taken. Nothing is written until you save.

@@ -49,7 +49,6 @@ from PyQt6.QtCore import QSize, Qt, pyqtSignal  # noqa: E402
 from PyQt6.QtWidgets import (  # noqa: E402
     QAbstractItemView,
     QApplication,
-    QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
@@ -61,6 +60,7 @@ from PyQt6.QtWidgets import (  # noqa: E402
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
+    QRadioButton,
     QScrollArea,
     QSizePolicy,
     QTableWidget,
@@ -106,6 +106,24 @@ FIELD_DEFAULTS: dict[str, str] = {
     "age_at_start": "2-3 days old",
 }
 DEFAULT_PROTOCOL = "DLife Lifespan"
+
+#: A recording's sex is one word: the sex every fly is, or ``mixed`` when it
+#: holds more than one — as when the workbook has a Sex factor, whose levels
+#: say which chambers are which (Scott, 2026-11-27, with labdata, which reads
+#: the word as a registry term's label). ``[female, male]`` has no meaning of
+#: its own, and no combination is offered. ``mixed`` is this package's
+#: addition to the shared module's choices (``about.SEX_CHOICES``), which
+#: keeps any word a file holds.
+MIXED_SEX = "mixed"
+SEX_OPTIONS: tuple[str, ...] = (*about_mod.SEX_CHOICES, MIXED_SEX)
+SEX_TOOLTIPS = {
+    "female": "Every fly in the recording is female.",
+    "male": "Every fly in the recording is male.",
+    MIXED_SEX: "More than one sex in this recording: the Sex factor says which "
+               "chambers are which. Saved as the word 'mixed'. A chamber housing "
+               "both sexes is a level of that factor, described under Factors "
+               "and levels.",
+}
 
 #: ``about:`` absent from the file — distinct from a section that is blank.
 _NO_ABOUT = object()
@@ -327,7 +345,13 @@ class AboutForm(QWidget):
         self._base: dict = {}
         #: :meth:`section` right after the load: what "untouched" means.
         self._at_load: dict = {}
+        #: Words the file gives for sex that are not sexes this form knows
+        #: (``mated``, say): kept beside the choice, as the contract keeps
+        #: every word it does not edit.
         self._other_sex: list[str] = []
+        #: Why the choice shows what it does when the file did not say it in
+        #: one word: ``[female, male]`` read as mixed, or a Sex factor.
+        self._sex_note = ""
         self._factors: dict[str, list[str]] = {}
         #: The workbook's design is unknown: Start from… takes no factors.
         self._design_known = False
@@ -413,13 +437,18 @@ class AboutForm(QWidget):
             "none. Change it, or clear it to leave it out.")
         form.addRow("Organism:", self.organism)
         sex_row = QHBoxLayout()
-        self.sex_checks: dict[str, QCheckBox] = {}
-        for value in about_mod.SEX_CHOICES:
-            check = QCheckBox(value)
-            check.toggled.connect(self._emit_changed)
-            self.sex_checks[value] = check
-            sex_row.addWidget(check)
+        #: One of three, or none: radio buttons a second click clears, so
+        #: "not said" is always one click away.
+        self.sex_buttons: dict[str, QRadioButton] = {}
+        for value in SEX_OPTIONS:
+            button = QRadioButton(value)
+            button.setAutoExclusive(False)
+            button.setToolTip(SEX_TOOLTIPS.get(value, ""))
+            button.toggled.connect(lambda on, v=value: self._on_sex_toggled(v, on))
+            self.sex_buttons[value] = button
+            sex_row.addWidget(button)
         self.other_sex_label = QLabel("")
+        self.other_sex_label.setStyleSheet("color: palette(mid); font-style: italic;")
         sex_row.addWidget(self.other_sex_label)
         sex_row.addStretch(1)
         form.addRow("Sex:", sex_row)
@@ -497,6 +526,47 @@ class AboutForm(QWidget):
     def _emit_changed(self, *_args) -> None:
         if not self._filling:
             self.changed.emit()
+
+    def _on_sex_toggled(self, value: str, on: bool) -> None:
+        if not self._filling:
+            self._sex_note = ""
+        if on:
+            for other, button in self.sex_buttons.items():
+                if other != value and button.isChecked():
+                    button.blockSignals(True)
+                    button.setChecked(False)
+                    button.blockSignals(False)
+        self._show_other_sex()
+        self._emit_changed()
+
+    def sex(self) -> str:
+        """The chosen sex, or ``""``."""
+        return next((v for v, b in self.sex_buttons.items() if b.isChecked()), "")
+
+    def _show_other_sex(self) -> None:
+        parts = [self._sex_note] if self._sex_note else []
+        if self._other_sex:
+            parts.append(f"also kept: {', '.join(self._other_sex)}")
+        self.other_sex_label.setText(" · ".join(parts))
+
+    def has_sex_factor(self) -> bool:
+        """The workbook has a factor named Sex (any case), or the About gives
+        a factor the kind ``sex``: the recording holds more than one sex."""
+        notes = about_mod.factor_notes(self._base)
+        return (any(name.strip().lower() == "sex" for name in self._factors)
+                or any(body.get("kind") == "sex" for body in notes.values()))
+
+    @staticmethod
+    def read_sex(words: list[str]) -> tuple[str, list[str]]:
+        """``(choice, other words)`` from a file's sex words: one known sex is
+        that sex; ``mixed`` among them, or more than one sex, is ``mixed`` — a
+        recording is female, male or mixed. Words that are not sexes are
+        returned to be kept."""
+        known = [w.lower() for w in words if w.lower() in SEX_OPTIONS]
+        others = [w for w in words if w.lower() not in SEX_OPTIONS]
+        if MIXED_SEX in known or len(set(known)) > 1:
+            return MIXED_SEX, others
+        return (known[0] if known else ""), others
 
     def _on_title_changed(self, text: str) -> None:
         n = len(text.strip())
@@ -625,13 +695,12 @@ class AboutForm(QWidget):
             self._form.setRowVisible(self.run_value, bool(run))
 
             sexes = about_mod.sex_values(section.get(about_mod.SEX_KEY))
-            lowered = [value.lower() for value in sexes]
-            for value, check in self.sex_checks.items():
-                check.setChecked(value in lowered)
-            self._other_sex = [value for value in sexes
-                               if value.lower() not in self.sex_checks]
-            self.other_sex_label.setText(
-                f"also: {', '.join(self._other_sex)}" if self._other_sex else "")
+            chosen, self._other_sex = self.read_sex(sexes)
+            for value, button in self.sex_buttons.items():
+                button.setChecked(value == chosen)
+            known = [w for w in sexes if w.lower() in SEX_OPTIONS]
+            self._sex_note = (f"the file says {', '.join(known)}: read as {chosen}"
+                              if len(known) > 1 else "")
 
             protocol = section.get(about_mod.PROTOCOL_KEY)
             if isinstance(protocol, str):
@@ -649,6 +718,12 @@ class AboutForm(QWidget):
                     widget.setText(value)
             if not self.protocol_edits["name"].text().strip():
                 self.protocol_edits["name"].setText(DEFAULT_PROTOCOL)
+            ## A Sex factor means more than one sex, so mixed — the same kind
+            ## of default as those above, and only where the file says nothing.
+            if not chosen and self.has_sex_factor():
+                self.sex_buttons[MIXED_SEX].setChecked(True)
+                self._sex_note = "mixed: the design has a Sex factor"
+            self._show_other_sex()
 
             notes = about_mod.factor_notes(section)
             kinds = {name: body["kind"] for name, body in notes.items() if body["kind"]}
@@ -667,9 +742,8 @@ class AboutForm(QWidget):
         for key, widget in self._text_widgets.items():
             section[key] = (widget.toPlainText() if isinstance(widget, QPlainTextEdit)
                             else widget.text()).strip()
-        section[about_mod.SEX_KEY] = [
-            value for value, check in self.sex_checks.items() if check.isChecked()
-        ] + self._other_sex
+        chosen = self.sex()
+        section[about_mod.SEX_KEY] = ([chosen] if chosen else []) + self._other_sex
         kept = self._base.get(about_mod.PROTOCOL_KEY)
         protocol = ({key: copy.deepcopy(value) for key, value in kept.items()
                      if key not in about_mod.PROTOCOL_FIELDS}
@@ -756,6 +830,9 @@ class AboutForm(QWidget):
         section = self.section()
         declared = self._factors if self._design_known else None
         lines = cfgmod.check_about(section, declared) if section else []
+        if self.sex() in about_mod.SEX_CHOICES and self.has_sex_factor():
+            lines.append(f"about.sex is {self.sex()}, but the design has a Sex "
+                         f"factor: a recording with more than one sex is mixed")
         self.checks.setText("\n".join(f"• {line}" for line in lines)
                             if lines else "Nothing to point out.")
         self.checks.setStyleSheet("color: #d97706;" if lines else "")

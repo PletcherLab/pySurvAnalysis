@@ -148,6 +148,81 @@ def test_the_lab_defaults_are_typed_in_and_written_only_with_an_edit(editors, re
         "organism": "Drosophila simulans", "protocol": {"name": "DLife Lifespan"}}}
 
 
+def test_sex_is_one_of_female_male_or_mixed(editors, recording):
+    """One word: the sex every fly is, or mixed for more than one sex."""
+    window = editors(recording)
+    form = window.about_form
+    assert list(form.sex_buttons) == ["female", "male", "mixed"]
+    assert form.sex() == ""                       # no Sex factor: not said
+    form.sex_buttons["female"].setChecked(True)
+    form.sex_buttons["mixed"].setChecked(True)
+    assert form.sex() == "mixed"
+    assert not form.sex_buttons["female"].isChecked()
+    assert window.save()
+    assert cfgmod.load_config(recording)["about"]["sex"] == ["mixed"]
+    form.sex_buttons["mixed"].setChecked(False)   # cleared: not said
+    assert window.save()
+    assert "sex" not in cfgmod.load_config(recording)["about"]
+
+
+def test_a_sex_factor_makes_mixed_the_default(editors, tmp_path):
+    folder = tmp_path / "R-sex"
+    write_dlife_workbook(folder / "data" / "R.xlsx", factors=("Sex", "Drug"))
+    window = editors(folder)
+    assert window.about_form.sex() == "mixed"
+    assert "the design has a Sex factor" in window.about_form.other_sex_label.text()
+    assert not window.is_dirty()
+    assert not window.save()                      # a default alone writes nothing
+    window.about_form.title.setText("T")
+    assert window.save()
+    assert cfgmod.load_config(folder)["about"]["sex"] == ["mixed"]
+    ## A file that says otherwise keeps its own word.
+    cfgmod.write_about(folder, {"sex": ["female"]})
+    assert editors(folder).about_form.sex() == "female"
+
+
+@pytest.mark.parametrize("words", [["female", "male"], ["Female", "MALE"],
+                                   ["female", "mixed"], "Mixed"])
+def test_more_than_one_sex_in_a_file_reads_as_mixed(editors, tmp_path, words):
+    member = make_member(tmp_path / "m", about={"sex": words, "title": "T"})
+    path = cfgmod.config_path(member)
+    before = path.read_bytes()
+    window = editors(member)
+    assert window.about_form.sex() == "mixed"
+    assert not window.is_dirty()
+    assert not window.save()
+    assert path.read_bytes() == before            # never rewritten unasked
+    window.about_form.title.setText("T2")
+    assert window.save()
+    assert cfgmod.load_config(member)["about"]["sex"] == ["mixed"]
+
+
+def test_a_word_that_is_not_a_sex_is_kept_beside_the_choice(editors, tmp_path):
+    member = make_member(tmp_path / "m", about={"sex": ["female", "mated"]})
+    window = editors(member)
+    assert window.about_form.sex() == "female"
+    assert "mated" in window.about_form.other_sex_label.text()
+    window.about_form.title.setText("T")
+    window.save()
+    assert cfgmod.load_config(member)["about"]["sex"] == ["female", "mated"]
+
+
+def test_one_sex_beside_a_sex_factor_is_checked(editors, tmp_path):
+    folder = tmp_path / "R-sex"
+    write_dlife_workbook(folder / "data" / "R.xlsx", factors=("Sex", "Drug"))
+    cfgmod.write_about(folder, {"sex": ["female"]})
+    form = editors(folder).about_form
+    assert form.sex() == "female"
+    assert "the design has a Sex factor" in form.checks.text()
+
+
+def test_a_factor_of_kind_sex_makes_mixed_the_default(editors, tmp_path, recording):
+    cfgmod.write_about(recording, {"factors": {"Genotype": {"kind": "sex"}}})
+    form = editors(recording).about_form
+    assert form.sex() == "mixed"
+    assert "Sex factor" in form.other_sex_label.text()
+
+
 def test_a_file_that_gives_a_field_keeps_its_own_value(editors, tmp_path):
     member = make_member(tmp_path / "m", about={
         "organism": "Drosophila simulans", "age_at_start": "5 days",

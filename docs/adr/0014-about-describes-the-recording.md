@@ -144,6 +144,18 @@ that likely, so it is fixed here too.
     looks changed for them and nothing is written until something is
     edited; then they are saved like any field, and clearing one leaves it
     out. A value the file gives is never replaced.
+  - **Sex is one of female, male or mixed** (Scott, 2026-11-27, with
+    labdata, which reads the word as a registry sex term's label): the sex
+    every fly is, or `mixed` when the recording holds more than one. With a
+    Sex factor it is `mixed`, and the factor's levels say which chambers
+    are which; a chamber housing both sexes is a level of that factor, not
+    another run-level word. The editor offers the three as one choice,
+    writes a list of one, reads `[female, male]` or any list holding
+    `mixed` as `mixed` (rewritten only by a save the person makes), keeps
+    words that are not sexes, preselects `mixed` for a factor named Sex or
+    of kind `sex` where the file says nothing, and checks one sex beside a
+    Sex factor. `mixed` is this package's addition: the shared module's
+    `SEX_CHOICES` is still female and male, and it keeps any word.
 
 - **A change on disk is never overwritten silently.** The editor keeps the
   config's bytes as it last read or wrote them and compares before saving. If
