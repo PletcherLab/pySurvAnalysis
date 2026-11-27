@@ -210,6 +210,34 @@ def describe_folder(directory: str | Path, config: dict | None = None) -> Folder
     return out
 
 
+def recording_folder(path: str | Path) -> Path:
+    """The recording folder *path* names, whose root holds the config.
+
+    A file names its folder. A folder its parent reads as ``data/`` — the
+    workbook's folder, when the workbook is in ``data/`` — names the parent:
+    the loader looks for ``survival_config.yaml`` at the recording's root,
+    beside ``data/``, never inside it, so a config saved beside the workbook
+    there would never be read. Decided by the loader's own search
+    (:func:`layout.data_candidates`), so the editor climbs exactly when the
+    parent would read this folder's files.
+    """
+    from ..domain import layout
+
+    path = Path(path).expanduser()
+    if path.is_file():
+        path = path.parent
+    if not path.is_dir():
+        return path
+    parent = path.parent
+    try:
+        base, found = layout.data_candidates(parent)
+    except OSError:
+        return path
+    if found and parent != path and _same_file(base, path):
+        return parent
+    return path
+
+
 def _cell(value: Any) -> str:
     if value is None:
         return ""
@@ -734,6 +762,15 @@ class AboutForm(QWidget):
 
     # -- Start from another recording… -----------------------------------------
 
+    def adopt(self, section: Any) -> None:
+        """Fill the form from *section*, another copy of this recording's
+        own About, as an edit: every field, ``run:`` and the title included,
+        and Save writes it."""
+        self._base = copy.deepcopy(about_mod.read_about({about_mod.ABOUT_KEY: section}))
+        self._fill()
+        self.refresh_checks()
+        self.changed.emit()
+
     def start_from(self, earlier: Any) -> list[str]:
         """Fill in the shared part of *earlier* — another recording's
         ``about:`` — and return the fields taken (none when it has nothing
@@ -992,6 +1029,13 @@ class ConfigEditorWindow(QMainWindow):
         status_row.addWidget(self.path_label, 1)
         status_row.addWidget(self.dirty_label)
         outer.addLayout(status_row)
+        #: Said when data/ holds a config of its own, which nothing reads.
+        self.notice_label = QLabel("")
+        self.notice_label.setWordWrap(True)
+        self.notice_label.setStyleSheet("color: #d97706;")
+        self.notice_label.setContentsMargins(16, 0, 16, 6)
+        self.notice_label.setVisible(False)
+        outer.addWidget(self.notice_label)
 
         self.tabs = QTabWidget()
         self.about_form = AboutForm()
@@ -1049,9 +1093,7 @@ class ConfigEditorWindow(QMainWindow):
         """Show *directory* — or the folder of a file inside it, such as its
         config or its workbook. True when it could be read; a config that
         cannot be read is said, and nothing may be saved over it."""
-        path = Path(directory).expanduser()
-        if path.is_file():
-            path = path.parent
+        path = recording_folder(directory)
         if not path.is_dir():
             self._status(f"{path} is not a folder.")
             QMessageBox.warning(self, APP_TITLE, f"{path} is not a folder.")
@@ -1080,10 +1122,38 @@ class ConfigEditorWindow(QMainWindow):
                 str(self.config_path) if has_config
                 else f"{self._directory} — no {cfgmod.CONFIG_FILENAME} yet; "
                      f"Save writes one holding about: alone.")
+        self._note_config_in_data(has_config)
         self.about_form.setEnabled(not self._blocked)
         self.save_button.setEnabled(not self._blocked)
         self._refresh_dirty()
         return not self._blocked
+
+    def _note_config_in_data(self, has_config: bool) -> None:
+        """Say so when ``data/`` holds a ``survival_config.yaml``: nothing
+        reads a config there. With none at the root yet, its About is shown
+        as an edit, so Save puts it where it belongs. The copy in ``data/``
+        is never changed or removed here."""
+        stray = self._directory / "data" / cfgmod.CONFIG_FILENAME
+        self.notice_label.setVisible(False)
+        if not stray.is_file():
+            return
+        where = f"data/{cfgmod.CONFIG_FILENAME}"
+        text = (f"{where} is beside the workbook, where nothing reads a config: "
+                f"this recording's config belongs at its root, "
+                f"{self.config_path}.")
+        if not has_config and not self._blocked:
+            try:
+                section = cfgmod.read_yaml(stray).get(about_mod.ABOUT_KEY)
+            except (OSError, ValueError):
+                section = None
+            if isinstance(section, Mapping) and section:
+                self.about_form.adopt(section)
+                text += (f" Its About is shown here: Save writes it to the root. "
+                         f"Then delete {where}.")
+        else:
+            text += f" The About shown is the root's. Delete {where} once checked."
+        self.notice_label.setText(text)
+        self.notice_label.setVisible(True)
 
     # -- changed on disk -----------------------------------------------------
 

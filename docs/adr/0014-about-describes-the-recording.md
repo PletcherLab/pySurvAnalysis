@@ -119,7 +119,12 @@ that likely, so it is fixed here too.
 - **`pysurv-config <folder>` edits it.** A new app (`apps/config_editor.py`,
   also `pysurvanalysis config`) that opens a recording folder — a workbook at
   its root or in `data/`, or named by `data_file:`, with or without a config —
-  and has two tabs. **About** holds the fields, a 60-character count on the
+  and has two tabs. Given the workbook in `data/`, or `data/` itself, it opens
+  the folder above (`config_editor.recording_folder`, by the loader's own
+  `data/` rule): the loader reads a config at the recording's root only, and
+  an early build saved one beside the workbook. A config found in `data/`
+  is said; with none at the root, its About is shown as an edit so Save
+  writes it there. The copy in `data/` is never changed. **About** holds the fields, a 60-character count on the
   title, `run:` read-only, a kind per factor and a meaning per level, the
   factors and levels being the workbook's. **Design** shows the workbook's
   design read-only: factors and levels, chambers with their sample sizes,

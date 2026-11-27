@@ -180,12 +180,54 @@ def test_the_title_counts_to_sixty(editors, recording):
     assert "61 characters" in window.about_form.checks.text()
 
 
-def test_a_folder_named_by_a_file_inside_it_opens(editors, recording):
-    window = editors(recording / "data" / "R-1.xlsx")
-    assert window.directory == (recording / "data").resolve()
-    window = editors(recording)
+@pytest.mark.parametrize("given", ["data/R-1.xlsx", "data", "."])
+def test_the_workbook_or_its_data_folder_opens_the_recording_folder(editors, recording, given):
+    """The config belongs at the recording's root, beside data/: the loader
+    never reads one inside it."""
+    window = editors(recording / given)
     assert window.directory == recording.resolve()
     assert window.design.data_file is not None
+    window.about_form.title.setText("T")
+    assert window.save()
+    assert cfgmod.config_path(recording).is_file()
+    assert sorted(os.listdir(recording / "data")) == ["R-1.xlsx"]
+    assert window.notice_label.isHidden()
+
+
+def test_a_workbook_at_the_root_opens_its_own_folder(editors, tmp_path):
+    folder = tmp_path / "R-2"
+    write_dlife_workbook(folder / "R-2.xlsx")
+    assert editors(folder / "R-2.xlsx").directory == folder.resolve()
+
+
+def test_a_folder_named_data_is_a_recording_when_its_parent_does_not_read_it(editors, tmp_path):
+    """Its workbook is in its own data/, so its parent's data/ search finds
+    nothing there: it is the recording, not a data/ folder."""
+    folder = tmp_path / "data"
+    write_dlife_workbook(folder / "data" / "run.xlsx")
+    assert editors(folder).directory == folder.resolve()
+
+
+def test_a_config_saved_inside_data_is_brought_to_the_root(editors, recording):
+    """Where an earlier pysurv-config put it when opened on the workbook."""
+    stray = recording / "data" / cfgmod.CONFIG_FILENAME
+    cfgmod.write_yaml(stray, {"about": {"title": "Typed earlier",
+                                        "purpose": "Miglitol and lifespan"}})
+    before = stray.read_bytes()
+    window = editors(recording / "data" / "R-1.xlsx")
+    assert window.directory == recording.resolve()
+    assert not window.notice_label.isHidden()
+    assert "data/survival_config.yaml" in window.notice_label.text()
+    assert "Save writes it to the root" in window.notice_label.text()
+    assert window.about_form.title.text() == "Typed earlier"
+    assert window.is_dirty()
+    assert window.save()
+    assert cfgmod.load_config(recording)["about"] == with_defaults(
+        {"title": "Typed earlier", "purpose": "Miglitol and lifespan"})
+    assert stray.read_bytes() == before                 # never changed here
+    reopened = editors(recording)
+    assert "The About shown is the root's" in reopened.notice_label.text()
+    assert not reopened.is_dirty()
 
 
 def test_a_member_with_no_about_opens_blank_but_for_the_defaults(editors, tmp_path):

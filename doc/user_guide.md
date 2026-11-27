@@ -1266,7 +1266,7 @@ Open a recording folder with:
 uv run pysurv-config path/to/recording
 ```
 
-The folder holds a DLife workbook at its root or in `data/`, or names one with `data_file:`. It does not need a `survival_config.yaml` yet. You can also pass a file inside the folder, or start with no path and use **Open folder…**.
+The folder holds a DLife workbook at its root or in `data/`, or names one with `data_file:`. It does not need a `survival_config.yaml` yet. You can also pass the workbook itself, or start with no path and use **Open folder…**. The recording folder is the one whose root holds the config: given the workbook in `data/`, or the `data/` folder itself, the editor opens the folder above it, because a config inside `data/` is never read. If it finds one there, left by an earlier save, it says so; when the root has no config yet, it shows that copy's About so that **Save** writes it to the root. The copy in `data/` is left for you to delete.
 
 The window has two tabs.
 
